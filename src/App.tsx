@@ -151,10 +151,15 @@ function App() {
     try {
       setLoading(true);
       const pageIndex = Math.max(0, targetPageIndex ?? pdfPageIndex);
-      const result = await invoke<ExtractContentResponse>("get_pdf_text", {
-        filePath,
-        pageIndex,
-      });
+
+      // Use layout-guided paragraph detection when model is loaded
+      const command = modelLoaded ? "get_pdf_paragraphs" : "get_pdf_text";
+      const args: Record<string, unknown> = { filePath, pageIndex };
+      if (modelLoaded) {
+        args.scoreThreshold = scoreThreshold;
+      }
+
+      const result = await invoke<ExtractContentResponse>(command, args);
 
       setPreviewSrc(result.preview_data_url);
       setImageSize({ width: result.width, height: result.height });
@@ -242,9 +247,12 @@ function App() {
       setPdfPageIndex(0);
       setPdfPageCount(0);
 
-      // Only use get_pdf_text for PDFs, if not PDF, it will fail or we can use OCR (not implemented yet).
       if (selected.toLowerCase().endsWith(".pdf")) {
          await loadPdfText(selected, 0);
+         // Also run layout model to populate cache for layout-guided paragraph detection
+         if (modelLoaded) {
+            await runModel(0, selected);
+         }
       } else if (modelLoaded) {
          await runModel(0, selected);
       } else {
@@ -610,7 +618,11 @@ function App() {
                         className="page-arrow page-arrow-left"
                         appearance="subtle"
                         icon={<ChevronLeft24Regular />}
-                        onClick={() => void loadPdfText(documentPath, Math.max(0, pdfPageIndex - 1))}
+                        onClick={async () => {
+                          const newPage = Math.max(0, pdfPageIndex - 1);
+                          await loadPdfText(documentPath, newPage);
+                          if (modelLoaded) await runModel(newPage, documentPath);
+                        }}
                         disabled={!documentPath || loading || pdfPageIndex <= 0}
                         aria-label="上一页"
                       />
@@ -618,7 +630,11 @@ function App() {
                         className="page-arrow page-arrow-right"
                         appearance="subtle"
                         icon={<ChevronRight24Regular />}
-                        onClick={() => void loadPdfText(documentPath, pdfPageIndex + 1)}
+                        onClick={async () => {
+                          const newPage = pdfPageIndex + 1;
+                          await loadPdfText(documentPath, newPage);
+                          if (modelLoaded) await runModel(newPage, documentPath);
+                        }}
                         disabled={!documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
                         aria-label="下一页"
                       />

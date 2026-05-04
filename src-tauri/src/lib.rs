@@ -45,7 +45,7 @@ struct CachedInference {
     pub page_count: u32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct TextSegment {
     pub text: String,
     pub xmin: f32,
@@ -64,6 +64,389 @@ pub struct ExtractContentResponse {
     pub segments: Vec<TextSegment>,
 }
 
+fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSegment>, String> {
+    let bindings = bind_pdfium_with_candidates()?;
+    let pdfium = Pdfium::new(bindings);
+
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+    let page = document
+        .pages()
+        .get(page_index as u16)
+        .map_err(|e| format!("Failed to get page {page_index}: {e}"))?;
+
+    let scale = 1600.0 / page.width().value;
+    let page_height = page.height().value;
+    let mut segments = Vec::new();
+
+    for obj in page.objects().iter() {
+        if let Some(text_obj) = obj.as_text_object() {
+            let text = text_obj.text();
+            if !text.trim().is_empty() {
+                if let Ok(bounds) = text_obj.bounds() {
+                    let mut xmin = bounds.left().value * scale;
+                    let mut xmax = bounds.right().value * scale;
+                    let mut ymin = (page_height - bounds.top().value) * scale;
+                    let mut ymax = (page_height - bounds.bottom().value) * scale;
+
+                    if ymin > ymax {
+                        std::mem::swap(&mut ymin, &mut ymax);
+                    }
+                    if xmin > xmax {
+                        std::mem::swap(&mut xmin, &mut xmax);
+                    }
+
+                    segments.push(TextSegment {
+                        text,
+                        xmin,
+                        ymin,
+                        xmax,
+                        ymax,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(segments)
+}
+
+fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSegment> {
+    if raw_segments.is_empty() {
+        return raw_segments;
+    }
+
+    // Calculate average text height for threshold estimation
+    let heights: Vec<f32> = raw_segments
+        .iter()
+        .map(|s| s.ymax - s.ymin)
+        .filter(|h| *h > 0.0)
+        .collect();
+    let avg_height = if heights.is_empty() {
+        12.0
+    } else {
+        heights.iter().sum::<f32>() / heights.len() as f32
+    };
+
+    let line_tolerance = avg_height * 0.6;
+
+    // Sort: primary by Y-center, secondary by X
+    let mut sorted: Vec<TextSegment> = raw_segments.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let ya = (a.ymin + a.ymax) / 2.0;
+        let yb = (b.ymin + b.ymax) / 2.0;
+        ya.partial_cmp(&yb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.xmin
+                    .partial_cmp(&b.xmin)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+
+    // Group into lines by Y-overlap
+    let mut lines: Vec<Vec<TextSegment>> = Vec::new();
+    for seg in sorted {
+        let seg_cy = (seg.ymin + seg.ymax) / 2.0;
+
+        let match_idx = lines
+            .iter()
+            .enumerate()
+            .rev()
+            .take(6)
+            .find(|(_, line)| {
+                let line_cy = line
+                    .iter()
+                    .map(|s| (s.ymin + s.ymax) / 2.0)
+                    .sum::<f32>()
+                    / line.len() as f32;
+                (seg_cy - line_cy).abs() < line_tolerance
+            })
+            .map(|(i, _)| i);
+
+        if let Some(idx) = match_idx {
+            lines[idx].push(seg);
+        } else {
+            lines.push(vec![seg]);
+        }
+    }
+
+    // For each line, sort by X and merge into a single segment
+    let mut line_segments: Vec<TextSegment> = Vec::new();
+    for mut line in lines {
+        line.sort_by(|a, b| {
+            a.xmin
+                .partial_cmp(&b.xmin)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let merged_text: String = line.iter().map(|s| s.text.as_str()).collect();
+        let xmin = line.iter().map(|s| s.xmin).fold(f32::MAX, f32::min);
+        let xmax = line.iter().map(|s| s.xmax).fold(f32::MIN, f32::max);
+        let ymin = line.iter().map(|s| s.ymin).fold(f32::MAX, f32::min);
+        let ymax = line.iter().map(|s| s.ymax).fold(f32::MIN, f32::max);
+
+        line_segments.push(TextSegment {
+            text: merged_text,
+            xmin,
+            ymin,
+            xmax,
+            ymax,
+        });
+    }
+
+    // Merge consecutive lines into paragraphs based on multiple heuristics
+    if line_segments.len() <= 1 {
+        return line_segments;
+    }
+
+    // Calculate median gap between consecutive lines
+    let mut gaps: Vec<f32> = line_segments
+        .windows(2)
+        .map(|w| w[1].ymin - w[0].ymax)
+        .filter(|g| *g > 0.0)
+        .collect();
+    gaps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let median_gap = if gaps.is_empty() {
+        avg_height * 1.2
+    } else {
+        gaps[gaps.len() / 2]
+    };
+
+    // Paragraph break needs gap > 2x median line spacing
+    let gap_break_threshold = median_gap * 2.0;
+
+    let mut paragraphs: Vec<TextSegment> = Vec::new();
+    let mut current_group: Vec<TextSegment> = Vec::new();
+
+    for seg in line_segments.into_iter() {
+        if current_group.is_empty() {
+            current_group.push(seg);
+            continue;
+        }
+
+        let prev = current_group.last().unwrap();
+        let gap = seg.ymin - prev.ymax;
+
+        // Full-line reference: max width of lines in current group
+        let group_max_width = current_group
+            .iter()
+            .map(|s| s.xmax - s.xmin)
+            .fold(0.0f32, f32::max);
+
+        let prev_width = prev.xmax - prev.xmin;
+        let this_xmin = seg.xmin;
+        let prev_xmin = prev.xmin;
+
+        // Heuristic 1: gap significantly larger than typical line spacing
+        let gap_break = gap > gap_break_threshold;
+
+        // Heuristic 2: previous line is a short last line (ends well before full width)
+        let short_last_line = group_max_width > 0.0
+            && prev_width < group_max_width * 0.55;
+
+        // Heuristic 3: first-line indentation (new paragraph starts further right)
+        let indented_start = this_xmin > prev_xmin + avg_height * 0.8;
+
+        let is_paragraph_break = gap_break || short_last_line || indented_start;
+
+        if !is_paragraph_break {
+            current_group.push(seg);
+        } else {
+            let merged = merge_group(&current_group);
+            paragraphs.push(merged);
+            current_group = vec![seg];
+        }
+    }
+
+    if !current_group.is_empty() {
+        let merged = merge_group(&current_group);
+        paragraphs.push(merged);
+    }
+
+    paragraphs
+}
+
+fn merge_group(group: &[TextSegment]) -> TextSegment {
+    let text: String = group
+        .iter()
+        .map(|s| s.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let xmin = group.iter().map(|s| s.xmin).fold(f32::MAX, f32::min);
+    let xmax = group.iter().map(|s| s.xmax).fold(f32::MIN, f32::max);
+    let ymin = group.iter().map(|s| s.ymin).fold(f32::MAX, f32::min);
+    let ymax = group.iter().map(|s| s.ymax).fold(f32::MIN, f32::max);
+    TextSegment {
+        text,
+        xmin,
+        ymin,
+        xmax,
+        ymax,
+    }
+}
+
+fn merge_segments_with_layout(
+    raw_segments: Vec<TextSegment>,
+    layout_boxes: &[LayoutBox],
+) -> Vec<TextSegment> {
+    // Collect text-region layout boxes (cls_id 0=title, 1=text), sorted by read_order
+    let mut text_boxes: Vec<&LayoutBox> = layout_boxes
+        .iter()
+        .filter(|b| b.cls_id == 0 || b.cls_id == 1)
+        .collect();
+    text_boxes.sort_by_key(|b| b.read_order);
+
+    if text_boxes.is_empty() {
+        return merge_segments_into_paragraphs(raw_segments);
+    }
+
+    let mut result: Vec<TextSegment> = Vec::new();
+    let mut assigned: HashSet<usize> = HashSet::new();
+
+    for tb in &text_boxes {
+        // Collect all raw text segments whose center falls within this layout box
+        let mut region_segs: Vec<TextSegment> = Vec::new();
+        for (i, seg) in raw_segments.iter().enumerate() {
+            if assigned.contains(&i) {
+                continue;
+            }
+            let cx = (seg.xmin + seg.xmax) / 2.0;
+            let cy = (seg.ymin + seg.ymax) / 2.0;
+            if cx >= tb.xmin && cx <= tb.xmax && cy >= tb.ymin && cy <= tb.ymax {
+                region_segs.push(seg.clone());
+                assigned.insert(i);
+            }
+        }
+
+        if region_segs.is_empty() {
+            continue;
+        }
+
+        // Sort by Y then X for correct reading order
+        region_segs.sort_by(|a, b| {
+            let ya = (a.ymin + a.ymax) / 2.0;
+            let yb = (b.ymin + b.ymax) / 2.0;
+            ya.partial_cmp(&yb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    a.xmin
+                        .partial_cmp(&b.xmin)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+
+        // Merge all text in this layout box into one paragraph segment
+        let text: String = region_segs.iter().map(|s| s.text.as_str()).collect();
+        result.push(TextSegment {
+            text,
+            xmin: tb.xmin,
+            ymin: tb.ymin,
+            xmax: tb.xmax,
+            ymax: tb.ymax,
+        });
+    }
+
+    // Handle unassigned segments (outside any text layout box)
+    let unassigned: Vec<TextSegment> = raw_segments
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !assigned.contains(i))
+        .map(|(_, s)| s.clone())
+        .collect();
+
+    if !unassigned.is_empty() {
+        let paragraphs = merge_segments_into_paragraphs(unassigned);
+        result.extend(paragraphs);
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn get_pdf_paragraphs(
+    file_path: String,
+    page_index: u32,
+    score_threshold: Option<f32>,
+    state: State<'_, ModelState>,
+) -> Result<ExtractContentResponse, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
+    let (image, actual_page_index, page_count) = render_pdf_page(path, page_index)?;
+    let preview_data_url = image_to_data_url(&image)?;
+    let raw_segments = extract_raw_text_segments(path, actual_page_index)?;
+
+    let cache_key = make_cache_key(&file_path, actual_page_index, threshold);
+    let cached_boxes = {
+        let cache = state.inference_cache.lock().unwrap();
+        cache.get(&cache_key).map(|e| e.boxes.clone())
+    };
+
+    let layout_boxes = if let Some(boxes) = cached_boxes {
+        Some(boxes)
+    } else {
+        // Run layout inference now so we get model-guided paragraph regions
+        let mut session_guard = state.session.lock().unwrap();
+        if let Some(ref mut session) = *session_guard {
+            match infer_layout_boxes(session, &image, threshold) {
+                Ok(boxes) => {
+                    drop(session_guard);
+                    let entry = CachedInference {
+                        boxes: boxes.clone(),
+                        width: image.width(),
+                        height: image.height(),
+                        source_type: "pdf".to_string(),
+                        page_count,
+                    };
+                    state.inference_cache.lock().unwrap().insert(cache_key, entry);
+                    Some(boxes)
+                }
+                Err(_) => {
+                    drop(session_guard);
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    let segments = if let Some(ref boxes) = layout_boxes {
+        merge_segments_with_layout(raw_segments, boxes)
+    } else {
+        merge_segments_into_paragraphs(raw_segments)
+    };
+
+    // Trigger prefetch for other pages in background
+    if page_count > 1 {
+        spawn_prefetch_for_pdf(
+            file_path.clone(),
+            page_count,
+            actual_page_index,
+            threshold,
+            state.session.clone(),
+            state.inference_cache.clone(),
+            state.prefetch_tasks.clone(),
+        );
+    }
+
+    Ok(ExtractContentResponse {
+        width: image.width(),
+        height: image.height(),
+        preview_data_url,
+        page_index: actual_page_index,
+        page_count,
+        segments,
+    })
+}
+
 #[tauri::command]
 async fn get_pdf_text(
     file_path: String,
@@ -76,50 +459,8 @@ async fn get_pdf_text(
 
     let (image, actual_page_index, page_count) = render_pdf_page(path, page_index)?;
     let preview_data_url = image_to_data_url(&image)?;
-    let mut segments = Vec::new();
-    let mut native_width = 1.0;
-    
-    // Now extract texts with explicit scope
-    {
-        let bindings = bind_pdfium_with_candidates()?;
-        let pdfium = Pdfium::new(bindings);
-        
-        let result = pdfium.load_pdf_from_file(path, None);
-        if let Ok(document) = result {
-            if let Ok(page) = document.pages().get(actual_page_index as u16) {
-                native_width = page.width().value;
-                let scale = 1600.0 / native_width; 
-
-                for obj in page.objects().iter() {
-                    if let Some(text_obj) = obj.as_text_object() {
-                        let text = text_obj.text();
-                        if !text.trim().is_empty() {
-                            if let Ok(bounds) = text_obj.bounds() {
-                                let page_height = page.height().value;
-                                
-                                let mut xmin = bounds.left().value * scale;
-                                let mut xmax = bounds.right().value * scale;
-                                
-                                let mut ymin = (page_height - bounds.top().value) * scale;
-                                let mut ymax = (page_height - bounds.bottom().value) * scale;
-                                
-                                if ymin > ymax { std::mem::swap(&mut ymin, &mut ymax); }
-                                if xmin > xmax { std::mem::swap(&mut xmin, &mut xmax); }
-
-                                segments.push(TextSegment {
-                                    text,
-                                    xmin,
-                                    ymin,
-                                    xmax,
-                                    ymax,
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let raw_segments = extract_raw_text_segments(path, actual_page_index)?;
+    let segments = merge_segments_into_paragraphs(raw_segments);
 
     Ok(ExtractContentResponse {
         width: image.width(),
@@ -523,7 +864,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_model, run_doclayout, get_pdf_text])
+        .invoke_handler(tauri::generate_handler![load_model, run_doclayout, get_pdf_text, get_pdf_paragraphs])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
