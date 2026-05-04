@@ -29,6 +29,23 @@ interface LayoutBox {
   read_order: number;
 }
 
+interface TextSegment {
+  text: string;
+  xmin: number;
+  ymin: number;
+  xmax: number;
+  ymax: number;
+}
+
+interface ExtractContentResponse {
+  width: number;
+  height: number;
+  preview_data_url: string;
+  page_index: number;
+  page_count: number;
+  segments: TextSegment[];
+}
+
 interface DetectionResponse {
   width: number;
   height: number;
@@ -66,7 +83,7 @@ const COLORS = [
   "#2C99A8",
 ];
 
-type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual";
+type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type TopMenuKey = "file" | "settings" | "help" | null;
 
 const STORAGE_KEYS = {
@@ -80,6 +97,10 @@ function App() {
   const [documentPath, setDocumentPath] = useState("");
   const [previewSrc, setPreviewSrc] = useState("");
   const [boxes, setBoxes] = useState<LayoutBox[]>([]);
+  const [segments, setSegments] = useState<TextSegment[]>([]);
+  const [selectedParagraph, setSelectedParagraph] = useState<TextSegment | null>(null);
+  const [selectedWords, setSelectedWords] = useState<string>("");
+  const [aiResult, setAiResult] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [scoreThreshold, setScoreThreshold] = useState(0.5);
@@ -89,10 +110,17 @@ function App() {
   const [pdfPageIndex, setPdfPageIndex] = useState(0);
   const [pdfPageCount, setPdfPageCount] = useState(0);
   const [zoomMode, setZoomMode] = useState<ZoomMode>("fit_page");
+  const [customScale, setCustomScale] = useState(1);
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
+
+  // Resize state
+  const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
+  const [topPaneHeight, setTopPaneHeight] = useState<number | string>("50%");
 
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
+  const mainLayoutRef = useRef<HTMLDivElement>(null);
+  const rightPaneRef = useRef<HTMLDivElement>(null);
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
 
@@ -115,6 +143,31 @@ function App() {
       } finally {
         setLoading(false);
       }
+    }
+  };
+
+  const loadPdfText = async (filePath: string, targetPageIndex?: number) => {
+    setErrorMessage("");
+    try {
+      setLoading(true);
+      const pageIndex = Math.max(0, targetPageIndex ?? pdfPageIndex);
+      const result = await invoke<ExtractContentResponse>("get_pdf_text", {
+        filePath,
+        pageIndex,
+      });
+
+      setPreviewSrc(result.preview_data_url);
+      setImageSize({ width: result.width, height: result.height });
+      setPdfPageIndex(result.page_index);
+      setPdfPageCount(result.page_count);
+      setSegments(result.segments);
+      setSelectedParagraph(null);
+      setSelectedWords("");
+      setAiResult("");
+    } catch (e) {
+      setErrorMessage(`解析文字失败: ${String(e)}`);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -151,6 +204,10 @@ function App() {
     setDocumentPath("");
     setPreviewSrc("");
     setBoxes([]);
+    setSegments([]);
+    setSelectedParagraph(null);
+    setSelectedWords("");
+    setAiResult("");
     setImageSize({ width: 0, height: 0 });
     setDisplaySize({ width: 0, height: 0 });
     setPdfPageIndex(0);
@@ -176,17 +233,23 @@ function App() {
       setDocumentPath(selected);
       setPreviewSrc("");
       setBoxes([]);
+      setSegments([]);
+      setSelectedParagraph(null);
+      setSelectedWords("");
+      setAiResult("");
       setImageSize({ width: 0, height: 0 });
       setDisplaySize({ width: 0, height: 0 });
       setPdfPageIndex(0);
       setPdfPageCount(0);
 
-      if (!modelLoaded) {
-        setErrorMessage("请先在菜单栏的“设置 > ONNX 模型”中加载模型");
-        return;
+      // Only use get_pdf_text for PDFs, if not PDF, it will fail or we can use OCR (not implemented yet).
+      if (selected.toLowerCase().endsWith(".pdf")) {
+         await loadPdfText(selected, 0);
+      } else if (modelLoaded) {
+         await runModel(0, selected);
+      } else {
+         setErrorMessage("请先在菜单栏的“设置 > ONNX 模型”中加载模型");
       }
-
-      await runModel(0, selected);
     }
   };
 
@@ -211,7 +274,7 @@ function App() {
       }
 
       const savedZoom = window.localStorage.getItem(STORAGE_KEYS.zoomMode) as ZoomMode | null;
-      if (savedZoom && ["fit_page", "fit_width", "fit_height", "actual"].includes(savedZoom)) {
+      if (savedZoom && ["fit_page", "fit_width", "fit_height", "actual", "custom"].includes(savedZoom)) {
         setZoomMode(savedZoom);
       }
 
@@ -282,7 +345,48 @@ function App() {
 
     updateDisplaySize();
     return () => observer.disconnect();
-  }, [previewSrc, zoomMode]);
+  }, [previewSrc, zoomMode, customScale]);
+
+  const zoomModeRef = useRef(zoomMode);
+  const customScaleRef = useRef(customScale);
+  const currentVisScaleRef = useRef(1);
+
+  useEffect(() => { zoomModeRef.current = zoomMode; }, [zoomMode]);
+  useEffect(() => { customScaleRef.current = customScale; }, [customScale]);
+
+  useEffect(() => {
+    if (imageSize.width > 0 && displaySize.width > 0) {
+      // Calculate what internal scale is mapped equivalent currently giving the display vs natural size
+      currentVisScaleRef.current = displaySize.width / imageSize.width;
+    }
+  }, [displaySize.width, imageSize.width]);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    
+    const handleWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) {
+        e.preventDefault(); 
+        const delta = e.deltaY > 0 ? -0.15 : 0.15;
+        const factor = 1 + delta;
+
+        setZoomMode("custom");
+
+        setCustomScale((prevScale) => {
+          let baseScale = prevScale;
+          if (zoomModeRef.current !== "custom") {
+            baseScale = currentVisScaleRef.current || 1;
+            zoomModeRef.current = "custom"; // 马上同步防止下一次事件跳档
+          }
+          return Math.max(0.1, Math.min(baseScale * factor, 8.0));
+        });
+      }
+    };
+
+    stage.addEventListener("wheel", handleWheel, { passive: false });
+    return () => stage.removeEventListener("wheel", handleWheel);
+  }, []);
 
   const scale = useMemo(() => {
     if (imageSize.width === 0 || imageSize.height === 0) {
@@ -295,6 +399,9 @@ function App() {
   }, [displaySize.height, displaySize.width, imageSize.height, imageSize.width]);
 
   const imageWrapSx = useMemo(() => {
+    if (zoomMode === "custom") {
+      return { width: imageSize.width * customScale, height: imageSize.height * customScale } as const;
+    }
     if (zoomMode === "fit_width") {
       return { width: "100%" } as const;
     }
@@ -305,6 +412,9 @@ function App() {
   }, [zoomMode]);
 
   const previewImageSx = useMemo(() => {
+    if (zoomMode === "custom") {
+      return { width: imageSize.width * customScale, height: imageSize.height * customScale, maxWidth: "none", maxHeight: "none" } as const;
+    }
     if (zoomMode === "fit_width") {
       return { width: "100%", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
     }
@@ -316,6 +426,83 @@ function App() {
     }
     return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
   }, [zoomMode]);
+
+  const requestAiDescription = async (text: string) => {
+    if (!text.trim()) {
+      setAiResult("");
+      return;
+    }
+    setSelectedWords(text);
+    setAiResult("正在请求 AI 进行解读...\n（这是模拟结果，需要接下来接入真实的 LLM 服务如 Tauri backend 的 fetch）");
+    setLoading(true);
+    setTimeout(() => {
+      setLoading(false);
+      setAiResult(`【AI 解读功能】: ${text}\n\n该文本是通过您刚刚点击/圈选选中的段落。这里占位以便接入任何基于 Tauri backend 或者浏览器直接发出 API Fetch 的大模型提供服务。此功能将在后续由您进行扩展使用！`);
+    }, 1500);
+  };
+
+  const handleTextSelection = () => {
+    const selection = window.getSelection();
+    if (selection && selection.toString().trim()) {
+      requestAiDescription(selection.toString().trim());
+    }
+  };
+
+  const segmentedParagraph = useMemo(() => {
+    if (!selectedParagraph?.text) return [];
+    try {
+      const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+      return Array.from(segmenter.segment(selectedParagraph.text)).map((s) => s.segment);
+    } catch {
+      return selectedParagraph.text.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
+    }
+  }, [selectedParagraph?.text]);
+
+  const handleMouseDownV = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const target = e.currentTarget as HTMLElement;
+    const prevSibling = target.previousElementSibling as HTMLElement;
+    const startWidth = prevSibling?.offsetWidth || 0;
+    
+    const onMouseMove = (moveEvent: MouseEvent) => {
+       const delta = moveEvent.clientX - startX;
+       if (startWidth > 0) {
+         setLeftPaneWidth(`${Math.max(200, startWidth + delta)}px`);
+       }
+    };
+    
+    const onMouseUp = () => {
+       document.removeEventListener("mousemove", onMouseMove);
+       document.removeEventListener("mouseup", onMouseUp);
+    };
+    
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
+  const handleMouseDownH = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const target = e.currentTarget as HTMLElement;
+    const prevSibling = target.previousElementSibling as HTMLElement;
+    const startHeight = prevSibling?.offsetHeight || 0;
+    
+    const onMouseMove = (moveEvent: MouseEvent) => {
+       const delta = moveEvent.clientY - startY;
+       if (startHeight > 0) {
+         setTopPaneHeight(`${Math.max(100, startHeight + delta)}px`);
+       }
+    };
+    
+    const onMouseUp = () => {
+       document.removeEventListener("mousemove", onMouseMove);
+       document.removeEventListener("mouseup", onMouseUp);
+    };
+    
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
 
   return (
     <div className="app-root">
@@ -401,107 +588,189 @@ function App() {
         </div>
 
         <Card className="panel-card visual-card">
-          <div className="card-body visual-body">
-            {errorMessage && (
-              <MessageBar intent="error" className="error-bar">
-                <MessageBarBody>{errorMessage}</MessageBarBody>
-              </MessageBar>
-            )}
+          <div className="main-layout" ref={mainLayoutRef}>
+            <div className="pdf-pane" style={{ 
+              width: leftPaneWidth, 
+              flex: typeof leftPaneWidth === "string" ? `0 0 ${leftPaneWidth}` : "none" 
+            }}>
+              <div className="visual-body">
+                {errorMessage && (
+                  <MessageBar intent="error" className="error-bar">
+                    <MessageBarBody>{errorMessage}</MessageBarBody>
+                  </MessageBar>
+                )}
 
-            <div
-              ref={stageRef}
-              className={`visual-stage ${zoomMode === "fit_height" ? "visual-stage-fit-height" : ""} ${!previewSrc ? "visual-stage-empty" : ""}`}
-            >
-              {isPdfSelected && (
-                <>
-                  <Button
-                    className="page-arrow page-arrow-left"
-                    appearance="subtle"
-                    icon={<ChevronLeft24Regular />}
-                    onClick={() => void runModel(Math.max(0, pdfPageIndex - 1))}
-                    disabled={!modelLoaded || !documentPath || loading || pdfPageIndex <= 0}
-                    aria-label="上一页"
-                  />
-                  <Button
-                    className="page-arrow page-arrow-right"
-                    appearance="subtle"
-                    icon={<ChevronRight24Regular />}
-                    onClick={() => void runModel(pdfPageIndex + 1)}
-                    disabled={!modelLoaded || !documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
-                    aria-label="下一页"
-                  />
-                </>
-              )}
+                <div
+                  ref={stageRef}
+                  className={`visual-stage ${zoomMode === "fit_height" ? "visual-stage-fit-height" : ""} ${!previewSrc ? "visual-stage-empty" : ""}`}
+                >
+                  {isPdfSelected && (
+                    <>
+                      <Button
+                        className="page-arrow page-arrow-left"
+                        appearance="subtle"
+                        icon={<ChevronLeft24Regular />}
+                        onClick={() => void loadPdfText(documentPath, Math.max(0, pdfPageIndex - 1))}
+                        disabled={!documentPath || loading || pdfPageIndex <= 0}
+                        aria-label="上一页"
+                      />
+                      <Button
+                        className="page-arrow page-arrow-right"
+                        appearance="subtle"
+                        icon={<ChevronRight24Regular />}
+                        onClick={() => void loadPdfText(documentPath, pdfPageIndex + 1)}
+                        disabled={!documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
+                        aria-label="下一页"
+                      />
+                    </>
+                  )}
 
-              {previewSrc ? (
-                <div className="image-wrap" style={imageWrapSx}>
-                  <img
-                    ref={imgRef}
-                    src={previewSrc}
-                    alt="Document Preview"
-                    className="preview-image"
-                    style={previewImageSx}
-                    onLoad={() => {
-                      if (imgRef.current) {
-                        setDisplaySize({
-                          width: imgRef.current.clientWidth,
-                          height: imgRef.current.clientHeight,
-                        });
-                      }
-                    }}
-                  />
+                  {previewSrc ? (
+                    <div className="image-wrap" style={imageWrapSx}>
+                      <img
+                        ref={imgRef}
+                        src={previewSrc}
+                        alt="Document Preview"
+                        className="preview-image"
+                        style={previewImageSx}
+                        onLoad={() => {
+                          if (imgRef.current) {
+                            setDisplaySize({
+                              width: imgRef.current.clientWidth,
+                              height: imgRef.current.clientHeight,
+                            });
+                          }
+                        }}
+                      />
 
-                  <div className="overlay-layer" style={{ width: displaySize.width, height: displaySize.height }}>
-                    {boxes.map((box, idx) => {
-                      const color = COLORS[box.cls_id % COLORS.length];
-                      const left = Math.max(0, box.xmin * scale.x);
-                      const top = Math.max(0, box.ymin * scale.y);
-                      const width = Math.max(1, (box.xmax - box.xmin) * scale.x);
-                      const height = Math.max(1, (box.ymax - box.ymin) * scale.y);
-                      const label = `${CLASSES[box.cls_id] ?? `class_${box.cls_id}`}  #${box.read_order}  ${box.score.toFixed(2)}`;
+                      <div className="overlay-layer" style={{ width: displaySize.width, height: displaySize.height }}>
+                        {segments.map((seg, idx) => {
+                          const left = Math.max(0, seg.xmin * scale.x);
+                          const top = Math.max(0, seg.ymin * scale.y);
+                          const width = Math.max(1, (seg.xmax - seg.xmin) * scale.x);
+                          const height = Math.max(1, (seg.ymax - seg.ymin) * scale.y);
 
-                      return (
-                        <div key={`${box.cls_id}-${box.read_order}-${idx}`}>
-                          <div
-                            className="bbox"
-                            style={{
-                              borderColor: color,
-                              left,
-                              top,
-                              width,
-                              height,
-                            }}
-                          />
-                          <div
-                            className="bbox-label"
-                            style={{
-                              backgroundColor: color,
-                              left,
-                              top: Math.max(0, top - 22),
-                            }}
-                          >
-                            {label}
-                          </div>
-                        </div>
-                      );
-                    })}
+                          const isSelected = selectedParagraph === seg;
+                          return (
+                            <div
+                              key={`text-${idx}`}
+                              className="bbox"
+                              style={{
+                                left,
+                                top,
+                                width,
+                                height,
+                                borderColor: isSelected ? "#00D4BB" : "transparent",
+                                backgroundColor: isSelected ? "rgba(0, 212, 187, 0.2)" : "rgba(255,255,255,0)",
+                                cursor: "pointer",
+                                pointerEvents: "auto",
+                              }}
+                              onClick={() => setSelectedParagraph(seg)}
+                              onMouseEnter={(e) => {
+                                if (selectedParagraph !== seg) {
+                                  e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
+                                }
+                              }}
+                              onMouseLeave={(e) => {
+                                if (selectedParagraph !== seg) {
+                                  e.currentTarget.style.backgroundColor = "transparent";
+                                }
+                              }}
+                            />
+                          );
+                        })}
+
+                        {boxes.map((box, idx) => {
+                          const color = COLORS[box.cls_id % COLORS.length];
+                          const left = Math.max(0, box.xmin * scale.x);
+                          const top = Math.max(0, box.ymin * scale.y);
+                          const width = Math.max(1, (box.xmax - box.xmin) * scale.x);
+                          const height = Math.max(1, (box.ymax - box.ymin) * scale.y);
+                          const label = `${CLASSES[box.cls_id] ?? `class_${box.cls_id}`}  #${box.read_order}  ${box.score.toFixed(2)}`;
+
+                          return (
+                            <div key={`${box.cls_id}-${box.read_order}-${idx}`}>
+                              <div
+                                className="bbox"
+                                style={{
+                                  borderColor: color,
+                                  left,
+                                  top,
+                                  width,
+                                  height,
+                                }}
+                              />
+                              <div
+                                className="bbox-label"
+                                style={{
+                                  backgroundColor: color,
+                                  left,
+                                  top: Math.max(0, top - 22),
+                                }}
+                              >
+                                {label}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="empty-state">
+                      <Button className="empty-open-btn" appearance="primary" onClick={() => void selectDocument()} disabled={loading}>
+                        选择文件
+                      </Button>
+                      <Text className="empty-hint">请选择 PDF 或图片开始</Text>
+                    </div>
+                  )}
+                </div>
+
+                {isPdfSelected && (
+                  <div className="page-indicator-bottom">
+                    <Text>{pdfPageCount > 0 ? `第 ${pdfPageIndex + 1} / ${pdfPageCount} 页` : "页数未加载"}</Text>
                   </div>
-                </div>
-              ) : (
-                <div className="empty-state">
-                  <Button className="empty-open-btn" appearance="primary" onClick={() => void selectDocument()} disabled={loading}>
-                    选择文件
-                  </Button>
-                  <Text className="empty-hint">请选择 PDF 或图片开始识别</Text>
-                </div>
-              )}
+                )}
+              </div>
             </div>
 
-            {isPdfSelected && (
-              <div className="page-indicator-bottom">
-                <Text>{pdfPageCount > 0 ? `第 ${pdfPageIndex + 1} / ${pdfPageCount} 页` : "页数未加载"}</Text>
+            <div className="resizer-v" onMouseDown={handleMouseDownV} />
+
+            <div className="right-pane" ref={rightPaneRef}>
+              <div className="text-pane" onMouseUp={handleTextSelection} style={{ 
+                height: topPaneHeight, 
+                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none" 
+              }}>
+                <h3>选取段落及分词区域</h3>
+                {selectedParagraph ? (
+                  <div style={{ wordBreak: "break-all" }}>
+                    {segmentedParagraph.map((word, idx) => (
+                      <span
+                        key={idx}
+                        className="word-span"
+                        onClick={(e) => {
+                          // prevent triggering if user is dragging selection
+                          if (window.getSelection()?.toString() !== "") return;
+                          requestAiDescription(word);
+                        }}
+                      >
+                        {word}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ opacity: 0.5 }}>（请在左侧预览中点击选中需要阅读的段落块）</div>
+                )}
               </div>
-            )}
+
+              <div className="resizer-h" onMouseDown={handleMouseDownH} />
+
+              <div className="ai-pane">
+                <h3>已选中文字：{selectedWords ? `"${selectedWords}"` : "无"}</h3>
+                <div style={{ whiteSpace: "pre-wrap", color: "#ccc" }}>
+                  {aiResult || "（请在上方文字区域点击单词或拖拽选中文本，AI 解读内容将出现在此处）"}
+                </div>
+              </div>
+            </div>
           </div>
         </Card>
       </div>

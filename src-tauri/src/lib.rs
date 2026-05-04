@@ -45,6 +45,92 @@ struct CachedInference {
     pub page_count: u32,
 }
 
+#[derive(Serialize)]
+pub struct TextSegment {
+    pub text: String,
+    pub xmin: f32,
+    pub ymin: f32,
+    pub xmax: f32,
+    pub ymax: f32,
+}
+
+#[derive(Serialize)]
+pub struct ExtractContentResponse {
+    pub width: u32,
+    pub height: u32,
+    pub preview_data_url: String,
+    pub page_index: u32,
+    pub page_count: u32,
+    pub segments: Vec<TextSegment>,
+}
+
+#[tauri::command]
+async fn get_pdf_text(
+    file_path: String,
+    page_index: u32,
+) -> Result<ExtractContentResponse, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let (image, actual_page_index, page_count) = render_pdf_page(path, page_index)?;
+    let preview_data_url = image_to_data_url(&image)?;
+    let mut segments = Vec::new();
+    let mut native_width = 1.0;
+    
+    // Now extract texts with explicit scope
+    {
+        let bindings = bind_pdfium_with_candidates()?;
+        let pdfium = Pdfium::new(bindings);
+        
+        let result = pdfium.load_pdf_from_file(path, None);
+        if let Ok(document) = result {
+            if let Ok(page) = document.pages().get(actual_page_index as u16) {
+                native_width = page.width().value;
+                let scale = 1600.0 / native_width; 
+
+                for obj in page.objects().iter() {
+                    if let Some(text_obj) = obj.as_text_object() {
+                        let text = text_obj.text();
+                        if !text.trim().is_empty() {
+                            if let Ok(bounds) = text_obj.bounds() {
+                                let page_height = page.height().value;
+                                
+                                let mut xmin = bounds.left().value * scale;
+                                let mut xmax = bounds.right().value * scale;
+                                
+                                let mut ymin = (page_height - bounds.top().value) * scale;
+                                let mut ymax = (page_height - bounds.bottom().value) * scale;
+                                
+                                if ymin > ymax { std::mem::swap(&mut ymin, &mut ymax); }
+                                if xmin > xmax { std::mem::swap(&mut xmin, &mut xmax); }
+
+                                segments.push(TextSegment {
+                                    text,
+                                    xmin,
+                                    ymin,
+                                    xmax,
+                                    ymax,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ExtractContentResponse {
+        width: image.width(),
+        height: image.height(),
+        preview_data_url,
+        page_index: actual_page_index,
+        page_count,
+        segments,
+    })
+}
+
 pub struct ModelState {
     session: Arc<Mutex<Option<Session>>>,
     inference_cache: Arc<Mutex<HashMap<String, CachedInference>>>,
@@ -437,7 +523,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_model, run_doclayout])
+        .invoke_handler(tauri::generate_handler![load_model, run_doclayout, get_pdf_text])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

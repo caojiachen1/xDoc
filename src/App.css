@@ -89,10 +89,117 @@
   box-sizing: border-box;
 }
 
+.main-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.pdf-pane {
+  flex: none;
+  min-width: 300px;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.resizer-v {
+  flex: none;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  cursor: col-resize;
+  position: relative;
+  z-index: 10;
+}
+
+.resizer-v::after {
+  content: '';
+  position: absolute;
+  top: 0; bottom: 0; left: -4px; right: -4px;
+  cursor: col-resize;
+}
+
+.resizer-v:hover,
+.resizer-v:active {
+  background: rgba(0, 212, 187, 0.8);
+}
+
+.right-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 250px;
+  background: rgba(35, 35, 35, 0.95);
+  box-sizing: border-box;
+}
+
+.text-pane {
+  flex: none;
+  min-height: 100px;
+  padding: 16px;
+  overflow: auto;
+  font-size: 15px;
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+
+.resizer-h {
+  flex: none;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  cursor: row-resize;
+  position: relative;
+  z-index: 10;
+}
+
+.resizer-h::after {
+  content: '';
+  position: absolute;
+  left: 0; right: 0; top: -4px; bottom: -4px;
+  cursor: row-resize;
+}
+
+.resizer-h:hover,
+.resizer-h:active {
+  background: rgba(0, 212, 187, 0.8);
+}
+
+.text-pane h3 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  font-size: 16px;
+  color: #fff;
+}
+
+.ai-pane {
+  flex: 1;
+  padding: 16px;
+  overflow: auto;
+}
+
+.ai-pane h3 {
+  margin-top: 0;
+  margin-bottom: 12px;
+  font-size: 16px;
+  color: #fff;
+}
+
+.word-span {
+  cursor: pointer;
+  padding: 2px 0;
+  border-radius: 2px;
+  transition: background-color 0.15s;
+}
+
+.word-span:hover {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
 .visual-body {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  height: 100%;
 }
 
 .error-bar {
