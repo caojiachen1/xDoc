@@ -459,8 +459,10 @@ function App() {
   const segmentedParagraph = useMemo(() => {
     if (!selectedParagraph?.text) return [];
     try {
+      // @ts-ignore
       const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-      return Array.from(segmenter.segment(selectedParagraph.text)).map((s) => s.segment);
+      // @ts-ignore
+      return Array.from(segmenter.segment(selectedParagraph.text)).map((s: any) => s.segment);
     } catch {
       return selectedParagraph.text.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
     }
@@ -608,39 +610,39 @@ function App() {
                   </MessageBar>
                 )}
 
+                {isPdfSelected && previewSrc && (
+                  <>
+                    <Button
+                      className="page-arrow page-arrow-left"
+                      appearance="subtle"
+                      icon={<ChevronLeft24Regular />}
+                      onClick={async () => {
+                        const newPage = Math.max(0, pdfPageIndex - 1);
+                        await loadPdfText(documentPath, newPage);
+                        if (modelLoaded) await runModel(newPage, documentPath);
+                      }}
+                      disabled={!documentPath || loading || pdfPageIndex <= 0}
+                      aria-label="上一页"
+                    />
+                    <Button
+                      className="page-arrow page-arrow-right"
+                      appearance="subtle"
+                      icon={<ChevronRight24Regular />}
+                      onClick={async () => {
+                        const newPage = pdfPageIndex + 1;
+                        await loadPdfText(documentPath, newPage);
+                        if (modelLoaded) await runModel(newPage, documentPath);
+                      }}
+                      disabled={!documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
+                      aria-label="下一页"
+                    />
+                  </>
+                )}
+
                 <div
                   ref={stageRef}
                   className={`visual-stage ${zoomMode === "fit_height" ? "visual-stage-fit-height" : ""} ${!previewSrc ? "visual-stage-empty" : ""}`}
                 >
-                  {isPdfSelected && (
-                    <>
-                      <Button
-                        className="page-arrow page-arrow-left"
-                        appearance="subtle"
-                        icon={<ChevronLeft24Regular />}
-                        onClick={async () => {
-                          const newPage = Math.max(0, pdfPageIndex - 1);
-                          await loadPdfText(documentPath, newPage);
-                          if (modelLoaded) await runModel(newPage, documentPath);
-                        }}
-                        disabled={!documentPath || loading || pdfPageIndex <= 0}
-                        aria-label="上一页"
-                      />
-                      <Button
-                        className="page-arrow page-arrow-right"
-                        appearance="subtle"
-                        icon={<ChevronRight24Regular />}
-                        onClick={async () => {
-                          const newPage = pdfPageIndex + 1;
-                          await loadPdfText(documentPath, newPage);
-                          if (modelLoaded) await runModel(newPage, documentPath);
-                        }}
-                        disabled={!documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
-                        aria-label="下一页"
-                      />
-                    </>
-                  )}
-
                   {previewSrc ? (
                     <div className="image-wrap" style={imageWrapSx}>
                       <img
@@ -763,7 +765,7 @@ function App() {
                       <span
                         key={idx}
                         className="word-span"
-                        onClick={(e) => {
+                        onClick={() => {
                           // prevent triggering if user is dragging selection
                           if (window.getSelection()?.toString() !== "") return;
                           requestAiDescription(word);
