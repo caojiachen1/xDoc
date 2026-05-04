@@ -81,7 +81,12 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
     let page_height = page.height().value;
     let mut segments = Vec::new();
 
-    for obj in page.objects().iter() {
+    eprintln!(
+        "[DEBUG extract_raw] page={} page_width={:.1} page_height={:.1} scale={:.3}",
+        page_index, page.width().value, page_height, scale
+    );
+
+    for (obj_idx, obj) in page.objects().iter().enumerate() {
         if let Some(text_obj) = obj.as_text_object() {
             let text = text_obj.text();
 
@@ -99,6 +104,15 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
                         std::mem::swap(&mut xmin, &mut xmax);
                     }
 
+                    let truncated: String = text.chars().take(50).collect();
+                    eprintln!(
+                        "[DEBUG extract_raw] obj#{:04} x=[{:.0},{:.0}] y=[{:.0},{:.0}] w={:.0} h={:.0} text=\"{}\"",
+                        obj_idx,
+                        xmin, xmax, ymin, ymax,
+                        xmax - xmin, ymax - ymin,
+                        truncated
+                    );
+
                     segments.push(TextSegment {
                         text,
                         xmin,
@@ -110,6 +124,11 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
             }
         }
     }
+
+    eprintln!(
+        "[DEBUG extract_raw] total_raw_segments={}",
+        segments.len()
+    );
 
     Ok(segments)
 }
@@ -128,10 +147,21 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     let avg_height = if heights.is_empty() {
         12.0
     } else {
-        heights.iter().sum::<f32>() / heights.len() as f32
+        // Use median height to reduce influence of tiny fragments (subscripts etc.)
+        let mut h_sorted = heights;
+        h_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        h_sorted[h_sorted.len() / 2]
     };
 
-    let line_tolerance = avg_height * 0.6;
+    // Use a wider tolerance: 0.8× median height, with a floor of 5.0 px.
+    // This keeps same-line fragments (which may have slightly different baselines
+    // due to subscripts, font changes, or kerning splits) in the same Y-bucket.
+    let line_tolerance = (avg_height * 0.8).max(5.0);
+
+    eprintln!(
+        "[DEBUG merge] avg_height={:.1} line_tolerance={:.1} input_segments={}",
+        avg_height, line_tolerance, raw_segments.len()
+    );
 
     // Sort: primary by Y-center bucketing, secondary by X
     let mut sorted: Vec<TextSegment> = raw_segments.into_iter().collect();
@@ -145,9 +175,20 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         })
     });
 
+    // Debug: print sorted order
+    for (i, seg) in sorted.iter().enumerate() {
+        let cy = (seg.ymin + seg.ymax) / 2.0;
+        let y_bucket = (cy / line_tolerance).round() as i32;
+        let truncated: String = seg.text.chars().take(40).collect();
+        eprintln!(
+            "[DEBUG merge] sorted[{}] y_bucket={} cy={:.0} x=[{:.0},{:.0}] text=\"{}\"",
+            i, y_bucket, cy, seg.xmin, seg.xmax, truncated
+        );
+    }
+
     // Group into lines by Y-overlap
     let mut lines: Vec<Vec<TextSegment>> = Vec::new();
-    for seg in sorted {
+    for (seg_idx, seg) in sorted.into_iter().enumerate() {
         let seg_cy = (seg.ymin + seg.ymax) / 2.0;
 
         let match_idx = lines
@@ -178,15 +219,29 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
             .map(|(i, _)| i);
 
         if let Some(idx) = match_idx {
+            let line_cy: f32 = lines[idx].iter().map(|s| (s.ymin + s.ymax) / 2.0).sum::<f32>()
+                / lines[idx].len() as f32;
+            let truncated: String = seg.text.chars().take(30).collect();
+            eprintln!(
+                "[DEBUG merge] seg#{} y={:.0} -> line#{} (line_cy={:.0}) text=\"{}\"",
+                seg_idx, seg_cy, idx, line_cy, truncated
+            );
             lines[idx].push(seg);
         } else {
+            let truncated: String = seg.text.chars().take(30).collect();
+            eprintln!(
+                "[DEBUG merge] seg#{} y={:.0} -> NEW line#{} text=\"{}\"",
+                seg_idx, seg_cy, lines.len(), truncated
+            );
             lines.push(vec![seg]);
         }
     }
 
+    eprintln!("[DEBUG merge] total_lines={}", lines.len());
+
     // For each line, sort by X and merge into a single segment
     let mut line_segments: Vec<TextSegment> = Vec::new();
-    for mut line in lines {
+    for (line_idx, mut line) in lines.into_iter().enumerate() {
         line.sort_by(|a, b| {
             a.xmin
                 .partial_cmp(&b.xmin)
@@ -199,6 +254,12 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         let ymin = line.iter().map(|s| s.ymin).fold(f32::MAX, f32::min);
         let ymax = line.iter().map(|s| s.ymax).fold(f32::MIN, f32::max);
 
+        let truncated: String = merged_text.chars().take(60).collect();
+        eprintln!(
+            "[DEBUG merge] line#{} y=[{:.0},{:.0}] x=[{:.0},{:.0}] text=\"{}\"",
+            line_idx, ymin, ymax, xmin, xmax, truncated
+        );
+
         line_segments.push(TextSegment {
             text: merged_text,
             xmin,
@@ -209,6 +270,7 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     }
 
     if line_segments.len() <= 1 {
+        eprintln!("[DEBUG merge] single_line_or_empty, returning");
         return line_segments;
     }
 
@@ -223,6 +285,15 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
     });
+
+    eprintln!("[DEBUG merge] --- after re-sort ({} lines) ---", line_segments.len());
+    for (i, ls) in line_segments.iter().enumerate() {
+        let truncated: String = ls.text.chars().take(50).collect();
+        eprintln!(
+            "[DEBUG merge] re-sorted[{}] y=[{:.0},{:.0}] x=[{:.0},{:.0}] text=\"{}\"",
+            i, ls.ymin, ls.ymax, ls.xmin, ls.xmax, truncated
+        );
+    }
 
     // Merge consecutive lines into paragraphs based on multiple heuristics
     // Calculate median gap between consecutive lines
@@ -242,11 +313,21 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     // Paragraph break needs gap > 2x median line spacing
     let gap_break_threshold = median_gap * 2.0;
 
+    eprintln!(
+        "[DEBUG merge] median_gap={:.1} gap_break_threshold={:.1}",
+        median_gap, gap_break_threshold
+    );
+
     let mut paragraphs: Vec<TextSegment> = Vec::new();
     let mut current_group: Vec<TextSegment> = Vec::new();
 
-    for seg in line_segments.into_iter() {
+    for (seg_idx, seg) in line_segments.into_iter().enumerate() {
         if current_group.is_empty() {
+            let truncated: String = seg.text.chars().take(30).collect();
+            eprintln!(
+                "[DEBUG merge] para_start seg#{} y=[{:.0},{:.0}] text=\"{}\"",
+                seg_idx, seg.ymin, seg.ymax, truncated
+            );
             current_group.push(seg);
             continue;
         }
@@ -264,6 +345,12 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         let this_xmin = seg.xmin;
         let prev_xmin = prev.xmin;
 
+        // Guard: if lines overlap vertically (gap is small or negative),
+        // they are likely fragments of the same visual line. Never break
+        // paragraph here — indentation and column heuristics are unreliable
+        // when PDF text objects have been split by font/kerning changes.
+        let same_visual_line = gap <= line_tolerance;
+
         // Heuristic 1: gap significantly larger than typical line spacing
         let gap_break = gap > gap_break_threshold;
 
@@ -276,12 +363,29 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         // Heuristic 4: significant X-shift indicates a different column or block
         let column_break = (this_xmin - prev_xmin).abs() > avg_height * 4.0;
 
-        let is_paragraph_break = gap_break || short_last_line || indented_start || column_break;
+        let is_paragraph_break = !same_visual_line
+            && (gap_break || short_last_line || indented_start || column_break);
+
+        let truncated: String = seg.text.chars().take(30).collect();
+        let prev_truncated: String = prev.text.chars().take(30).collect();
+        eprintln!(
+            "[DEBUG merge] para_decision seg#{} gap={:.0} prev_w={:.0} group_max_w={:.0} dx_xmin={:.0} | same_line={} gap_break={} short_last={} indent={} col_break={} => break={} | prev=\"{}\" | cur=\"{}\"",
+            seg_idx, gap, prev_width, group_max_width,
+            this_xmin - prev_xmin,
+            same_visual_line,
+            gap_break, short_last_line, indented_start, column_break,
+            is_paragraph_break,
+            prev_truncated, truncated
+        );
 
         if !is_paragraph_break {
             current_group.push(seg);
         } else {
             let merged = merge_group(&current_group);
+            {
+                let t: String = merged.text.chars().take(60).collect();
+                eprintln!("[DEBUG merge] -> PARAGRAPH_END text=\"{}\"", t);
+            }
             paragraphs.push(merged);
             current_group = vec![seg];
         }
@@ -289,7 +393,18 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
 
     if !current_group.is_empty() {
         let merged = merge_group(&current_group);
+        {
+            let t: String = merged.text.chars().take(60).collect();
+            eprintln!("[DEBUG merge] -> PARAGRAPH_END (final) text=\"{}\"", t);
+        }
         paragraphs.push(merged);
+    }
+
+    eprintln!("[DEBUG merge] total_paragraphs={}", paragraphs.len());
+    for (i, p) in paragraphs.iter().enumerate() {
+        let t: String = p.text.chars().take(80).collect();
+        eprintln!("[DEBUG merge] paragraph[{}] y=[{:.0},{:.0}] x=[{:.0},{:.0}]: \"{}\"",
+            i, p.ymin, p.ymax, p.xmin, p.xmax, t);
     }
 
     paragraphs
@@ -346,14 +461,27 @@ fn merge_segments_with_layout(
     let mut text_boxes: Vec<&LayoutBox> = layout_boxes.iter().collect();
     text_boxes.sort_by_key(|b| b.read_order);
 
+    eprintln!(
+        "[DEBUG layout] layout_boxes={} raw_segments={}",
+        layout_boxes.len(),
+        raw_segments.len()
+    );
+    for (i, tb) in text_boxes.iter().enumerate() {
+        eprintln!(
+            "[DEBUG layout] layout_box[{}] cls={} read_order={} score={:.3} x=[{:.0},{:.0}] y=[{:.0},{:.0}]",
+            i, tb.cls_id, tb.read_order, tb.score, tb.xmin, tb.xmax, tb.ymin, tb.ymax
+        );
+    }
+
     if text_boxes.is_empty() {
+        eprintln!("[DEBUG layout] no layout boxes, falling back to plain merge");
         return merge_segments_into_paragraphs(raw_segments);
     }
 
     let mut result: Vec<TextSegment> = Vec::new();
     let mut assigned: HashSet<usize> = HashSet::new();
 
-    for tb in &text_boxes {
+    for (tb_idx, tb) in text_boxes.iter().enumerate() {
         // Collect all raw text segments whose center falls within this layout box
         let mut region_segs: Vec<TextSegment> = Vec::new();
         for (i, seg) in raw_segments.iter().enumerate() {
@@ -368,6 +496,11 @@ fn merge_segments_with_layout(
             }
         }
 
+        eprintln!(
+            "[DEBUG layout] layout_box[{}] read_order={} matched_segments={}",
+            tb_idx, tb.read_order, region_segs.len()
+        );
+
         if region_segs.is_empty() {
             continue;
         }
@@ -381,6 +514,12 @@ fn merge_segments_with_layout(
             .map(|p| p.text)
             .collect::<Vec<_>>()
             .join("\n");
+
+        let truncated: String = text.chars().take(80).collect();
+        eprintln!(
+            "[DEBUG layout] layout_box[{}] result_text=\"{}\"",
+            tb_idx, truncated
+        );
 
         result.push(TextSegment {
             text,
@@ -399,10 +538,20 @@ fn merge_segments_with_layout(
         .map(|(_, s)| s.clone())
         .collect();
 
+    eprintln!("[DEBUG layout] unassigned_segments={}", unassigned.len());
     if !unassigned.is_empty() {
+        for (i, seg) in unassigned.iter().enumerate() {
+            let truncated: String = seg.text.chars().take(40).collect();
+            eprintln!(
+                "[DEBUG layout] unassigned[{}] x=[{:.0},{:.0}] y=[{:.0},{:.0}] text=\"{}\"",
+                i, seg.xmin, seg.xmax, seg.ymin, seg.ymax, truncated
+            );
+        }
         let paragraphs = merge_segments_into_paragraphs(unassigned);
         result.extend(paragraphs);
     }
+
+    eprintln!("[DEBUG layout] final_result_segments={}", result.len());
 
     result
 }
