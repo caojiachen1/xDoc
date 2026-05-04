@@ -298,18 +298,25 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
 fn merge_group(group: &[TextSegment]) -> TextSegment {
     let mut text = String::new();
     for (i, s) in group.iter().enumerate() {
+        let mut appended = false;
         if i > 0 {
-            if text.ends_with('\x02') {
-                // If previous line ended with a soft hyphen (0x02), remove it
-                text.pop();
-                // Merge without adding newline or space
-                text.push_str(&s.text);
-            } else {
-                // Normal line break
-                text.push('\n');
-                text.push_str(&s.text);
+            // First, trim any whitespace at the end of the existing text.
+            let trimmed = text.trim_end();
+            if trimmed.ends_with('\x02') {
+                // If it ends with \x02, we forcefully strip the \x02 and trailing spaces
+                let stripped = &trimmed[..trimmed.len() - 1];
+                text = stripped.to_string();
+
+                // Also forcefully strip any leading spaces of the incoming segment
+                text.push_str(s.text.trim_start());
+                appended = true;
             }
-        } else {
+        }
+
+        if !appended {
+            if i > 0 {
+                text.push('\n');
+            }
             text.push_str(&s.text);
         }
     }
