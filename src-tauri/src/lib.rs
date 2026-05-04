@@ -157,12 +157,24 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
             .rev()
             .take(6)
             .find(|(_, line)| {
-                let line_cy = line
-                    .iter()
-                    .map(|s| (s.ymin + s.ymax) / 2.0)
-                    .sum::<f32>()
-                    / line.len() as f32;
-                (seg_cy - line_cy).abs() < line_tolerance
+                let line_cy =
+                    line.iter().map(|s| (s.ymin + s.ymax) / 2.0).sum::<f32>() / line.len() as f32;
+
+                let last_s = line.last().unwrap();
+
+                // Calculate horizontal distance between the segments
+                let x_dist = if seg.xmin > last_s.xmax {
+                    seg.xmin - last_s.xmax
+                } else if last_s.xmin > seg.xmax {
+                    last_s.xmin - seg.xmax
+                } else {
+                    0.0 // overlapping horizontally
+                };
+
+                // Allow a segment on the same line if Y-overlap is close
+                // AND there is no massive horizontal gap (i.e. jumping to next column)
+                // A typical inter-word space is small. A column gap is much larger.
+                (seg_cy - line_cy).abs() < line_tolerance && x_dist < avg_height * 2.5
             })
             .map(|(i, _)| i);
 
@@ -245,13 +257,15 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         let gap_break = gap > gap_break_threshold;
 
         // Heuristic 2: previous line is a short last line (ends well before full width)
-        let short_last_line = group_max_width > 0.0
-            && prev_width < group_max_width * 0.55;
+        let short_last_line = group_max_width > 0.0 && prev_width < group_max_width * 0.55;
 
         // Heuristic 3: first-line indentation (new paragraph starts further right)
         let indented_start = this_xmin > prev_xmin + avg_height * 0.8;
 
-        let is_paragraph_break = gap_break || short_last_line || indented_start;
+        // Heuristic 4: significant X-shift indicates a different column or block
+        let column_break = (this_xmin - prev_xmin).abs() > avg_height * 4.0;
+
+        let is_paragraph_break = gap_break || short_last_line || indented_start || column_break;
 
         if !is_paragraph_break {
             current_group.push(seg);
@@ -293,11 +307,10 @@ fn merge_segments_with_layout(
     raw_segments: Vec<TextSegment>,
     layout_boxes: &[LayoutBox],
 ) -> Vec<TextSegment> {
-    // Collect text-region layout boxes (cls_id 0=title, 1=text), sorted by read_order
-    let mut text_boxes: Vec<&LayoutBox> = layout_boxes
-        .iter()
-        .filter(|b| b.cls_id == 0 || b.cls_id == 1)
-        .collect();
+    // Collect text-region layout boxes, everything can contain text except maybe pure figures.
+    // For safety, we can process all layout boxes, or exclude only figure(2).
+    // Let's include everything to ensure "每个检测到的区域" is clickable if it has text.
+    let mut text_boxes: Vec<&LayoutBox> = layout_boxes.iter().collect();
     text_boxes.sort_by_key(|b| b.read_order);
 
     if text_boxes.is_empty() {
@@ -405,7 +418,11 @@ async fn get_pdf_paragraphs(
                         source_type: "pdf".to_string(),
                         page_count,
                     };
-                    state.inference_cache.lock().unwrap().insert(cache_key, entry);
+                    state
+                        .inference_cache
+                        .lock()
+                        .unwrap()
+                        .insert(cache_key, entry);
                     Some(boxes)
                 }
                 Err(_) => {
@@ -483,7 +500,12 @@ fn threshold_cache_key(threshold: f32) -> i32 {
 }
 
 fn make_cache_key(file_path: &str, page_index: u32, threshold: f32) -> String {
-    format!("{}::{}::{}", file_path, page_index, threshold_cache_key(threshold))
+    format!(
+        "{}::{}::{}",
+        file_path,
+        page_index,
+        threshold_cache_key(threshold)
+    )
 }
 
 fn make_prefetch_task_key(file_path: &str, threshold: f32) -> String {
@@ -581,7 +603,10 @@ fn bind_pdfium_with_candidates() -> Result<Box<dyn PdfiumLibraryBindings>, Strin
     ))
 }
 
-fn render_pdf_page(path: &Path, requested_page_index: u32) -> Result<(DynamicImage, u32, u32), String> {
+fn render_pdf_page(
+    path: &Path,
+    requested_page_index: u32,
+) -> Result<(DynamicImage, u32, u32), String> {
     let bindings = bind_pdfium_with_candidates()?;
 
     let pdfium = Pdfium::new(bindings);
@@ -612,7 +637,10 @@ fn render_pdf_page(path: &Path, requested_page_index: u32) -> Result<(DynamicIma
     Ok((rendered.as_image(), page_index, page_count))
 }
 
-fn load_document_as_image(path: &str, page_index: Option<u32>) -> Result<(DynamicImage, String, u32, u32), String> {
+fn load_document_as_image(
+    path: &str,
+    page_index: Option<u32>,
+) -> Result<(DynamicImage, String, u32, u32), String> {
     let file_path = Path::new(path);
     if !file_path.exists() {
         return Err("Input file not found".to_string());
@@ -626,9 +654,8 @@ fn load_document_as_image(path: &str, page_index: Option<u32>) -> Result<(Dynami
 
     if ext == "pdf" {
         let requested = page_index.unwrap_or(0);
-        return render_pdf_page(file_path, requested).map(|(img, page_index, page_count)| {
-            (img, "pdf".to_string(), page_index, page_count)
-        });
+        return render_pdf_page(file_path, requested)
+            .map(|(img, page_index, page_count)| (img, "pdf".to_string(), page_index, page_count));
     }
 
     let image = image::open(file_path).map_err(|e| format!("Failed to open image: {e}"))?;
@@ -652,7 +679,11 @@ fn infer_layout_boxes(
 ) -> Result<Vec<LayoutBox>, String> {
     let (input_blob, preprocess_shape, scale) = preprocess_image_doclayout(image);
 
-    let inputs_names: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
+    let inputs_names: Vec<String> = session
+        .inputs()
+        .iter()
+        .map(|i| i.name().to_string())
+        .collect();
     if inputs_names.len() < 3 {
         return Err("Model has fewer than 3 inputs; PP-DocLayoutV3 ONNX expected".to_string());
     }
@@ -765,10 +796,7 @@ fn spawn_prefetch_for_pdf(
 }
 
 #[tauri::command]
-async fn load_model(
-    model_path: String,
-    state: State<'_, ModelState>,
-) -> Result<String, String> {
+async fn load_model(model_path: String, state: State<'_, ModelState>) -> Result<String, String> {
     if !std::path::Path::new(&model_path).exists() {
         return Err("Model file not found".to_string());
     }
@@ -793,7 +821,8 @@ async fn run_doclayout(
     state: State<'_, ModelState>,
 ) -> Result<DetectionResponse, String> {
     let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
-    let (image, source_type, page_index, page_count) = load_document_as_image(&file_path, page_index)?;
+    let (image, source_type, page_index, page_count) =
+        load_document_as_image(&file_path, page_index)?;
     let preview_data_url = image_to_data_url(&image)?;
     let cache_key = make_cache_key(&file_path, page_index, threshold);
 
@@ -802,34 +831,45 @@ async fn run_doclayout(
         cache.get(&cache_key).cloned()
     };
 
-    let (boxes, width, height, response_source_type, response_page_count) = if let Some(entry) = cached_entry {
-        (
-            entry.boxes,
-            entry.width,
-            entry.height,
-            entry.source_type,
-            entry.page_count,
-        )
-    } else {
-        let inferred_boxes = {
-            let mut guard = state.session.lock().unwrap();
-            let session = guard.as_mut().ok_or("Model not loaded")?;
-            infer_layout_boxes(session, &image, threshold)?
-        };
+    let (boxes, width, height, response_source_type, response_page_count) =
+        if let Some(entry) = cached_entry {
+            (
+                entry.boxes,
+                entry.width,
+                entry.height,
+                entry.source_type,
+                entry.page_count,
+            )
+        } else {
+            let inferred_boxes = {
+                let mut guard = state.session.lock().unwrap();
+                let session = guard.as_mut().ok_or("Model not loaded")?;
+                infer_layout_boxes(session, &image, threshold)?
+            };
 
-        let width = image.width();
-        let height = image.height();
-        let entry = CachedInference {
-            boxes: inferred_boxes.clone(),
-            width,
-            height,
-            source_type: source_type.clone(),
-            page_count,
-        };
-        state.inference_cache.lock().unwrap().insert(cache_key, entry);
+            let width = image.width();
+            let height = image.height();
+            let entry = CachedInference {
+                boxes: inferred_boxes.clone(),
+                width,
+                height,
+                source_type: source_type.clone(),
+                page_count,
+            };
+            state
+                .inference_cache
+                .lock()
+                .unwrap()
+                .insert(cache_key, entry);
 
-        (inferred_boxes, width, height, source_type.clone(), page_count)
-    };
+            (
+                inferred_boxes,
+                width,
+                height,
+                source_type.clone(),
+                page_count,
+            )
+        };
 
     if source_type == "pdf" && page_count > 1 {
         spawn_prefetch_for_pdf(
@@ -864,7 +904,12 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_model, run_doclayout, get_pdf_text, get_pdf_paragraphs])
+        .invoke_handler(tauri::generate_handler![
+            load_model,
+            run_doclayout,
+            get_pdf_text,
+            get_pdf_paragraphs
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

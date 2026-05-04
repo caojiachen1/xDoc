@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -48,9 +47,8 @@ fn try_copy_pdfium_dll() {
         return;
     }
 
-    let manifest_dir = PathBuf::from(
-        env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
+    let manifest_dir =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
 
     let source = collect_pdfium_source_candidates(&manifest_dir)
         .into_iter()
