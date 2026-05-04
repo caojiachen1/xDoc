@@ -132,18 +132,16 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
 
     let line_tolerance = avg_height * 0.6;
 
-    // Sort: primary by Y-center, secondary by X
+    // Sort: primary by Y-center bucketing, secondary by X
     let mut sorted: Vec<TextSegment> = raw_segments.into_iter().collect();
     sorted.sort_by(|a, b| {
-        let ya = (a.ymin + a.ymax) / 2.0;
-        let yb = (b.ymin + b.ymax) / 2.0;
-        ya.partial_cmp(&yb)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                a.xmin
-                    .partial_cmp(&b.xmin)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        let ya = ((a.ymin + a.ymax) / 2.0 / line_tolerance).round() as i32;
+        let yb = ((b.ymin + b.ymax) / 2.0 / line_tolerance).round() as i32;
+        ya.cmp(&yb).then_with(|| {
+            a.xmin
+                .partial_cmp(&b.xmin)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
 
     // Group into lines by Y-overlap
@@ -160,21 +158,21 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
                 let line_cy =
                     line.iter().map(|s| (s.ymin + s.ymax) / 2.0).sum::<f32>() / line.len() as f32;
 
-                let last_s = line.last().unwrap();
+                let line_xmin = line.iter().map(|s| s.xmin).fold(f32::MAX, f32::min);
+                let line_xmax = line.iter().map(|s| s.xmax).fold(f32::MIN, f32::max);
 
-                // Calculate horizontal distance between the segments
-                let x_dist = if seg.xmin > last_s.xmax {
-                    seg.xmin - last_s.xmax
-                } else if last_s.xmin > seg.xmax {
-                    last_s.xmin - seg.xmax
+                // Calculate horizontal distance between the segments and the existing line bounding box
+                let x_dist = if seg.xmin > line_xmax {
+                    seg.xmin - line_xmax
+                } else if line_xmin > seg.xmax {
+                    line_xmin - seg.xmax
                 } else {
                     0.0 // overlapping horizontally
                 };
 
                 // Allow a segment on the same line if Y-overlap is close
-                // AND there is no massive horizontal gap (i.e. jumping to next column)
-                // A typical inter-word space is small. A column gap is much larger.
-                (seg_cy - line_cy).abs() < line_tolerance && x_dist < avg_height * 2.5
+                // AND there is no massive horizontal gap (i.e. jumping to next column).
+                (seg_cy - line_cy).abs() < line_tolerance && x_dist < avg_height * 4.0
             })
             .map(|(i, _)| i);
 
@@ -209,11 +207,23 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         });
     }
 
-    // Merge consecutive lines into paragraphs based on multiple heuristics
     if line_segments.len() <= 1 {
         return line_segments;
     }
 
+    // Safety step: Ensure line_segments are strongly ordered top-to-bottom, left-to-right.
+    // If lines were formed in broken order due to disjoint column processing, this reorders them.
+    line_segments.sort_by(|a, b| {
+        let ya = ((a.ymin + a.ymax) / 2.0 / line_tolerance).round() as i32;
+        let yb = ((b.ymin + b.ymax) / 2.0 / line_tolerance).round() as i32;
+        ya.cmp(&yb).then_with(|| {
+            a.xmin
+                .partial_cmp(&b.xmin)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
+
+    // Merge consecutive lines into paragraphs based on multiple heuristics
     // Calculate median gap between consecutive lines
     let mut gaps: Vec<f32> = line_segments
         .windows(2)
@@ -339,21 +349,16 @@ fn merge_segments_with_layout(
             continue;
         }
 
-        // Sort by Y then X for correct reading order
-        region_segs.sort_by(|a, b| {
-            let ya = (a.ymin + a.ymax) / 2.0;
-            let yb = (b.ymin + b.ymax) / 2.0;
-            ya.partial_cmp(&yb)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    a.xmin
-                        .partial_cmp(&b.xmin)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
+        // Use the line-based grouping logic to assemble text correctly without text scrambling
+        let merged_paragraphs = merge_segments_into_paragraphs(region_segs);
 
-        // Merge all text in this layout box into one paragraph segment
-        let text: String = region_segs.iter().map(|s| s.text.as_str()).collect();
+        // Merge all paragraphs in this layout box into one block
+        let text: String = merged_paragraphs
+            .into_iter()
+            .map(|p| p.text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
         result.push(TextSegment {
             text,
             xmin: tb.xmin,
