@@ -6,7 +6,6 @@ import {
   Card,
   Menu,
   MenuButton,
-  MenuDivider,
   MenuItem,
   MenuList,
   MenuPopover,
@@ -17,6 +16,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
+import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS } from "./components/SettingsDialog";
 import "./App.css";
 
 interface LayoutBox {
@@ -112,6 +112,12 @@ function App() {
   const [zoomMode, setZoomMode] = useState<ZoomMode>("fit_page");
   const [customScale, setCustomScale] = useState(1);
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // OCR settings
+  const [ocrEnabled, setOcrEnabled] = useState(false);
+  const [ocrModelRepoUrl, setOcrModelRepoUrl] = useState("https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git");
+  const [ocrModelPath, setOcrModelPath] = useState("GLM-OCR-GGUF");
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -302,6 +308,14 @@ function App() {
             setLoading(false);
           });
       }
+
+      // OCR settings
+      const savedOcrEnabled = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrEnabled);
+      if (savedOcrEnabled !== null) setOcrEnabled(savedOcrEnabled === "true");
+      const savedOcrUrl = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelRepoUrl);
+      if (savedOcrUrl) setOcrModelRepoUrl(savedOcrUrl);
+      const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath);
+      if (savedOcrPath) setOcrModelPath(savedOcrPath);
     } catch {
       // ignore storage failures
     }
@@ -334,6 +348,24 @@ function App() {
       // ignore storage failures
     }
   }, [modelPath]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrEnabled, String(ocrEnabled));
+    } catch { /* ignore */ }
+  }, [ocrEnabled]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelRepoUrl, ocrModelRepoUrl);
+    } catch { /* ignore */ }
+  }, [ocrModelRepoUrl]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelPath, ocrModelPath);
+    } catch { /* ignore */ }
+  }, [ocrModelPath]);
 
   useEffect(() => {
     if (!imgRef.current) return;
@@ -540,35 +572,13 @@ function App() {
             </MenuPopover>
           </Menu>
 
-          <Menu
-            positioning="below-start"
-            open={openMenu === "settings"}
-            onOpenChange={(_, data) => handleMenuOpenChange("settings", data.open)}
+          <Button
+            appearance="transparent"
+            className="menu-btn menu-btn-no-icon"
+            onClick={() => setSettingsOpen(true)}
           >
-            <MenuTrigger>
-              <MenuButton
-                appearance="transparent"
-                className="menu-btn menu-btn-no-icon"
-                onMouseEnter={() => handleMenuHoverSwitch("settings")}
-              >
-                设置
-              </MenuButton>
-            </MenuTrigger>
-            <MenuPopover className="menu-popover-smooth">
-              <MenuList>
-                <MenuItem onClick={() => void selectModel()}>ONNX 模型</MenuItem>
-                <MenuDivider />
-                <MenuItem onClick={() => void applyScoreThreshold(0.3)}>置信度阈值 0.30 {scoreThreshold === 0.3 ? "✓" : ""}</MenuItem>
-                <MenuItem onClick={() => void applyScoreThreshold(0.5)}>置信度阈值 0.50 {scoreThreshold === 0.5 ? "✓" : ""}</MenuItem>
-                <MenuItem onClick={() => void applyScoreThreshold(0.7)}>置信度阈值 0.70 {scoreThreshold === 0.7 ? "✓" : ""}</MenuItem>
-                <MenuDivider />
-                <MenuItem onClick={() => setZoomMode("fit_page")}>缩放：适应页面 {zoomMode === "fit_page" ? "✓" : ""}</MenuItem>
-                <MenuItem onClick={() => setZoomMode("fit_width")}>缩放：适应宽度 {zoomMode === "fit_width" ? "✓" : ""}</MenuItem>
-                <MenuItem onClick={() => setZoomMode("fit_height")}>缩放：适应高度 {zoomMode === "fit_height" ? "✓" : ""}</MenuItem>
-                <MenuItem onClick={() => setZoomMode("actual")}>缩放：原始尺寸 {zoomMode === "actual" ? "✓" : ""}</MenuItem>
-              </MenuList>
-            </MenuPopover>
-          </Menu>
+            设置
+          </Button>
 
           <Menu
             positioning="below-start"
@@ -792,6 +802,24 @@ function App() {
           </div>
         </Card>
       </div>
+
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        modelPath={modelPath}
+        modelLoaded={modelLoaded}
+        scoreThreshold={scoreThreshold}
+        zoomMode={zoomMode}
+        onSelectModel={selectModel}
+        onScoreThresholdChange={applyScoreThreshold}
+        onZoomModeChange={setZoomMode}
+        ocrEnabled={ocrEnabled}
+        onOcrEnabledChange={setOcrEnabled}
+        ocrModelRepoUrl={ocrModelRepoUrl}
+        onOcrModelRepoUrlChange={setOcrModelRepoUrl}
+        ocrModelPath={ocrModelPath}
+        onOcrModelPathChange={setOcrModelPath}
+      />
     </div>
   );
 }

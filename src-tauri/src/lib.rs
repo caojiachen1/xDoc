@@ -7,12 +7,13 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     env,
-    io::Cursor,
+    io::{BufRead, BufReader, Cursor},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
 };
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -1071,6 +1072,168 @@ async fn run_doclayout(
     })
 }
 
+#[derive(Serialize, Clone)]
+struct DownloadProgress {
+    progress: f64,
+    message: String,
+    status: String, // "downloading" | "completed" | "error" | "checking"
+}
+
+#[tauri::command]
+async fn download_ocr_model(
+    app: tauri::AppHandle,
+    repo_url: String,
+    target_dir: String,
+) -> Result<String, String> {
+    let target_path = Path::new(&target_dir);
+    let dir_name = target_path
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("GLM-OCR-GGUF"))
+        .to_string_lossy()
+        .to_string();
+
+    // Check if target already exists
+    if target_path.exists() {
+        return Err(format!("目录已存在: {}", target_dir));
+    }
+
+    let emit_progress = |app: &tauri::AppHandle, progress: f64, message: &str, status: &str| {
+        let _ = app.emit(
+            "ocr-download-progress",
+            DownloadProgress {
+                progress,
+                message: message.to_string(),
+                status: status.to_string(),
+            },
+        );
+    };
+
+    // Step 1: Check git availability
+    emit_progress(&app, 0.0, "正在检查 git ...", "checking");
+
+    let git_check = Command::new("git")
+        .args(["--version"])
+        .output()
+        .map_err(|e| format!("git 未安装或不在 PATH 中: {e}"))?;
+
+    if !git_check.status.success() {
+        return Err("git 命令不可用".to_string());
+    }
+
+    // Step 2: Check git-lfs availability
+    emit_progress(&app, 0.0, "正在检查 git-lfs ...", "checking");
+
+    let lfs_check = Command::new("git")
+        .args(["lfs", "version"])
+        .output()
+        .map_err(|_| "git-lfs 未安装。请运行: git lfs install".to_string())?;
+
+    if !lfs_check.status.success() {
+        return Err("git-lfs 不可用，请先安装 git-lfs".to_string());
+    }
+
+    emit_progress(&app, 0.0, "开始克隆仓库...", "downloading");
+
+    // Step 3: Run git lfs clone
+    let parent_dir = target_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+
+    let mut child = Command::new("git")
+        .args([
+            "lfs",
+            "clone",
+            "--progress",
+            &repo_url,
+            &dir_name,
+        ])
+        .current_dir(parent_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动 git: {e}"))?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or("无法读取 git stderr".to_string())?;
+
+    let reader = BufReader::new(stderr);
+    for line_result in reader.lines() {
+        if let Ok(line) = line_result {
+            // Parse progress from git output
+            // Git outputs: "Receiving objects:  45% (123/456)"
+            // Git LFS outputs: "Git LFS: (1 of 3 files) 1.2 GB / 4.2 GB"
+            let mut progress = -1.0;
+            let message = line.clone();
+
+            // Try to find percentage
+            if let Some(pct_start) = line.find(|c: char| c.is_ascii_digit()) {
+                if let Some(pct_idx) = line[pct_start..].find('%') {
+                    let pct_str = &line[pct_start..pct_start + pct_idx];
+                    if let Ok(pct) = pct_str.parse::<f64>() {
+                        progress = pct.clamp(0.0, 100.0);
+                    }
+                }
+            }
+
+            // Try parse LFS fraction: "X/Y" or "X of Y"
+            if progress < 0.0 {
+                if let Some(frac_start) = line.find("(") {
+                    if let Some(slash) = line[frac_start..].find('/') {
+                        let before_slash = &line[frac_start + 1..frac_start + slash];
+                        if let Some(space) = before_slash.find(" of ") {
+                            let num_str = &before_slash[space + 4..];
+                            if let Ok(current) = num_str.trim().parse::<f64>() {
+                                if let Some(after_slash) = line[frac_start + slash + 1..].find(|c: char| !c.is_ascii_digit()) {
+                                    let denom_str = &line[frac_start + slash + 1..frac_start + slash + 1 + after_slash];
+                                    if let Ok(total) = denom_str.trim().parse::<f64>() {
+                                        if total > 0.0 {
+                                            progress = (current / total * 100.0).clamp(0.0, 99.0);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if progress >= 0.0 {
+                emit_progress(&app, progress, &message, "downloading");
+            } else {
+                emit_progress(&app, 0.0, &message, "downloading");
+            }
+        }
+    }
+
+    // Also read stdout
+    if let Some(stdout) = child.stdout.take() {
+        let stdout_reader = BufReader::new(stdout);
+        for line_result in stdout_reader.lines() {
+            if let Ok(line) = line_result {
+                emit_progress(&app, 0.0, &line, "downloading");
+            }
+        }
+    }
+
+    let status = child.wait().map_err(|e| format!("等待 git 进程失败: {e}"))?;
+
+    if status.success() {
+        emit_progress(&app, 100.0, "下载完成", "completed");
+        let final_path = parent_dir.join(&dir_name);
+        Ok(final_path.to_string_lossy().to_string())
+    } else {
+        emit_progress(
+            &app,
+            0.0,
+            &format!("git clone 失败，退出码: {:?}", status.code()),
+            "error",
+        );
+        Err(format!("git clone 失败，退出码: {:?}", status.code()))
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1085,7 +1248,8 @@ pub fn run() {
             load_model,
             run_doclayout,
             get_pdf_text,
-            get_pdf_paragraphs
+            get_pdf_paragraphs,
+            download_ocr_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
