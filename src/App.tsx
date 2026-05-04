@@ -409,7 +409,7 @@ function App() {
       return { width: "max-content", height: "100%" } as const;
     }
     return { width: "max-content" } as const;
-  }, [zoomMode]);
+  }, [zoomMode, customScale, imageSize.width, imageSize.height]);
 
   const previewImageSx = useMemo(() => {
     if (zoomMode === "custom") {
@@ -425,7 +425,7 @@ function App() {
       return { width: "auto", height: "auto", maxWidth: "100%", maxHeight: "100%" } as const;
     }
     return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
-  }, [zoomMode]);
+  }, [zoomMode, customScale, imageSize.width, imageSize.height]);
 
   const requestAiDescription = async (text: string) => {
     if (!text.trim()) {
