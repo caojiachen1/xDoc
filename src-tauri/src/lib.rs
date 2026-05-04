@@ -84,6 +84,7 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
     for obj in page.objects().iter() {
         if let Some(text_obj) = obj.as_text_object() {
             let text = text_obj.text();
+
             if !text.trim().is_empty() {
                 if let Ok(bounds) = text_obj.bounds() {
                     let mut xmin = bounds.left().value * scale;
@@ -295,11 +296,26 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
 }
 
 fn merge_group(group: &[TextSegment]) -> TextSegment {
-    let text: String = group
-        .iter()
-        .map(|s| s.text.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let mut text = String::new();
+    for (i, s) in group.iter().enumerate() {
+        if i > 0 {
+            if text.ends_with('\x02') {
+                // If previous line ended with a soft hyphen (0x02), remove it
+                text.pop();
+                // Merge without adding newline or space
+                text.push_str(&s.text);
+            } else {
+                // Normal line break
+                text.push('\n');
+                text.push_str(&s.text);
+            }
+        } else {
+            text.push_str(&s.text);
+        }
+    }
+    // Clean up any remaining soft hyphens just in case
+    text = text.replace('\x02', "");
+
     let xmin = group.iter().map(|s| s.xmin).fold(f32::MAX, f32::min);
     let xmax = group.iter().map(|s| s.xmax).fold(f32::MIN, f32::max);
     let ymin = group.iter().map(|s| s.ymin).fold(f32::MAX, f32::min);
