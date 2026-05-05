@@ -18,6 +18,7 @@ import {
   Scan24Regular,
   Dismiss24Regular,
 } from "@fluentui/react-icons";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsDialog.css";
 
 /* ── types ─────────────────────────────────────────────── */
@@ -44,15 +45,12 @@ interface Props {
   /* ocr */
   ocrEnabled: boolean;
   onOcrEnabledChange: (v: boolean) => void;
-  ocrModelRepoUrl: string;
-  onOcrModelRepoUrlChange: (v: string) => void;
   ocrModelPath: string;
   onOcrModelPathChange: (v: string) => void;
 }
 
 const STORAGE_KEYS = {
   ocrEnabled: "xdoc.settings.ocr.enabled",
-  ocrModelRepoUrl: "xdoc.settings.ocr.modelRepoUrl",
   ocrModelPath: "xdoc.settings.ocr.modelPath",
 } as const;
 
@@ -63,7 +61,6 @@ function SettingsDialog(props: Props) {
     modelPath, modelLoaded, scoreThreshold, zoomMode,
     onSelectModel, onScoreThresholdChange, onZoomModeChange,
     ocrEnabled, onOcrEnabledChange,
-    ocrModelRepoUrl, onOcrModelRepoUrlChange,
     ocrModelPath, onOcrModelPathChange,
   } = props;
 
@@ -90,15 +87,29 @@ function SettingsDialog(props: Props) {
     };
   }, []);
 
-  /* ── download handler ─────────────────────────────── */
-  const handleDownload = useCallback(async () => {
-    if (!ocrModelRepoUrl.trim()) return;
+  /* ── download & select handlers ───────────────────────── */
+  const handleSelectOcrModel = async () => {
+    try {
+      const selected = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "选择 OCR 模型文件夹",
+      });
+      if (typeof selected === "string") {
+        onOcrModelPathChange(selected);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
+  const handleDownload = useCallback(async () => {
     setDownload({ progress: 0, message: "启动下载...", status: "checking" });
     try {
-      const targetDir = ocrModelPath.trim() || "GLM-OCR-GGUF";
+      const REPO_URL = "https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git";
+      const targetDir = "model/GLM-OCR-GGUF";
       const result = await invoke<string>("download_ocr_model", {
-        repoUrl: ocrModelRepoUrl.trim(),
+        repoUrl: REPO_URL,
         targetDir,
       });
       onOcrModelPathChange(result);
@@ -109,7 +120,7 @@ function SettingsDialog(props: Props) {
         status: "error",
       });
     }
-  }, [ocrModelRepoUrl, ocrModelPath, onOcrModelPathChange]);
+  }, [onOcrModelPathChange]);
 
   /* ── render ─────────────────────────────────────────── */
   if (!open) return null;
@@ -235,23 +246,6 @@ function SettingsDialog(props: Props) {
 
                 <Divider className="settings-divider" />
 
-                {/* ── Model Repo URL ────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">OCR 模型仓库地址</Text>
-                  <Input
-                    value={ocrModelRepoUrl}
-                    onChange={(_, d) => onOcrModelRepoUrlChange(d.value)}
-                    placeholder="https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git"
-                    disabled={isDownloading}
-                    className="settings-input"
-                  />
-                  <Text size={100} className="settings-hint">
-                    ModelScope 仓库地址，使用 git lfs 下载模型文件
-                  </Text>
-                </div>
-
-                <Divider className="settings-divider" />
-
                 {/* ── Local Model Path ───────────── */}
                 <div className="settings-field">
                   <Text weight="semibold">本地模型路径</Text>
@@ -259,20 +253,29 @@ function SettingsDialog(props: Props) {
                     <Input
                       value={ocrModelPath}
                       onChange={(_, d) => onOcrModelPathChange(d.value)}
-                      placeholder="GLM-OCR-GGUF（根目录）"
+                      placeholder="未选择，本地如果没有可以点击左侧选择或者右侧下载"
                       disabled={isDownloading}
                       className="settings-input-flex"
                     />
                     <Button
-                      appearance="primary"
-                      onClick={handleDownload}
-                      disabled={isDownloading || !ocrModelRepoUrl.trim()}
+                      appearance="secondary"
+                      onClick={handleSelectOcrModel}
+                      disabled={isDownloading}
                     >
-                      {isDownloading ? "下载中..." : "自动下载"}
+                      选择文件夹
                     </Button>
+                    {!ocrModelPath && (
+                      <Button
+                        appearance="primary"
+                        onClick={handleDownload}
+                        disabled={isDownloading}
+                      >
+                        {isDownloading ? "下载中..." : "自动下载"}
+                      </Button>
+                    )}
                   </div>
                   <Text size={100} className="settings-hint">
-                    点击"自动下载"从 ModelScope 克隆模型仓库到本地
+                    点击"自动下载"从默认仓库克隆模型文件到根目录的 model 文件夹中
                   </Text>
                 </div>
 

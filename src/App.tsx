@@ -116,8 +116,7 @@ function App() {
 
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(false);
-  const [ocrModelRepoUrl, setOcrModelRepoUrl] = useState("https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git");
-  const [ocrModelPath, setOcrModelPath] = useState("GLM-OCR-GGUF");
+  const [ocrModelPath, setOcrModelPath] = useState("");
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -312,8 +311,6 @@ function App() {
       // OCR settings
       const savedOcrEnabled = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrEnabled);
       if (savedOcrEnabled !== null) setOcrEnabled(savedOcrEnabled === "true");
-      const savedOcrUrl = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelRepoUrl);
-      if (savedOcrUrl) setOcrModelRepoUrl(savedOcrUrl);
       const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath);
       if (savedOcrPath) setOcrModelPath(savedOcrPath);
     } catch {
@@ -354,12 +351,6 @@ function App() {
       window.localStorage.setItem(OCR_STORAGE_KEYS.ocrEnabled, String(ocrEnabled));
     } catch { /* ignore */ }
   }, [ocrEnabled]);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelRepoUrl, ocrModelRepoUrl);
-    } catch { /* ignore */ }
-  }, [ocrModelRepoUrl]);
 
   useEffect(() => {
     try {
@@ -815,8 +806,6 @@ function App() {
         onZoomModeChange={setZoomMode}
         ocrEnabled={ocrEnabled}
         onOcrEnabledChange={setOcrEnabled}
-        ocrModelRepoUrl={ocrModelRepoUrl}
-        onOcrModelRepoUrlChange={setOcrModelRepoUrl}
         ocrModelPath={ocrModelPath}
         onOcrModelPathChange={setOcrModelPath}
       />

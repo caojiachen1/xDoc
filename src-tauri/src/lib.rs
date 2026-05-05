@@ -1139,6 +1139,10 @@ async fn download_ocr_model(
         .parent()
         .unwrap_or_else(|| Path::new("."));
 
+    if parent_dir.to_str() != Some("") && parent_dir.to_str() != Some(".") {
+        std::fs::create_dir_all(parent_dir).map_err(|e| format!("无法创建父目录: {e}"))?;
+    }
+
     let mut child = Command::new("git")
         .args([
             "lfs",
