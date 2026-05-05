@@ -15,6 +15,9 @@ use std::{
 };
 use tauri::{Emitter, State};
 
+#[allow(dead_code)]
+mod gguf_ocr;
+
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
     pub cls_id: u32,
@@ -82,12 +85,8 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
     let page_height = page.height().value;
     let mut segments = Vec::new();
 
-    eprintln!(
-        "[DEBUG extract_raw] page={} page_width={:.1} page_height={:.1} scale={:.3}",
-        page_index, page.width().value, page_height, scale
-    );
 
-    for (obj_idx, obj) in page.objects().iter().enumerate() {
+    for (_obj_idx, obj) in page.objects().iter().enumerate() {
         if let Some(text_obj) = obj.as_text_object() {
             let text = text_obj.text();
 
@@ -105,14 +104,7 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
                         std::mem::swap(&mut xmin, &mut xmax);
                     }
 
-                    let truncated: String = text.chars().take(50).collect();
-                    eprintln!(
-                        "[DEBUG extract_raw] obj#{:04} x=[{:.0},{:.0}] y=[{:.0},{:.0}] w={:.0} h={:.0} text=\"{}\"",
-                        obj_idx,
-                        xmin, xmax, ymin, ymax,
-                        xmax - xmin, ymax - ymin,
-                        truncated
-                    );
+                    let _truncated: String = text.chars().take(50).collect();
 
                     segments.push(TextSegment {
                         text,
@@ -126,10 +118,6 @@ fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSeg
         }
     }
 
-    eprintln!(
-        "[DEBUG extract_raw] total_raw_segments={}",
-        segments.len()
-    );
 
     Ok(segments)
 }
@@ -159,10 +147,6 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     // due to subscripts, font changes, or kerning splits) in the same Y-bucket.
     let line_tolerance = (avg_height * 0.8).max(5.0);
 
-    eprintln!(
-        "[DEBUG merge] avg_height={:.1} line_tolerance={:.1} input_segments={}",
-        avg_height, line_tolerance, raw_segments.len()
-    );
 
     // Sort: primary by Y-center bucketing, secondary by X
     let mut sorted: Vec<TextSegment> = raw_segments.into_iter().collect();
@@ -177,19 +161,15 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     });
 
     // Debug: print sorted order
-    for (i, seg) in sorted.iter().enumerate() {
+    for (_i, seg) in sorted.iter().enumerate() {
         let cy = (seg.ymin + seg.ymax) / 2.0;
-        let y_bucket = (cy / line_tolerance).round() as i32;
-        let truncated: String = seg.text.chars().take(40).collect();
-        eprintln!(
-            "[DEBUG merge] sorted[{}] y_bucket={} cy={:.0} x=[{:.0},{:.0}] text=\"{}\"",
-            i, y_bucket, cy, seg.xmin, seg.xmax, truncated
-        );
+        let _y_bucket = (cy / line_tolerance).round() as i32;
+        let _truncated: String = seg.text.chars().take(40).collect();
     }
 
     // Group into lines by Y-overlap
     let mut lines: Vec<Vec<TextSegment>> = Vec::new();
-    for (seg_idx, seg) in sorted.into_iter().enumerate() {
+    for (_seg_idx, seg) in sorted.into_iter().enumerate() {
         let seg_cy = (seg.ymin + seg.ymax) / 2.0;
 
         let match_idx = lines
@@ -220,29 +200,20 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
             .map(|(i, _)| i);
 
         if let Some(idx) = match_idx {
-            let line_cy: f32 = lines[idx].iter().map(|s| (s.ymin + s.ymax) / 2.0).sum::<f32>()
+            let _line_cy: f32 = lines[idx].iter().map(|s| (s.ymin + s.ymax) / 2.0).sum::<f32>()
                 / lines[idx].len() as f32;
-            let truncated: String = seg.text.chars().take(30).collect();
-            eprintln!(
-                "[DEBUG merge] seg#{} y={:.0} -> line#{} (line_cy={:.0}) text=\"{}\"",
-                seg_idx, seg_cy, idx, line_cy, truncated
-            );
+            let _truncated: String = seg.text.chars().take(30).collect();
             lines[idx].push(seg);
         } else {
-            let truncated: String = seg.text.chars().take(30).collect();
-            eprintln!(
-                "[DEBUG merge] seg#{} y={:.0} -> NEW line#{} text=\"{}\"",
-                seg_idx, seg_cy, lines.len(), truncated
-            );
+            let _truncated: String = seg.text.chars().take(30).collect();
             lines.push(vec![seg]);
         }
     }
 
-    eprintln!("[DEBUG merge] total_lines={}", lines.len());
 
     // For each line, sort by X and merge into a single segment
     let mut line_segments: Vec<TextSegment> = Vec::new();
-    for (line_idx, mut line) in lines.into_iter().enumerate() {
+    for (_line_idx, mut line) in lines.into_iter().enumerate() {
         line.sort_by(|a, b| {
             a.xmin
                 .partial_cmp(&b.xmin)
@@ -255,11 +226,7 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         let ymin = line.iter().map(|s| s.ymin).fold(f32::MAX, f32::min);
         let ymax = line.iter().map(|s| s.ymax).fold(f32::MIN, f32::max);
 
-        let truncated: String = merged_text.chars().take(60).collect();
-        eprintln!(
-            "[DEBUG merge] line#{} y=[{:.0},{:.0}] x=[{:.0},{:.0}] text=\"{}\"",
-            line_idx, ymin, ymax, xmin, xmax, truncated
-        );
+        let _truncated: String = merged_text.chars().take(60).collect();
 
         line_segments.push(TextSegment {
             text: merged_text,
@@ -271,7 +238,6 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     }
 
     if line_segments.len() <= 1 {
-        eprintln!("[DEBUG merge] single_line_or_empty, returning");
         return line_segments;
     }
 
@@ -287,13 +253,8 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         })
     });
 
-    eprintln!("[DEBUG merge] --- after re-sort ({} lines) ---", line_segments.len());
-    for (i, ls) in line_segments.iter().enumerate() {
-        let truncated: String = ls.text.chars().take(50).collect();
-        eprintln!(
-            "[DEBUG merge] re-sorted[{}] y=[{:.0},{:.0}] x=[{:.0},{:.0}] text=\"{}\"",
-            i, ls.ymin, ls.ymax, ls.xmin, ls.xmax, truncated
-        );
+    for (_i, ls) in line_segments.iter().enumerate() {
+        let _truncated: String = ls.text.chars().take(50).collect();
     }
 
     // Merge consecutive lines into paragraphs based on multiple heuristics
@@ -314,21 +275,13 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     // Paragraph break needs gap > 2x median line spacing
     let gap_break_threshold = median_gap * 2.0;
 
-    eprintln!(
-        "[DEBUG merge] median_gap={:.1} gap_break_threshold={:.1}",
-        median_gap, gap_break_threshold
-    );
 
     let mut paragraphs: Vec<TextSegment> = Vec::new();
     let mut current_group: Vec<TextSegment> = Vec::new();
 
-    for (seg_idx, seg) in line_segments.into_iter().enumerate() {
+    for (_seg_idx, seg) in line_segments.into_iter().enumerate() {
         if current_group.is_empty() {
-            let truncated: String = seg.text.chars().take(30).collect();
-            eprintln!(
-                "[DEBUG merge] para_start seg#{} y=[{:.0},{:.0}] text=\"{}\"",
-                seg_idx, seg.ymin, seg.ymax, truncated
-            );
+            let _truncated: String = seg.text.chars().take(30).collect();
             current_group.push(seg);
             continue;
         }
@@ -367,25 +320,15 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
         let is_paragraph_break = !same_visual_line
             && (gap_break || short_last_line || indented_start || column_break);
 
-        let truncated: String = seg.text.chars().take(30).collect();
-        let prev_truncated: String = prev.text.chars().take(30).collect();
-        eprintln!(
-            "[DEBUG merge] para_decision seg#{} gap={:.0} prev_w={:.0} group_max_w={:.0} dx_xmin={:.0} | same_line={} gap_break={} short_last={} indent={} col_break={} => break={} | prev=\"{}\" | cur=\"{}\"",
-            seg_idx, gap, prev_width, group_max_width,
-            this_xmin - prev_xmin,
-            same_visual_line,
-            gap_break, short_last_line, indented_start, column_break,
-            is_paragraph_break,
-            prev_truncated, truncated
-        );
+        let _truncated: String = seg.text.chars().take(30).collect();
+        let _prev_truncated: String = prev.text.chars().take(30).collect();
 
         if !is_paragraph_break {
             current_group.push(seg);
         } else {
             let merged = merge_group(&current_group);
             {
-                let t: String = merged.text.chars().take(60).collect();
-                eprintln!("[DEBUG merge] -> PARAGRAPH_END text=\"{}\"", t);
+                let _t: String = merged.text.chars().take(60).collect();
             }
             paragraphs.push(merged);
             current_group = vec![seg];
@@ -395,17 +338,13 @@ fn merge_segments_into_paragraphs(raw_segments: Vec<TextSegment>) -> Vec<TextSeg
     if !current_group.is_empty() {
         let merged = merge_group(&current_group);
         {
-            let t: String = merged.text.chars().take(60).collect();
-            eprintln!("[DEBUG merge] -> PARAGRAPH_END (final) text=\"{}\"", t);
+            let _t: String = merged.text.chars().take(60).collect();
         }
         paragraphs.push(merged);
     }
 
-    eprintln!("[DEBUG merge] total_paragraphs={}", paragraphs.len());
-    for (i, p) in paragraphs.iter().enumerate() {
-        let t: String = p.text.chars().take(80).collect();
-        eprintln!("[DEBUG merge] paragraph[{}] y=[{:.0},{:.0}] x=[{:.0},{:.0}]: \"{}\"",
-            i, p.ymin, p.ymax, p.xmin, p.xmax, t);
+    for (_i, p) in paragraphs.iter().enumerate() {
+        let _t: String = p.text.chars().take(80).collect();
     }
 
     paragraphs
@@ -462,27 +401,17 @@ fn merge_segments_with_layout(
     let mut text_boxes: Vec<&LayoutBox> = layout_boxes.iter().collect();
     text_boxes.sort_by_key(|b| b.read_order);
 
-    eprintln!(
-        "[DEBUG layout] layout_boxes={} raw_segments={}",
-        layout_boxes.len(),
-        raw_segments.len()
-    );
-    for (i, tb) in text_boxes.iter().enumerate() {
-        eprintln!(
-            "[DEBUG layout] layout_box[{}] cls={} read_order={} score={:.3} x=[{:.0},{:.0}] y=[{:.0},{:.0}]",
-            i, tb.cls_id, tb.read_order, tb.score, tb.xmin, tb.xmax, tb.ymin, tb.ymax
-        );
+    for (_i, _tb) in text_boxes.iter().enumerate() {
     }
 
     if text_boxes.is_empty() {
-        eprintln!("[DEBUG layout] no layout boxes, falling back to plain merge");
         return merge_segments_into_paragraphs(raw_segments);
     }
 
     let mut result: Vec<TextSegment> = Vec::new();
     let mut assigned: HashSet<usize> = HashSet::new();
 
-    for (tb_idx, tb) in text_boxes.iter().enumerate() {
+    for (_tb_idx, tb) in text_boxes.iter().enumerate() {
         // Collect all raw text segments whose center falls within this layout box
         let mut region_segs: Vec<TextSegment> = Vec::new();
         for (i, seg) in raw_segments.iter().enumerate() {
@@ -497,10 +426,6 @@ fn merge_segments_with_layout(
             }
         }
 
-        eprintln!(
-            "[DEBUG layout] layout_box[{}] read_order={} matched_segments={}",
-            tb_idx, tb.read_order, region_segs.len()
-        );
 
         if region_segs.is_empty() {
             continue;
@@ -516,11 +441,7 @@ fn merge_segments_with_layout(
             .collect::<Vec<_>>()
             .join("\n");
 
-        let truncated: String = text.chars().take(80).collect();
-        eprintln!(
-            "[DEBUG layout] layout_box[{}] result_text=\"{}\"",
-            tb_idx, truncated
-        );
+        let _truncated: String = text.chars().take(80).collect();
 
         result.push(TextSegment {
             text,
@@ -539,20 +460,14 @@ fn merge_segments_with_layout(
         .map(|(_, s)| s.clone())
         .collect();
 
-    eprintln!("[DEBUG layout] unassigned_segments={}", unassigned.len());
     if !unassigned.is_empty() {
-        for (i, seg) in unassigned.iter().enumerate() {
-            let truncated: String = seg.text.chars().take(40).collect();
-            eprintln!(
-                "[DEBUG layout] unassigned[{}] x=[{:.0},{:.0}] y=[{:.0},{:.0}] text=\"{}\"",
-                i, seg.xmin, seg.xmax, seg.ymin, seg.ymax, truncated
-            );
+        for (_i, seg) in unassigned.iter().enumerate() {
+            let _truncated: String = seg.text.chars().take(40).collect();
         }
         let paragraphs = merge_segments_into_paragraphs(unassigned);
         result.extend(paragraphs);
     }
 
-    eprintln!("[DEBUG layout] final_result_segments={}", result.len());
 
     result
 }
@@ -673,6 +588,11 @@ pub struct ModelState {
     prefetch_tasks: Arc<Mutex<HashSet<String>>>,
 }
 
+pub struct OcrState {
+    backend: Arc<Mutex<Option<gguf_ocr::GgufBackend>>>,
+    model_root: Arc<Mutex<Option<PathBuf>>>,
+}
+
 fn threshold_cache_key(threshold: f32) -> i32 {
     (threshold * 1000.0).round() as i32
 }
@@ -725,6 +645,10 @@ fn preprocess_image_doclayout(image: &DynamicImage) -> (Array4<f32>, Array2<f32>
 
 fn collect_pdfium_candidates() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+
+    // Prioritize the lib/ directory (same place as llama.cpp DLLs)
+    let dll_dir = resolve_dll_dir();
+    candidates.push(Pdfium::pdfium_platform_library_name_at_path(&dll_dir));
 
     if let Ok(p) = env::var("PDFIUM_DYNAMIC_LIB_PATH") {
         let path = PathBuf::from(p);
@@ -1238,13 +1162,168 @@ async fn download_ocr_model(
     }
 }
 
+fn resolve_dll_dir() -> PathBuf {
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            for ancestor in exe_dir.ancestors() {
+                let candidate = ancestor.join("lib").join("llama.dll");
+                if candidate.exists() {
+                    return ancestor.join("lib");
+                }
+            }
+        }
+    }
+    PathBuf::from("lib")
+}
+
+#[tauri::command]
+async fn init_ocr(
+    ocr_model_path: String,
+    state: State<'_, OcrState>,
+) -> Result<String, String> {
+    let model_root = PathBuf::from(&ocr_model_path);
+    if !model_root.exists() {
+        return Err(format!("OCR model directory not found: {ocr_model_path}"));
+    }
+
+    let gguf_file = model_root.join("GLM-OCR-Q8_0.gguf");
+    let mmproj_file = model_root.join("mmproj-GLM-OCR-Q8_0.gguf");
+    if !gguf_file.exists() {
+        return Err(format!("GGUF model not found at: {}", gguf_file.display()));
+    }
+    if !mmproj_file.exists() {
+        return Err(format!("mmproj model not found at: {}", mmproj_file.display()));
+    }
+
+    let dll_dir = resolve_dll_dir();
+    let cpp_lib = gguf_ocr::CppLib::load(
+        &dll_dir.join("llama.dll"),
+        &dll_dir.join("mtmd.dll"),
+    )
+    .map_err(|e| format!("Failed to load llama.cpp DLLs: {e}"))?;
+
+    // Unload previous backend if any
+    {
+        let mut backend_guard = state.backend.lock().unwrap();
+        if let Some(ref mut backend) = *backend_guard {
+            backend.unload();
+        }
+        *backend_guard = Some(gguf_ocr::GgufBackend::new(cpp_lib, false));
+    }
+
+    *state.model_root.lock().unwrap() = Some(model_root);
+
+    Ok("OCR backend initialized".to_string())
+}
+
+#[derive(Serialize)]
+pub struct OcrRegionResult {
+    pub text: String,
+}
+
+#[tauri::command]
+async fn run_ocr_region(
+    file_path: String,
+    page_index: u32,
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+    state: State<'_, OcrState>,
+) -> Result<OcrRegionResult, String> {
+    let model_root = {
+        let guard = state.model_root.lock().unwrap();
+        guard.clone().ok_or("OCR model not initialized")?
+    };
+
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    // Render the page
+    let (image, actual_page_index, _page_count) = render_pdf_page(path, page_index)?;
+
+    let img_w = image.width() as f32;
+    let img_h = image.height() as f32;
+
+    // Clamp coordinates to image bounds
+    let cx = (xmin.clamp(0.0, img_w) as u32, ymin.clamp(0.0, img_h) as u32);
+    let crop_w = ((xmax - xmin).clamp(1.0, img_w - cx.0 as f32) as u32).max(1);
+    let crop_h = ((ymax - ymin).clamp(1.0, img_h - cx.1 as f32) as u32).max(1);
+
+    eprintln!(
+        "[OCR] cropping region: orig={}x{} crop=({},{} {}x{})",
+        img_w, img_h, cx.0, cx.1, crop_w, crop_h
+    );
+
+    let cropped = image.crop_imm(cx.0, cx.1, crop_w, crop_h);
+
+    // Save to temp file
+    let temp_dir = env::temp_dir();
+    let temp_path = temp_dir.join(format!(
+        "xdoc_ocr_region_{}_{}.png",
+        actual_page_index,
+        (cx.0 as u64) << 32 | cx.1 as u64
+    ));
+    cropped
+        .save(&temp_path)
+        .map_err(|e| format!("Failed to save temp image: {e}"))?;
+
+    eprintln!("[OCR] temp image saved: {}", temp_path.display());
+
+    // Run OCR on the cropped region
+    let text = {
+        let mut backend_guard = state.backend.lock().unwrap();
+        let backend = backend_guard
+            .as_mut()
+            .ok_or("OCR backend not initialized")?;
+
+        let result = backend
+            .infer(&model_root, &temp_path)
+            .map_err(|e| format!("OCR inference failed: {e}"))?;
+
+        result.text
+    };
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&temp_path);
+
+    Ok(OcrRegionResult { text })
+}
+
+#[cfg(target_os = "windows")]
+extern "system" {
+    fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let dll_dir = resolve_dll_dir();
+    eprintln!("[xDoc] lib dir resolved to: {}", dll_dir.display());
+
+    // Add the DLL directory to Windows DLL search path so that
+    // llama.dll can find its dependencies (ggml.dll etc.) in the same folder.
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = dll_dir
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe { SetDllDirectoryW(wide.as_ptr()); }
+    }
+
     tauri::Builder::default()
         .manage(ModelState {
             session: Arc::new(Mutex::new(None)),
             inference_cache: Arc::new(Mutex::new(HashMap::new())),
             prefetch_tasks: Arc::new(Mutex::new(HashSet::new())),
+        })
+        .manage(OcrState {
+            backend: Arc::new(Mutex::new(None)),
+            model_root: Arc::new(Mutex::new(None)),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1253,7 +1332,9 @@ pub fn run() {
             run_doclayout,
             get_pdf_text,
             get_pdf_paragraphs,
-            download_ocr_model
+            download_ocr_model,
+            init_ocr,
+            run_ocr_region
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -107,7 +107,7 @@ function SettingsDialog(props: Props) {
     setDownload({ progress: 0, message: "启动下载...", status: "checking" });
     try {
       const REPO_URL = "https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git";
-      const targetDir = "model/GLM-OCR-GGUF";
+      const targetDir = "../model/GLM-OCR-GGUF";
       const result = await invoke<string>("download_ocr_model", {
         repoUrl: REPO_URL,
         targetDir,

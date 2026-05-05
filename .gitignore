@@ -25,3 +25,4 @@ PP-DocLayoutV3.onnx
 *.sln
 *.sw?
 .*/
+model/

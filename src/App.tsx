@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -16,6 +16,8 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS } from "./components/SettingsDialog";
 import "./App.css";
 
@@ -115,8 +117,14 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // OCR settings
-  const [ocrEnabled, setOcrEnabled] = useState(false);
+  const [ocrEnabled, setOcrEnabled] = useState(true);
   const [ocrModelPath, setOcrModelPath] = useState("");
+
+  // OCR runtime state
+  const [ocrText, setOcrText] = useState("");
+  const [ocrLoading, setOcrLoading] = useState(false);
+  const [ocrInitialized, setOcrInitialized] = useState(false);
+  const [ocrError, setOcrError] = useState("");
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -291,28 +299,28 @@ function App() {
         setZoomMode(savedZoom);
       }
 
-      const savedModelPath = window.localStorage.getItem(STORAGE_KEYS.modelPath);
-      if (savedModelPath) {
-        setModelPath(savedModelPath);
-        setLoading(true);
-        invoke("load_model", { modelPath: savedModelPath })
-          .then(() => {
-            setModelLoaded(true);
-          })
-          .catch((e) => {
-            setModelLoaded(false);
-            setErrorMessage(`自动加载模型失败: ${String(e)}`);
-          })
-          .finally(() => {
-            setLoading(false);
-          });
-      }
+      const savedModelPath = window.localStorage.getItem(STORAGE_KEYS.modelPath)
+        || "../model/PP-DocLayoutV3.onnx";
+      setModelPath(savedModelPath);
+      setLoading(true);
+      invoke("load_model", { modelPath: savedModelPath })
+        .then(() => {
+          setModelLoaded(true);
+        })
+        .catch((e) => {
+          setModelLoaded(false);
+          setErrorMessage(`自动加载模型失败: ${String(e)}`);
+        })
+        .finally(() => {
+          setLoading(false);
+        });
 
       // OCR settings
       const savedOcrEnabled = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrEnabled);
-      if (savedOcrEnabled !== null) setOcrEnabled(savedOcrEnabled === "true");
-      const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath);
-      if (savedOcrPath) setOcrModelPath(savedOcrPath);
+      setOcrEnabled(savedOcrEnabled === null ? true : savedOcrEnabled === "true");
+      const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath)
+        || "../model/GLM-OCR-GGUF";
+      setOcrModelPath(savedOcrPath);
     } catch {
       // ignore storage failures
     }
@@ -357,6 +365,64 @@ function App() {
       window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelPath, ocrModelPath);
     } catch { /* ignore */ }
   }, [ocrModelPath]);
+
+  // Initialize OCR backend when enabled and model path is set
+  useEffect(() => {
+    if (ocrEnabled && ocrModelPath) {
+      setOcrError("");
+      invoke<string>("init_ocr", { ocrModelPath })
+        .then((msg) => {
+          console.log("[OCR] initialized:", msg);
+          setOcrInitialized(true);
+        })
+        .catch((e) => {
+          console.error("[OCR] init failed:", e);
+          setOcrError(`OCR 初始化失败: ${String(e)}`);
+          setOcrInitialized(false);
+        });
+    } else {
+      setOcrInitialized(false);
+    }
+  }, [ocrEnabled, ocrModelPath]);
+
+  // Run OCR when a paragraph is selected and OCR is enabled
+  useEffect(() => {
+    if (!selectedParagraph || !ocrEnabled || !ocrInitialized || !documentPath) {
+      setOcrText("");
+      return;
+    }
+
+    let cancelled = false;
+    setOcrLoading(true);
+    setOcrError("");
+    setOcrText("");
+
+    invoke<{ text: string }>("run_ocr_region", {
+      filePath: documentPath,
+      pageIndex: pdfPageIndex,
+      xmin: selectedParagraph.xmin,
+      ymin: selectedParagraph.ymin,
+      xmax: selectedParagraph.xmax,
+      ymax: selectedParagraph.ymax,
+    })
+      .then((result) => {
+        if (!cancelled) {
+          setOcrText(result.text);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setOcrError(`OCR 识别失败: ${String(e)}`);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setOcrLoading(false);
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [selectedParagraph, ocrEnabled, ocrInitialized, documentPath, pdfPageIndex]);
 
   useEffect(() => {
     if (!imgRef.current) return;
@@ -490,6 +556,47 @@ function App() {
       return selectedParagraph.text.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
     }
   }, [selectedParagraph?.text]);
+
+  // LaTeX renderer: converts text with $...$ and $$...$$ to HTML
+  const renderLatex = useCallback((text: string): string => {
+    if (!text) return "";
+    // Split on display math $$...$$ and inline math $...$
+    const parts: string[] = [];
+    let remaining = text;
+    // First handle display math $$...$$
+    const displayRegex = /\$\$([\s\S]*?)\$\$/g;
+    let lastIdx = 0;
+    let match;
+    while ((match = displayRegex.exec(remaining)) !== null) {
+      parts.push(remaining.slice(lastIdx, match.index));
+      try {
+        parts.push(katex.renderToString(match[1], { displayMode: true, throwOnError: false }));
+      } catch {
+        parts.push(match[0]);
+      }
+      lastIdx = match.index + match[0].length;
+    }
+    parts.push(remaining.slice(lastIdx));
+    const afterDisplay = parts.join("");
+
+    // Then handle inline math $...$
+    const result: string[] = [];
+    const inlineRegex = /\$(?!\$)([\s\S]*?[^\\])\$(?!\$)/g;
+    let lastIdx2 = 0;
+    let match2;
+    remaining = afterDisplay;
+    while ((match2 = inlineRegex.exec(remaining)) !== null) {
+      result.push(remaining.slice(lastIdx2, match2.index));
+      try {
+        result.push(katex.renderToString(match2[1], { displayMode: false, throwOnError: false }));
+      } catch {
+        result.push(match2[0]);
+      }
+      lastIdx2 = match2.index + match2[0].length;
+    }
+    result.push(remaining.slice(lastIdx2));
+    return result.join("");
+  }, []);
 
   const handleMouseDownV = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -755,26 +862,57 @@ function App() {
             <div className="resizer-v" onMouseDown={handleMouseDownV} />
 
             <div className="right-pane" ref={rightPaneRef}>
-              <div className="text-pane" onMouseUp={handleTextSelection} style={{ 
-                height: topPaneHeight, 
-                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none" 
+              <div className="text-pane" onMouseUp={handleTextSelection} style={{
+                height: topPaneHeight,
+                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none"
               }}>
                 <h3>选取段落及分词区域</h3>
                 {selectedParagraph ? (
-                  <div style={{ wordBreak: "break-all" }}>
-                    {segmentedParagraph.map((word, idx) => (
-                      <span
-                        key={idx}
-                        className="word-span"
-                        onClick={() => {
-                          // prevent triggering if user is dragging selection
-                          if (window.getSelection()?.toString() !== "") return;
-                          requestAiDescription(word);
-                        }}
-                      >
-                        {word}
-                      </span>
-                    ))}
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", overflow: "auto" }}>
+                    {/* PDF-extracted text with word segmentation */}
+                    <div>
+                      <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                        PDF 原文
+                      </Text>
+                      <div style={{ wordBreak: "break-all" }}>
+                        {segmentedParagraph.map((word, idx) => (
+                          <span
+                            key={idx}
+                            className="word-span"
+                            onClick={() => {
+                              if (window.getSelection()?.toString() !== "") return;
+                              requestAiDescription(word);
+                            }}
+                          >
+                            {word}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* OCR result with LaTeX rendering */}
+                    {ocrEnabled && (
+                      <div>
+                        <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                          OCR 识别结果
+                        </Text>
+                        {ocrLoading ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <Spinner size="tiny" />
+                            <Text size={100} style={{ opacity: 0.6 }}>OCR 识别中...</Text>
+                          </div>
+                        ) : ocrError ? (
+                          <Text size={100} style={{ color: "#ff6b6b" }}>{ocrError}</Text>
+                        ) : ocrText ? (
+                          <div
+                            className="ocr-latex-content"
+                            dangerouslySetInnerHTML={{ __html: renderLatex(ocrText) }}
+                          />
+                        ) : (
+                          <Text size={100} style={{ opacity: 0.5 }}>点击段落以进行 OCR 识别</Text>
+                        )}
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div style={{ opacity: 0.5 }}>（请在左侧预览中点击选中需要阅读的段落块）</div>
