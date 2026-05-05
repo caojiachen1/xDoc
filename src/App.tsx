@@ -1360,7 +1360,7 @@ function App() {
 
                 {/* ── Figure image display ── */}
                 {selectedFigure ? (
-                  <div style={{ overflow: "auto" }}>
+                  <div style={{ overflow: "hidden" }}>
                     <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
                       {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
                     </Text>
@@ -1368,7 +1368,7 @@ function App() {
                       <img
                         src={figureImageDataUrl}
                         alt="Selected figure"
-                        style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)" }}
+                        style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)" }}
                       />
                     ) : (
                       <Text size={100} style={{ opacity: 0.5 }}>加载图片中...</Text>
