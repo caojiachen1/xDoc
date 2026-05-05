@@ -1297,6 +1297,19 @@ extern "system" {
     fn SetDllDirectoryW(lpPathName: *const u16) -> i32;
 }
 
+#[tauri::command]
+async fn check_git() -> Result<bool, String> {
+    match std::process::Command::new("git").arg("--version").output() {
+        Ok(output) => Ok(output.status.success()),
+        Err(_) => Ok(false),
+    }
+}
+
+#[tauri::command]
+async fn check_model_exists(model_path: String) -> bool {
+    std::path::Path::new(&model_path).exists()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -1334,7 +1347,9 @@ pub fn run() {
             get_pdf_paragraphs,
             download_ocr_model,
             init_ocr,
-            run_ocr_region
+            run_ocr_region,
+            check_git,
+            check_model_exists
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

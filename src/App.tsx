@@ -19,6 +19,7 @@ import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-ico
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS } from "./components/SettingsDialog";
+import EnvironmentCheck from "./components/EnvironmentCheck";
 import "./App.css";
 
 interface LayoutBox {
@@ -88,13 +89,14 @@ const COLORS = [
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type TopMenuKey = "file" | "settings" | "help" | null;
 
-const STORAGE_KEYS = {
+export const STORAGE_KEYS = {
   modelPath: "xdoc.settings.modelPath",
   scoreThreshold: "xdoc.settings.scoreThreshold",
   zoomMode: "xdoc.settings.zoomMode",
 } as const;
 
 function App() {
+  const [environmentReady, setEnvironmentReady] = useState(false);
   const [modelPath, setModelPath] = useState("");
   const [documentPath, setDocumentPath] = useState("");
   const [previewSrc, setPreviewSrc] = useState("");
@@ -285,6 +287,7 @@ function App() {
   };
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       const savedThreshold = window.localStorage.getItem(STORAGE_KEYS.scoreThreshold);
       if (savedThreshold !== null) {
@@ -324,25 +327,28 @@ function App() {
     } catch {
       // ignore storage failures
     }
-  }, []);
+  }, [environmentReady]);
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       window.localStorage.setItem(STORAGE_KEYS.scoreThreshold, String(scoreThreshold));
     } catch {
       // ignore storage failures
     }
-  }, [scoreThreshold]);
+  }, [scoreThreshold, environmentReady]);
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       window.localStorage.setItem(STORAGE_KEYS.zoomMode, zoomMode);
     } catch {
       // ignore storage failures
     }
-  }, [zoomMode]);
+  }, [zoomMode, environmentReady]);
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       if (modelPath) {
         window.localStorage.setItem(STORAGE_KEYS.modelPath, modelPath);
@@ -352,19 +358,21 @@ function App() {
     } catch {
       // ignore storage failures
     }
-  }, [modelPath]);
+  }, [modelPath, environmentReady]);
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       window.localStorage.setItem(OCR_STORAGE_KEYS.ocrEnabled, String(ocrEnabled));
     } catch { /* ignore */ }
-  }, [ocrEnabled]);
+  }, [ocrEnabled, environmentReady]);
 
   useEffect(() => {
+    if (!environmentReady) return;
     try {
       window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelPath, ocrModelPath);
     } catch { /* ignore */ }
-  }, [ocrModelPath]);
+  }, [ocrModelPath, environmentReady]);
 
   // Initialize OCR backend when enabled and model path is set
   useEffect(() => {
@@ -643,6 +651,10 @@ function App() {
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
   };
+
+  if (!environmentReady) {
+    return <EnvironmentCheck onAllChecksPassed={() => setEnvironmentReady(true)} />;
+  }
 
   return (
     <div className="app-root">
