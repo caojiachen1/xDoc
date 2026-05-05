@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { fetch } from "@tauri-apps/plugin-http";
 import {
@@ -549,6 +550,12 @@ function App() {
     setOcrError("");
     setOcrText("");
 
+    const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
+      if (!cancelled) {
+        setOcrText(prev => prev + event.payload.piece);
+      }
+    });
+
     invoke<{ text: string }>("run_ocr_region", {
       filePath: documentPath,
       pageIndex: pdfPageIndex,
@@ -571,9 +578,13 @@ function App() {
         if (!cancelled) {
           setOcrLoading(false);
         }
+        unlistenPromise.then(unlisten => unlisten());
       });
 
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      unlistenPromise.then(unlisten => unlisten());
+    };
   }, [selectedParagraph, ocrEnabled, ocrInitialized, documentPath, pdfPageIndex]);
 
   useEffect(() => {
@@ -716,6 +727,7 @@ function App() {
         ],
         temperature: 0.7,
         max_tokens: 2048,
+        stream: true,
       };
 
       // Volcengine Ark: disable thinking mode for seed models
@@ -737,6 +749,50 @@ function App() {
         throw new Error(`API 请求失败 (${response.status}): ${errText}`);
       }
 
+      // Try streaming via SSE
+      const reader = response.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        let result = "";
+        let buffer = "";
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || "";
+
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data: ")) continue;
+              const data = trimmed.slice(6);
+              if (data === "[DONE]") continue;
+              try {
+                const parsed = JSON.parse(data);
+                const delta = parsed.choices?.[0]?.delta?.content;
+                if (delta) {
+                  result += delta;
+                  setAiResult(result);
+                }
+              } catch {
+                // skip unparseable chunks
+              }
+            }
+          }
+        } catch {
+          if (result) {
+            setAiResult(result + "\n\n[流式输出中断]");
+          } else {
+            throw new Error("流式读取失败");
+          }
+        }
+        return;
+      }
+
+      // Fallback: non-streaming response
       const data = await response.json();
       const content = data.choices?.[0]?.message?.content;
       if (content) {

@@ -608,6 +608,158 @@ impl GgufBackend {
             token_count: generated.len(),
         })
     }
+
+    /// Like `infer`, but calls `on_token` with each generated token's text as it is produced.
+    pub fn infer_streaming(
+        &mut self,
+        model_root: &Path,
+        image_path: &Path,
+        on_token: &mut dyn FnMut(&str),
+    ) -> Result<InferResult> {
+        let total_t = Instant::now();
+
+        self.ensure_loaded(model_root)?;
+        let lib = &self.lib;
+        let ctx = self.ctx;
+        let vocab = self.vocab;
+        let mtmd_ctx = self.mtmd_ctx;
+
+        // Clear KV cache for fresh inference
+        let mem = unsafe { (lib.llama_get_memory)(ctx) };
+        unsafe { (lib.llama_memory_clear)(mem, true); }
+
+        // Load image
+        let image_path_c = CString::new(image_path.to_str().unwrap())
+            .map_err(|_| anyhow!("Invalid image path"))?;
+        let bitmap = unsafe {
+            (lib.mtmd_helper_bitmap_init_from_file)(mtmd_ctx, image_path_c.as_ptr())
+        };
+        if bitmap.is_null() {
+            bail!("Failed to load image: {}", image_path.display());
+        }
+
+        // Build prompt
+        let marker = unsafe { CStr::from_ptr((lib.mtmd_default_marker)()) };
+        let marker_str = marker.to_str().unwrap_or("<__media__>");
+        let prompt = format!(
+            "[gMASK]<sop><|user|>\n<|begin_of_image|>{}<|end_of_image|>\nText Recognition:\n<|assistant|>\n",
+            marker_str
+        );
+
+        let prompt_c = CString::new(prompt.as_str()).map_err(|_| anyhow!("Invalid prompt"))?;
+        let input_text = MtmdInputText {
+            text: prompt_c.as_ptr(),
+            add_special: false,
+            parse_special: true,
+        };
+
+        // Tokenize
+        let bitmaps_arr: [*const MtmdBitmap; 1] = [bitmap as *const MtmdBitmap];
+        let chunks = unsafe { (lib.mtmd_input_chunks_init)() };
+        if chunks.is_null() {
+            unsafe { (lib.mtmd_bitmap_free)(bitmap); }
+            bail!("Failed to create input chunks");
+        }
+
+        let res = unsafe {
+            (lib.mtmd_tokenize)(mtmd_ctx, chunks, &input_text, bitmaps_arr.as_ptr(), 1)
+        };
+        unsafe { (lib.mtmd_bitmap_free)(bitmap); }
+        if res != 0 {
+            unsafe { (lib.mtmd_input_chunks_free)(chunks); }
+            bail!("mtmd_tokenize failed with code {res}");
+        }
+
+        // Eval all chunks
+        let n_batch = 512i32;
+        let mut new_n_past: LlamaPos = 0;
+        let eval_res = unsafe {
+            (lib.mtmd_helper_eval_chunks)(
+                mtmd_ctx, ctx, chunks, 0, 0, n_batch, true, &mut new_n_past,
+            )
+        };
+        unsafe { (lib.mtmd_input_chunks_free)(chunks); }
+        if eval_res != 0 {
+            bail!("mtmd_helper_eval_chunks failed with code {eval_res}");
+        }
+
+        // ── Autoregressive decode ──────────────────────────────────────────
+
+        let logits_ptr = unsafe { (lib.llama_get_logits)(ctx) };
+        if logits_ptr.is_null() {
+            bail!("llama_get_logits returned null");
+        }
+        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+        let first_token = argmax(logits_slice);
+
+        let max_new_tokens: usize = std::env::var("OCR_MAX_NEW_TOKENS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2048);
+
+        // Stream first token
+        if !EOS_TOKEN_IDS.contains(&first_token) {
+            let piece = token_to_string(lib, vocab, first_token)?;
+            if !piece.is_empty() {
+                on_token(&piece);
+            }
+        }
+
+        let mut generated: Vec<LlamaToken> = vec![first_token];
+        let mut n_past = new_n_past;
+
+        for _step in 0..max_new_tokens {
+            let current_token = *generated.last().unwrap();
+            if EOS_TOKEN_IDS.contains(&current_token) {
+                break;
+            }
+
+            let batch = make_batch(lib, current_token, n_past);
+            let dec_res = unsafe { (lib.llama_decode)(ctx, batch) };
+            unsafe { (lib.llama_batch_free)(batch); }
+            if dec_res != 0 {
+                bail!("llama_decode failed with code {dec_res}");
+            }
+
+            let logits_ptr = unsafe { (lib.llama_get_logits)(ctx) };
+            if logits_ptr.is_null() {
+                bail!("llama_get_logits returned null");
+            }
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+            let next_token = argmax(logits_slice);
+
+            // Stream each token as it is generated
+            if !EOS_TOKEN_IDS.contains(&next_token) {
+                let piece = token_to_string(lib, vocab, next_token)?;
+                if !piece.is_empty() {
+                    on_token(&piece);
+                }
+            }
+
+            generated.push(next_token);
+            n_past += 1;
+        }
+
+        // Decode final text
+        let mut output = String::new();
+        for &tok in &generated {
+            if EOS_TOKEN_IDS.contains(&tok) { break; }
+            let piece = token_to_string(lib, vocab, tok)?;
+            output.push_str(&piece);
+        }
+
+        eprintln!(
+            "[OCR] streaming inference: {:.1}s, {} tokens, {} chars",
+            total_t.elapsed().as_secs_f64(),
+            generated.len(),
+            output.len()
+        );
+
+        Ok(InferResult {
+            text: output,
+            token_count: generated.len(),
+        })
+    }
 }
 
 impl Drop for GgufBackend {

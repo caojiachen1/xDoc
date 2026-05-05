@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
-use tauri::{Emitter, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[allow(dead_code)]
 mod gguf_ocr;
@@ -1216,13 +1216,19 @@ async fn init_ocr(
     Ok("OCR backend initialized".to_string())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct OcrRegionResult {
     pub text: String,
 }
 
+#[derive(Serialize, Clone)]
+struct OcrStreamToken {
+    piece: String,
+}
+
 #[tauri::command]
 async fn run_ocr_region(
+    app: AppHandle,
     file_path: String,
     page_index: u32,
     xmin: f32,
@@ -1272,15 +1278,20 @@ async fn run_ocr_region(
 
     eprintln!("[OCR] temp image saved: {}", temp_path.display());
 
-    // Run OCR on the cropped region
+    // Run OCR on the cropped region (streaming)
     let text = {
         let mut backend_guard = state.backend.lock().unwrap();
         let backend = backend_guard
             .as_mut()
             .ok_or("OCR backend not initialized")?;
 
+        let app_ref = &app;
         let result = backend
-            .infer(&model_root, &temp_path)
+            .infer_streaming(&model_root, &temp_path, &mut |piece: &str| {
+                let _ = app_ref.emit("ocr-stream-token", OcrStreamToken {
+                    piece: piece.to_string(),
+                });
+            })
             .map_err(|e| format!("OCR inference failed: {e}"))?;
 
         result.text
