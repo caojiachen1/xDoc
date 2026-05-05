@@ -73,7 +73,7 @@
   min-height: 0;
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(45, 45, 45, 0.92);
-  border-radius: 12px;
+  border-radius: 0px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
   margin: 0 10px 10px;
 }
@@ -272,7 +272,7 @@
 
 .preview-image {
   display: block;
-  border-radius: 8px;
+  border-radius: 0px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
 }
 
