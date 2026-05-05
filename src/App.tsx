@@ -62,16 +62,31 @@ interface DetectionResponse {
 }
 
 const CLASSES = [
-  "title",
-  "text",
-  "figure",
-  "table",
-  "figure_caption",
-  "table_caption",
-  "header",
-  "footer",
-  "reference",
-  "equation",
+  "abstract",          // 0
+  "algorithm",         // 1
+  "aside_text",        // 2
+  "chart",             // 3
+  "content",           // 4
+  "display_formula",   // 5
+  "doc_title",         // 6
+  "figure_title",      // 7
+  "footer",            // 8
+  "footer_image",      // 9
+  "footnote",          // 10
+  "formula_number",    // 11
+  "header",            // 12
+  "header_image",      // 13
+  "image",             // 14
+  "inline_formula",    // 15
+  "number",            // 16
+  "paragraph_title",   // 17
+  "reference",         // 18
+  "reference_content", // 19
+  "seal",              // 20
+  "table",             // 21
+  "text",              // 22
+  "vertical_text",     // 23
+  "vision_footnote",   // 24
 ];
 
 const COLORS = [
@@ -86,6 +101,20 @@ const COLORS = [
   "#1A9334",
   "#00D4BB",
   "#2C99A8",
+  "#FF6B6B",
+  "#FFD93D",
+  "#6BCB77",
+  "#4D96FF",
+  "#C084FC",
+  "#FB923C",
+  "#34D399",
+  "#F472B6",
+  "#818CF8",
+  "#FBBF24",
+  "#A78BFA",
+  "#60A5FA",
+  "#F87171",
+  "#38BDF8",
 ];
 
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
@@ -110,6 +139,8 @@ function App() {
   const [boxes, setBoxes] = useState<LayoutBox[]>([]);
   const [segments, setSegments] = useState<TextSegment[]>([]);
   const [selectedParagraph, setSelectedParagraph] = useState<TextSegment | null>(null);
+  const [selectedFigure, setSelectedFigure] = useState<LayoutBox | null>(null);
+  const [figureImageDataUrl, setFigureImageDataUrl] = useState<string>("");
   const [aiAction, setAiAction] = useState<string>("");
   const [aiResult, setAiResult] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -163,6 +194,47 @@ function App() {
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
 
+  const isVisualBox = (clsId: number) => {
+    // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
+    const visual = new Set([3, 5, 9, 13, 14, 15, 20, 21]);
+    return visual.has(clsId);
+  };
+
+  const selectFigure = async (box: LayoutBox) => {
+    setSelectedParagraph(null);
+    setSelectedFigure(box);
+    setAiResult("");
+    setAiAction("");
+
+    const naturalW = imageSize.width;
+    const naturalH = imageSize.height;
+    if (naturalW === 0 || naturalH === 0 || !previewSrc) return;
+
+    try {
+      const sx = box.xmin;
+      const sy = box.ymin;
+      const sw = box.xmax - box.xmin;
+      const sh = box.ymax - box.ymin;
+
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, sw);
+      canvas.height = Math.max(1, sh);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      const fullImg = new Image();
+      fullImg.src = previewSrc;
+      await new Promise<void>((resolve, reject) => {
+        fullImg.onload = () => resolve();
+        fullImg.onerror = () => reject(new Error("image load failed"));
+      });
+      ctx.drawImage(fullImg, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      setFigureImageDataUrl(canvas.toDataURL("image/png"));
+    } catch {
+      setFigureImageDataUrl("");
+    }
+  };
+
   const selectModel = async () => {
     setErrorMessage("");
     const selected = await open({
@@ -206,6 +278,8 @@ function App() {
       setPdfPageCount(result.page_count);
       setSegments(result.segments);
       setSelectedParagraph(null);
+      setSelectedFigure(null);
+      setFigureImageDataUrl("");
       setAiResult("");
       setAiAction("");
     } catch (e) {
@@ -250,6 +324,8 @@ function App() {
     setBoxes([]);
     setSegments([]);
     setSelectedParagraph(null);
+    setSelectedFigure(null);
+    setFigureImageDataUrl("");
     setAiResult("");
     setAiAction("");
     setImageSize({ width: 0, height: 0 });
@@ -279,6 +355,8 @@ function App() {
       setBoxes([]);
       setSegments([]);
       setSelectedParagraph(null);
+      setSelectedFigure(null);
+      setFigureImageDataUrl("");
       setAiResult("");
       setAiAction("");
       setImageSize({ width: 0, height: 0 });
@@ -598,8 +676,8 @@ function App() {
     return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
   }, [zoomMode, customScale, imageSize.width, imageSize.height]);
 
-  const requestAiDescription = async (text: string, action: string = "解读") => {
-    if (!text.trim()) {
+  const requestAiDescription = async (text: string, action: string = "解读", imageDataUrl?: string) => {
+    if (!text.trim() && !imageDataUrl) {
       setAiResult("");
       return;
     }
@@ -622,11 +700,19 @@ function App() {
       const systemPrompt = systemPrompts[action] || systemPrompts["解读"];
       const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
 
+      // Build user message: multimodal if image is provided
+      const userContent: unknown = imageDataUrl
+        ? [
+            { type: "text", text },
+            { type: "image_url", image_url: { url: imageDataUrl } },
+          ]
+        : text;
+
       const requestBody: Record<string, unknown> = {
         model: llmSettings.model,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: text },
+          { role: "user", content: userContent },
         ],
         temperature: 0.7,
         max_tokens: 2048,
@@ -757,6 +843,37 @@ function App() {
       setAiAction(actionLabels[action] || action);
       requestAiDescription(floatingMenu.selectedText, action);
     }
+  };
+
+  // Gather all visible text in the text-pane for batch AI actions
+  const getPaneFullText = (): string => {
+    let parts: string[] = [];
+    if (selectedParagraph?.text) {
+      parts.push(selectedParagraph.text
+        .replace(/[\r\n]+/g, "")
+        .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
+      );
+    }
+    if (ocrText) {
+      parts.push(ocrText
+        .replace(/[\r\n]+/g, "")
+        .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
+      );
+    }
+    return parts.join("\n---\n");
+  };
+
+  const handleBatchAiAction = (action: string) => {
+    const text = getPaneFullText();
+    if (!text.trim()) return;
+    setAiAction(actionLabels[action] || action);
+    requestAiDescription(text, action);
+  };
+
+  const handleImageAiAction = () => {
+    if (!figureImageDataUrl) return;
+    setAiAction("解读图片");
+    requestAiDescription("请解读这张图片的内容", "解读", figureImageDataUrl);
   };
 
   const dismissFloatingMenu = () => {
@@ -1138,7 +1255,7 @@ function App() {
                                 cursor: "pointer",
                                 pointerEvents: "auto",
                               }}
-                              onClick={() => setSelectedParagraph(seg)}
+                              onClick={() => { setSelectedFigure(null); setFigureImageDataUrl(""); setSelectedParagraph(seg); }}
                               onMouseEnter={(e) => {
                                 if (selectedParagraph !== seg) {
                                   e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
@@ -1160,23 +1277,29 @@ function App() {
                           const width = Math.max(1, (box.xmax - box.xmin) * scale.x);
                           const height = Math.max(1, (box.ymax - box.ymin) * scale.y);
                           const label = `${CLASSES[box.cls_id] ?? `class_${box.cls_id}`}  #${box.read_order}  ${box.score.toFixed(2)}`;
+                          const clickable = isVisualBox(box.cls_id);
+                          const isFigSelected = selectedFigure === box;
 
                           return (
                             <div key={`${box.cls_id}-${box.read_order}-${idx}`}>
                               <div
                                 className="bbox"
                                 style={{
-                                  borderColor: color,
+                                  borderColor: isFigSelected ? "#00D4BB" : color,
+                                  backgroundColor: isFigSelected ? "rgba(0, 212, 187, 0.2)" : "transparent",
                                   left,
                                   top,
                                   width,
                                   height,
+                                  cursor: clickable ? "pointer" : undefined,
+                                  pointerEvents: clickable ? "auto" : undefined,
                                 }}
+                                onClick={clickable ? () => selectFigure(box) : undefined}
                               />
                               <div
                                 className="bbox-label"
                                 style={{
-                                  backgroundColor: color,
+                                  backgroundColor: isFigSelected ? "#00D4BB" : color,
                                   left,
                                   top: Math.max(0, top - 22),
                                 }}
@@ -1213,8 +1336,45 @@ function App() {
                 height: topPaneHeight,
                 flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none"
               }}>
-                <h3>选取段落及分词区域</h3>
-                {selectedParagraph ? (
+                {/* ── Header with batch AI action buttons ── */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+                  <h3 style={{ margin: 0, flex: "0 0 auto" }}>选取段落及分词区域</h3>
+                  {selectedFigure ? (
+                    <button className="batch-ai-btn" onClick={handleImageAiAction}>
+                      🤖 解读图片
+                    </button>
+                  ) : (selectedParagraph || ocrText) ? (
+                    <>
+                      <button className="batch-ai-btn" onClick={() => handleBatchAiAction("解读")}>
+                        🤖 解读
+                      </button>
+                      <button className="batch-ai-btn" onClick={() => handleBatchAiAction("翻译")}>
+                        🌐 翻译
+                      </button>
+                      <button className="batch-ai-btn" onClick={() => handleBatchAiAction("摘要")}>
+                        📝 摘要
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+
+                {/* ── Figure image display ── */}
+                {selectedFigure ? (
+                  <div style={{ overflow: "auto" }}>
+                    <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                      {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
+                    </Text>
+                    {figureImageDataUrl ? (
+                      <img
+                        src={figureImageDataUrl}
+                        alt="Selected figure"
+                        style={{ maxWidth: "100%", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)" }}
+                      />
+                    ) : (
+                      <Text size={100} style={{ opacity: 0.5 }}>加载图片中...</Text>
+                    )}
+                  </div>
+                ) : selectedParagraph ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: "8px", overflow: "auto" }}>
                     {/* PDF-extracted text with word segmentation */}
                     {pdfTextExtractionEnabled && (
@@ -1270,7 +1430,7 @@ function App() {
                     )}
                   </div>
                 ) : (
-                  <div style={{ opacity: 0.5 }}>（请在左侧预览中点击选中需要阅读的段落块）</div>
+                  <div style={{ opacity: 0.5 }}>（请在左侧预览中点击选中需要阅读的段落块或图片区域）</div>
                 )}
               </div>
 

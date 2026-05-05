@@ -401,6 +401,28 @@
   color: #00D4BB;
 }
 
+/* ── Batch AI Action Buttons ─────────────────────────────── */
+.batch-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e0e0e0;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.batch-ai-btn:hover {
+  background: rgba(0, 212, 187, 0.18);
+  border-color: #00D4BB;
+  color: #00D4BB;
+}
+
 /* ── AI Markdown Content ─────────────────────────────────── */
 .ai-markdown-content {
   font-size: 14px;
