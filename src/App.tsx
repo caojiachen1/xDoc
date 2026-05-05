@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { fetch } from "@tauri-apps/plugin-http";
 import {
   Button,
   Card,
@@ -18,7 +19,7 @@ import {
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS } from "./components/SettingsDialog";
+import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS, VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import "./App.css";
 
@@ -94,6 +95,10 @@ export const STORAGE_KEYS = {
   scoreThreshold: "xdoc.settings.scoreThreshold",
   zoomMode: "xdoc.settings.zoomMode",
   pdfTextExtractionEnabled: "xdoc.settings.pdfTextExtractionEnabled",
+  llmVendor: "xdoc.settings.llm.vendor",
+  llmApiKey: "xdoc.settings.llm.apiKey",
+  llmBaseUrl: "xdoc.settings.llm.baseUrl",
+  llmModel: "xdoc.settings.llm.model",
 } as const;
 
 function App() {
@@ -129,6 +134,22 @@ function App() {
   const [ocrLoading, setOcrLoading] = useState(false);
   const [ocrInitialized, setOcrInitialized] = useState(false);
   const [ocrError, setOcrError] = useState("");
+
+  // LLM settings
+  const [llmSettings, setLlmSettings] = useState<LlmSettings>({
+    vendor: "deepseek",
+    apiKey: "",
+    baseUrl: VENDOR_PRESETS.deepseek.baseUrl,
+    model: VENDOR_PRESETS.deepseek.models[0],
+  });
+
+  // Floating menu state
+  const [floatingMenu, setFloatingMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    selectedText: string;
+  }>({ visible: false, x: 0, y: 0, selectedText: "" });
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -329,6 +350,22 @@ function App() {
       const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath)
         || "../model/GLM-OCR-GGUF";
       setOcrModelPath(savedOcrPath);
+
+      // LLM settings
+      const savedLlmVendor = window.localStorage.getItem(STORAGE_KEYS.llmVendor) || "deepseek";
+      const savedLlmApiKey = window.localStorage.getItem(STORAGE_KEYS.llmApiKey) || "";
+      const savedLlmBaseUrl = window.localStorage.getItem(STORAGE_KEYS.llmBaseUrl)
+        || VENDOR_PRESETS[savedLlmVendor]?.baseUrl
+        || VENDOR_PRESETS.deepseek.baseUrl;
+      const savedLlmModel = window.localStorage.getItem(STORAGE_KEYS.llmModel)
+        || VENDOR_PRESETS[savedLlmVendor]?.models?.[0]
+        || VENDOR_PRESETS.deepseek.models[0];
+      setLlmSettings({
+        vendor: savedLlmVendor,
+        apiKey: savedLlmApiKey,
+        baseUrl: savedLlmBaseUrl,
+        model: savedLlmModel,
+      });
     } catch {
       // ignore storage failures
     }
@@ -387,6 +424,16 @@ function App() {
       window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelPath, ocrModelPath);
     } catch { /* ignore */ }
   }, [ocrModelPath, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.llmVendor, llmSettings.vendor);
+      window.localStorage.setItem(STORAGE_KEYS.llmApiKey, llmSettings.apiKey);
+      window.localStorage.setItem(STORAGE_KEYS.llmBaseUrl, llmSettings.baseUrl);
+      window.localStorage.setItem(STORAGE_KEYS.llmModel, llmSettings.model);
+    } catch { /* ignore */ }
+  }, [llmSettings, environmentReady]);
 
   // Initialize OCR backend when enabled and model path is set
   useEffect(() => {
@@ -546,26 +593,152 @@ function App() {
     return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
   }, [zoomMode, customScale, imageSize.width, imageSize.height]);
 
-  const requestAiDescription = async (text: string) => {
+  const requestAiDescription = async (text: string, action: string = "解读") => {
     if (!text.trim()) {
       setAiResult("");
       return;
     }
     setSelectedWords(text);
-    setAiResult("正在请求 AI 进行解读...\n（这是模拟结果，需要接下来接入真实的 LLM 服务如 Tauri backend 的 fetch）");
-    setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
-      setAiResult(`【AI 解读功能】: ${text}\n\n该文本是通过您刚刚点击/圈选选中的段落。这里占位以便接入任何基于 Tauri backend 或者浏览器直接发出 API Fetch 的大模型提供服务。此功能将在后续由您进行扩展使用！`);
-    }, 1500);
-  };
+    setAiResult(`正在请求 AI ${action}...`);
+    setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
 
-  const handleTextSelection = () => {
-    const selection = window.getSelection();
-    if (selection && selection.toString().trim()) {
-      requestAiDescription(selection.toString().trim());
+    if (!llmSettings.apiKey || !llmSettings.baseUrl) {
+      setAiResult("请先在设置中配置 LLM API Key 和 Base URL");
+      return;
+    }
+
+    try {
+      const systemPrompts: Record<string, string> = {
+        "解读": "你是一个专业的文档分析助手。请对用户提供的文本进行详细的解读分析，包括：内容概要、关键概念解释、上下文含义等。使用中文回复。",
+        "翻译": "你是一个专业的翻译助手。请将用户提供的文本翻译成中文。如果原文已是中文，则翻译成英文。只输出翻译结果，不要添加额外说明。",
+        "摘要": "你是一个专业的文档分析助手。请对用户提供的文本进行简洁的摘要总结，提取关键要点。使用中文回复。",
+      };
+
+      const systemPrompt = systemPrompts[action] || systemPrompts["解读"];
+      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${llmSettings.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: llmSettings.model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: text },
+          ],
+          temperature: 0.7,
+          max_tokens: 2048,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API 请求失败 (${response.status}): ${errText}`);
+      }
+
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content;
+      if (content) {
+        setAiResult(content);
+      } else {
+        setAiResult("AI 返回了空内容");
+      }
+    } catch (e) {
+      setAiResult(`请求失败: ${String(e)}`);
     }
   };
+
+  const handleTextSelection = (_e: React.MouseEvent) => {
+    const selection = window.getSelection();
+    if (!selection || !selection.toString().trim()) {
+      // Close floating menu if no selection
+      setFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+      return;
+    }
+
+    const selectedText = selection.toString().trim();
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+
+    // Get right pane bounds to constrain floating menu
+    const paneEl = rightPaneRef.current;
+    const paneRect = paneEl?.getBoundingClientRect();
+    const menuW = 260; // estimated menu width
+    const menuH = 40;  // estimated menu height
+
+    // Default: position above-right of selection end
+    let menuX = rect.right + 6;
+    let menuY = rect.top - menuH - 4;
+
+    // Constrain within right pane horizontally
+    if (paneRect) {
+      // If menu would overflow right edge, flip to left of selection
+      if (menuX + menuW > paneRect.right - 4) {
+        menuX = rect.left - menuW - 6;
+      }
+      // If still overflowing left edge, clamp
+      menuX = Math.max(menuX, paneRect.left + 4);
+      menuX = Math.min(menuX, paneRect.right - menuW - 4);
+
+      // Vertically: if not enough space above, show below the selection
+      if (menuY < paneRect.top) {
+        menuY = rect.bottom + 4;
+      }
+      // Clamp vertically within pane
+      menuY = Math.max(menuY, paneRect.top + 4);
+      menuY = Math.min(menuY, paneRect.bottom - menuH - 4);
+    } else {
+      // Fallback to window constraints
+      if (menuX + menuW > window.innerWidth - 4) {
+        menuX = rect.left - menuW - 6;
+      }
+      menuX = Math.max(4, Math.min(menuX, window.innerWidth - menuW - 4));
+      if (menuY < 0) {
+        menuY = rect.bottom + 4;
+      }
+      menuY = Math.max(4, Math.min(menuY, window.innerHeight - menuH - 4));
+    }
+
+    setFloatingMenu({
+      visible: true,
+      x: menuX,
+      y: menuY,
+      selectedText,
+    });
+  };
+
+  const handleFloatingAction = (action: string) => {
+    if (floatingMenu.selectedText) {
+      requestAiDescription(floatingMenu.selectedText, action);
+    }
+  };
+
+  const dismissFloatingMenu = () => {
+    setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+  };
+
+  // Global click listener to dismiss floating menu
+  useEffect(() => {
+    if (!floatingMenu.visible) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".floating-ai-menu")) {
+        dismissFloatingMenu();
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismissFloatingMenu();
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [floatingMenu.visible]);
 
   const segmentedParagraph = useMemo(() => {
     if (!selectedParagraph?.text) return [];
@@ -999,6 +1172,33 @@ function App() {
                   {aiResult || "（请在上方文字区域点击单词或拖拽选中文本，AI 解读内容将出现在此处）"}
                 </div>
               </div>
+
+              {/* Floating AI Action Menu */}
+              {floatingMenu.visible && (
+                <div
+                  className="floating-ai-menu"
+                  style={{ left: floatingMenu.x, top: floatingMenu.y }}
+                >
+                  <button
+                    className="floating-ai-btn"
+                    onClick={(e) => { e.stopPropagation(); handleFloatingAction("解读"); }}
+                  >
+                    🤖 AI 解读
+                  </button>
+                  <button
+                    className="floating-ai-btn"
+                    onClick={(e) => { e.stopPropagation(); handleFloatingAction("翻译"); }}
+                  >
+                    🌐 AI 翻译
+                  </button>
+                  <button
+                    className="floating-ai-btn"
+                    onClick={(e) => { e.stopPropagation(); handleFloatingAction("摘要"); }}
+                  >
+                    📝 AI 摘要
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </Card>
@@ -1020,6 +1220,8 @@ function App() {
         onOcrEnabledChange={setOcrEnabled}
         ocrModelPath={ocrModelPath}
         onOcrModelPathChange={setOcrModelPath}
+        llmSettings={llmSettings}
+        onLlmSettingsChange={setLlmSettings}
       />
     </div>
   );

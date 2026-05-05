@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { fetch } from "@tauri-apps/plugin-http";
 import {
   Button,
   Switch,
@@ -17,19 +18,38 @@ import {
   Settings24Regular,
   Scan24Regular,
   Dismiss24Regular,
+  BrainCircuit24Regular,
 } from "@fluentui/react-icons";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsDialog.css";
 
 /* ── types ─────────────────────────────────────────────── */
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
-type SettingsSection = "general" | "ocr";
+type SettingsSection = "general" | "ocr" | "llm";
 
 interface DownloadProgress {
   progress: number;
   message: string;
   status: "downloading" | "completed" | "error" | "checking" | "idle";
 }
+
+export interface LlmSettings {
+  vendor: string;
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+}
+
+export const VENDOR_PRESETS: Record<string, { label: string; baseUrl: string; models: string[] }> = {
+  openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] },
+  deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-chat"] },
+  volcengine: { label: "火山引擎 (豆包)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", models: ["doubao-1.5-pro-256k", "doubao-1.5-lite-32k"] },
+  zhipu: { label: "智谱 AI (GLM)", baseUrl: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-plus", "glm-4-flash"] },
+  moonshot: { label: "Moonshot (月之暗面)", baseUrl: "https://api.moonshot.cn/v1", models: ["moonshot-v1-8k", "moonshot-v1-32k"] },
+  aliyun: { label: "阿里云百炼 (千问)", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-plus", "qwen-max"] },
+  siliconflow: { label: "硅基流动 (SiliconFlow)", baseUrl: "https://api.siliconflow.cn/v1", models: ["Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3"] },
+  custom: { label: "自定义", baseUrl: "", models: [] },
+};
 
 interface Props {
   open: boolean;
@@ -49,11 +69,18 @@ interface Props {
   onOcrEnabledChange: (v: boolean) => void;
   ocrModelPath: string;
   onOcrModelPathChange: (v: string) => void;
+  /* llm */
+  llmSettings: LlmSettings;
+  onLlmSettingsChange: (v: LlmSettings) => void;
 }
 
 const STORAGE_KEYS = {
   ocrEnabled: "xdoc.settings.ocr.enabled",
   ocrModelPath: "xdoc.settings.ocr.modelPath",
+  llmVendor: "xdoc.settings.llm.vendor",
+  llmApiKey: "xdoc.settings.llm.apiKey",
+  llmBaseUrl: "xdoc.settings.llm.baseUrl",
+  llmModel: "xdoc.settings.llm.model",
 } as const;
 
 /* ── component ──────────────────────────────────────────── */
@@ -65,12 +92,18 @@ function SettingsDialog(props: Props) {
     pdfTextExtractionEnabled, onPdfTextExtractionEnabledChange,
     ocrEnabled, onOcrEnabledChange,
     ocrModelPath, onOcrModelPathChange,
+    llmSettings, onLlmSettingsChange,
   } = props;
 
   const [section, setSection] = useState<SettingsSection>("general");
   const [download, setDownload] = useState<DownloadProgress>({
     progress: 0, message: "", status: "idle",
   });
+
+  // Model list fetching
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchModelsError, setFetchModelsError] = useState("");
 
   const unlistenRef = useRef<(() => void) | null>(null);
 
@@ -125,6 +158,41 @@ function SettingsDialog(props: Props) {
     }
   }, [onOcrModelPathChange]);
 
+  const handleFetchModels = useCallback(async () => {
+    if (!llmSettings.baseUrl || !llmSettings.apiKey) {
+      setFetchModelsError("请先填写 API Base URL 和 API Key");
+      return;
+    }
+    setFetchingModels(true);
+    setFetchModelsError("");
+    setFetchedModels([]);
+
+    try {
+      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+      const response = await fetch(`${baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${llmSettings.apiKey}` },
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`请求失败 (${response.status}): ${errText}`);
+      }
+      const data = await response.json();
+      const ids: string[] = (data.data ?? [])
+        .map((m: any) => m.id ?? m.model ?? m.name)
+        .filter(Boolean)
+        .sort();
+      if (ids.length === 0) {
+        setFetchModelsError("未获取到模型列表");
+      } else {
+        setFetchedModels(ids);
+      }
+    } catch (e) {
+      setFetchModelsError(String(e));
+    } finally {
+      setFetchingModels(false);
+    }
+  }, [llmSettings.baseUrl, llmSettings.apiKey]);
+
   /* ── render ─────────────────────────────────────────── */
   if (!open) return null;
 
@@ -152,6 +220,13 @@ function SettingsDialog(props: Props) {
               >
                 <Scan24Regular />
                 <span>OCR 设置</span>
+              </button>
+              <button
+                className={`settings-tab ${section === "llm" ? "active" : ""}`}
+                onClick={() => setSection("llm")}
+              >
+                <BrainCircuit24Regular />
+                <span>LLM 设置</span>
               </button>
             </nav>
           </div>
@@ -332,6 +407,136 @@ function SettingsDialog(props: Props) {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {section === "llm" && (
+              <div className="settings-form">
+                {/* ── Vendor Selection ─────────────── */}
+                <div className="settings-field">
+                  <Text weight="semibold">模型厂商</Text>
+                  <Dropdown
+                    value={VENDOR_PRESETS[llmSettings.vendor]?.label ?? "自定义"}
+                    selectedOptions={[llmSettings.vendor]}
+                    onOptionSelect={(_, d) => {
+                      const vendor = d.optionValue as string;
+                      const preset = VENDOR_PRESETS[vendor];
+                      onLlmSettingsChange({
+                        ...llmSettings,
+                        vendor,
+                        baseUrl: preset?.baseUrl ?? llmSettings.baseUrl,
+                        model: preset?.models?.[0] ?? llmSettings.model,
+                      });
+                    }}
+                    className="settings-dropdown"
+                    style={{ width: "100%" }}
+                  >
+                    {Object.entries(VENDOR_PRESETS).map(([key, preset]) => (
+                      <Option key={key} value={key}>
+                        {preset.label}
+                      </Option>
+                    ))}
+                  </Dropdown>
+                </div>
+
+                <Divider className="settings-divider" />
+
+                {/* ── Base URL ─────────────────────── */}
+                <div className="settings-field">
+                  <Text weight="semibold">API Base URL</Text>
+                  <Input
+                    value={llmSettings.baseUrl}
+                    onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, baseUrl: d.value })}
+                    placeholder="https://api.openai.com/v1"
+                    className="settings-input-flex"
+                  />
+                  <Text size={100} className="settings-hint">
+                    选择厂商后自动填入，也可手动修改
+                  </Text>
+                </div>
+
+                <Divider className="settings-divider" />
+
+                {/* ── Model ────────────────────────── */}
+                <div className="settings-field">
+                  <Text weight="semibold">模型名称</Text>
+                  <div className="settings-field-row">
+                    {fetchedModels.length > 0 ? (
+                      <Dropdown
+                        value={llmSettings.model}
+                        selectedOptions={[llmSettings.model]}
+                        onOptionSelect={(_, d) => {
+                          const model = d.optionValue as string;
+                          if (model) onLlmSettingsChange({ ...llmSettings, model });
+                        }}
+                        className="settings-dropdown"
+                        style={{ flex: 1 }}
+                      >
+                        {fetchedModels.map((m) => (
+                          <Option key={m} value={m}>
+                            {m}
+                          </Option>
+                        ))}
+                      </Dropdown>
+                    ) : llmSettings.vendor !== "custom" && VENDOR_PRESETS[llmSettings.vendor]?.models.length > 0 ? (
+                      <Dropdown
+                        value={llmSettings.model}
+                        selectedOptions={[llmSettings.model]}
+                        onOptionSelect={(_, d) => {
+                          const model = d.optionValue as string;
+                          if (model) onLlmSettingsChange({ ...llmSettings, model });
+                        }}
+                        className="settings-dropdown"
+                        style={{ flex: 1 }}
+                      >
+                        {VENDOR_PRESETS[llmSettings.vendor].models.map((m) => (
+                          <Option key={m} value={m}>
+                            {m}
+                          </Option>
+                        ))}
+                      </Dropdown>
+                    ) : (
+                      <Input
+                        value={llmSettings.model}
+                        onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, model: d.value })}
+                        placeholder="输入模型名称，如 gpt-4o"
+                        className="settings-input-flex"
+                      />
+                    )}
+                    <Button
+                      appearance="secondary"
+                      onClick={handleFetchModels}
+                      disabled={fetchingModels || !llmSettings.baseUrl || !llmSettings.apiKey}
+                    >
+                      {fetchingModels ? "获取中..." : "获取模型列表"}
+                    </Button>
+                  </div>
+                  {fetchModelsError && (
+                    <Text size={100} style={{ color: "#ff6b6b" }}>{fetchModelsError}</Text>
+                  )}
+                  <Text size={100} className="settings-hint">
+                    点击"获取模型列表"从 API 自动获取可用模型，或从预设/手动输入
+                  </Text>
+                </div>
+
+                <Divider className="settings-divider" />
+
+                {/* ── API Key ──────────────────────── */}
+                <div className="settings-field">
+                  <Text weight="semibold">API Key</Text>
+                  <div className="settings-field-row">
+                    <Input
+                      type="password"
+                      value={llmSettings.apiKey}
+                      onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, apiKey: d.value })}
+                      placeholder="输入您的 API Key"
+                      className="settings-input-flex"
+                    />
+                  </div>
+                  <Text size={100} className="settings-hint">
+                    API Key 将以密码形式存储，仅保存在本地
+                  </Text>
+                </div>
               </div>
             )}
         </div>
