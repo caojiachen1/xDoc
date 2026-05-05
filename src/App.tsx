@@ -555,13 +555,19 @@ function App() {
 
   const segmentedParagraph = useMemo(() => {
     if (!selectedParagraph?.text) return [];
+    
+    // Remove original physical newlines, then add newlines after Chinese and English sentence punctuations (excluding decimal points)
+    const formattedText = selectedParagraph.text
+      .replace(/[\r\n]+/g, "") // Remove existing physical line breaks
+      .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n"); // Add explicit line break after punctuation
+
     try {
       // @ts-ignore
       const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
       // @ts-ignore
-      return Array.from(segmenter.segment(selectedParagraph.text)).map((s: any) => s.segment);
+      return Array.from(segmenter.segment(formattedText)).map((s: any) => s.segment);
     } catch {
-      return selectedParagraph.text.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
+      return formattedText.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
     }
   }, [selectedParagraph?.text]);
 
@@ -886,7 +892,7 @@ function App() {
                       <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
                         PDF 原文
                       </Text>
-                      <div style={{ wordBreak: "break-all" }}>
+                      <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap" }}>
                         {segmentedParagraph.map((word, idx) => (
                           <span
                             key={idx}
@@ -918,7 +924,14 @@ function App() {
                         ) : ocrText ? (
                           <div
                             className="ocr-latex-content"
-                            dangerouslySetInnerHTML={{ __html: renderLatex(ocrText) }}
+                            style={{ whiteSpace: "pre-wrap" }}
+                            dangerouslySetInnerHTML={{ 
+                              __html: renderLatex(
+                                ocrText
+                                  .replace(/[\r\n]+/g, "")
+                                  .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n")
+                              ) 
+                            }}
                           />
                         ) : (
                           <Text size={100} style={{ opacity: 0.5 }}>点击段落以进行 OCR 识别</Text>
