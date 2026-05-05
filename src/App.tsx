@@ -93,6 +93,7 @@ export const STORAGE_KEYS = {
   modelPath: "xdoc.settings.modelPath",
   scoreThreshold: "xdoc.settings.scoreThreshold",
   zoomMode: "xdoc.settings.zoomMode",
+  pdfTextExtractionEnabled: "xdoc.settings.pdfTextExtractionEnabled",
 } as const;
 
 function App() {
@@ -108,6 +109,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [scoreThreshold, setScoreThreshold] = useState(0.5);
+  const [pdfTextExtractionEnabled, setPdfTextExtractionEnabled] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
@@ -297,6 +299,9 @@ function App() {
         }
       }
 
+      const savedPdfText = window.localStorage.getItem(STORAGE_KEYS.pdfTextExtractionEnabled);
+      setPdfTextExtractionEnabled(savedPdfText === null ? true : savedPdfText === "true");
+
       const savedZoom = window.localStorage.getItem(STORAGE_KEYS.zoomMode) as ZoomMode | null;
       if (savedZoom && ["fit_page", "fit_width", "fit_height", "actual", "custom"].includes(savedZoom)) {
         setZoomMode(savedZoom);
@@ -337,6 +342,15 @@ function App() {
       // ignore storage failures
     }
   }, [scoreThreshold, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.pdfTextExtractionEnabled, String(pdfTextExtractionEnabled));
+    } catch {
+      // ignore storage failures
+    }
+  }, [pdfTextExtractionEnabled, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
@@ -920,25 +934,27 @@ function App() {
                 {selectedParagraph ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: "8px", overflow: "auto" }}>
                     {/* PDF-extracted text with word segmentation */}
-                    <div>
-                      <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
-                        PDF 原文
-                      </Text>
-                      <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap" }}>
-                        {segmentedParagraph.map((word, idx) => (
-                          <span
-                            key={idx}
-                            className="word-span"
-                            onClick={() => {
-                              if (window.getSelection()?.toString() !== "") return;
-                              requestAiDescription(word);
-                            }}
-                          >
-                            {word}
-                          </span>
-                        ))}
+                    {pdfTextExtractionEnabled && (
+                      <div>
+                        <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                          PDF 原文
+                        </Text>
+                        <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap" }}>
+                          {segmentedParagraph.map((word, idx) => (
+                            <span
+                              key={idx}
+                              className="word-span"
+                              onClick={() => {
+                                if (window.getSelection()?.toString() !== "") return;
+                                requestAiDescription(word);
+                              }}
+                            >
+                              {word}
+                            </span>
+                          ))}
+                        </div>
                       </div>
-                    </div>
+                    )}
 
                     {/* OCR result with LaTeX rendering */}
                     {ocrEnabled && (
@@ -995,9 +1011,11 @@ function App() {
         modelLoaded={modelLoaded}
         scoreThreshold={scoreThreshold}
         zoomMode={zoomMode}
+        pdfTextExtractionEnabled={pdfTextExtractionEnabled}
         onSelectModel={selectModel}
         onScoreThresholdChange={applyScoreThreshold}
         onZoomModeChange={setZoomMode}
+        onPdfTextExtractionEnabledChange={setPdfTextExtractionEnabled}
         ocrEnabled={ocrEnabled}
         onOcrEnabledChange={setOcrEnabled}
         ocrModelPath={ocrModelPath}

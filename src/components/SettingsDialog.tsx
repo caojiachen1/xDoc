@@ -42,6 +42,8 @@ interface Props {
   onSelectModel: () => Promise<void>;
   onScoreThresholdChange: (v: number) => void;
   onZoomModeChange: (v: ZoomMode) => void;
+  pdfTextExtractionEnabled: boolean;
+  onPdfTextExtractionEnabledChange: (v: boolean) => void;
   /* ocr */
   ocrEnabled: boolean;
   onOcrEnabledChange: (v: boolean) => void;
@@ -60,6 +62,7 @@ function SettingsDialog(props: Props) {
     open, onClose,
     modelPath, modelLoaded, scoreThreshold, zoomMode,
     onSelectModel, onScoreThresholdChange, onZoomModeChange,
+    pdfTextExtractionEnabled, onPdfTextExtractionEnabledChange,
     ocrEnabled, onOcrEnabledChange,
     ocrModelPath, onOcrModelPathChange,
   } = props;
@@ -223,6 +226,24 @@ function SettingsDialog(props: Props) {
                       </Option>
                     ))}
                   </Dropdown>
+                </div>
+
+                <Divider className="settings-divider" />
+
+                {/* ── PDF Text Extraction ────────────── */}
+                <div className="settings-field">
+                  <div className="settings-field-row" style={{ justifyContent: "space-between" }}>
+                    <div>
+                      <Text weight="semibold">PDF 原文提取</Text>
+                      <Text size={100} className="settings-hint" style={{ display: "block", marginTop: 4 }}>
+                        关闭则在段落显示栏中只显示 OCR 结果
+                      </Text>
+                    </div>
+                    <Switch
+                      checked={pdfTextExtractionEnabled}
+                      onChange={(_, d) => onPdfTextExtractionEnabledChange(d.checked)}
+                    />
+                  </div>
                 </div>
               </div>
             )}
