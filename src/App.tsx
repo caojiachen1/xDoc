@@ -571,45 +571,77 @@ function App() {
     }
   }, [selectedParagraph?.text]);
 
-  // LaTeX renderer: converts text with $...$ and $$...$$ to HTML
-  const renderLatex = useCallback((text: string): string => {
-    if (!text) return "";
-    // Split on display math $$...$$ and inline math $...$
-    const parts: string[] = [];
-    let remaining = text;
-    // First handle display math $$...$$
-    const displayRegex = /\$\$([\s\S]*?)\$\$/g;
-    let lastIdx = 0;
-    let match;
-    while ((match = displayRegex.exec(remaining)) !== null) {
-      parts.push(remaining.slice(lastIdx, match.index));
-      try {
-        parts.push(katex.renderToString(match[1], { displayMode: true, throwOnError: false }));
-      } catch {
-        parts.push(match[0]);
-      }
-      lastIdx = match.index + match[0].length;
-    }
-    parts.push(remaining.slice(lastIdx));
-    const afterDisplay = parts.join("");
+  // LaTeX renderer: converts text to clickable words and $...$, $$...$$ math to HTML nodes
+  const renderOcrNodes = useCallback((text: string): React.ReactNode[] => {
+    if (!text) return [];
 
-    // Then handle inline math $...$
-    const result: string[] = [];
-    const inlineRegex = /\$(?!\$)([\s\S]*?[^\\])\$(?!\$)/g;
-    let lastIdx2 = 0;
-    let match2;
-    remaining = afterDisplay;
-    while ((match2 = inlineRegex.exec(remaining)) !== null) {
-      result.push(remaining.slice(lastIdx2, match2.index));
+    const nodes: React.ReactNode[] = [];
+    let tokenIndex = 0;
+
+    const splitTextIntoWords = (str: string) => {
       try {
-        result.push(katex.renderToString(match2[1], { displayMode: false, throwOnError: false }));
+        // @ts-ignore
+        const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+        // @ts-ignore
+        return Array.from(segmenter.segment(str)).map((s: any) => s.segment);
       } catch {
-        result.push(match2[0]);
+        return str.split(/(?=[\u4e00-\u9fa5])/);
       }
-      lastIdx2 = match2.index + match2[0].length;
+    };
+
+    const pushText = (str: string) => {
+      if (!str) return;
+      const words = splitTextIntoWords(str);
+      words.forEach((word, wIdx) => {
+        nodes.push(
+          <span
+            key={`text-${tokenIndex}-${wIdx}`}
+            className="word-span"
+            onClick={() => {
+              if (window.getSelection()?.toString() !== "") return;
+              requestAiDescription(word);
+            }}
+          >
+            {word}
+          </span>
+        );
+      });
+      tokenIndex++;
+    };
+
+    // 1. Split on display math $$...$$
+    const displayParts = text.split(/(\$\$[\s\S]*?\$\$)/);
+    for (let i = 0; i < displayParts.length; i++) {
+      const part = displayParts[i];
+      if (part.startsWith('$$') && part.endsWith('$$')) {
+        const math = part.slice(2, -2);
+        try {
+          const html = katex.renderToString(math, { displayMode: true, throwOnError: false });
+          nodes.push(<span key={`math-d-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
+        } catch {
+          pushText(part);
+        }
+      } else {
+        // 2. Split on inline math $...$
+        const inlineParts = part.split(/(\$(?!\$)[\s\S]*?[^\\]\$)/);
+        for (let j = 0; j < inlineParts.length; j++) {
+          const inPart = inlineParts[j];
+          if (inPart.startsWith('$') && inPart.endsWith('$') && !inPart.startsWith('$$')) {
+            const inMath = inPart.slice(1, -1);
+            try {
+              const html = katex.renderToString(inMath, { displayMode: false, throwOnError: false });
+              nodes.push(<span key={`math-i-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
+            } catch {
+              pushText(inPart);
+            }
+          } else {
+            pushText(inPart);
+          }
+        }
+      }
     }
-    result.push(remaining.slice(lastIdx2));
-    return result.join("");
+
+    return nodes;
   }, []);
 
   const handleMouseDownV = (e: React.MouseEvent) => {
@@ -925,14 +957,13 @@ function App() {
                           <div
                             className="ocr-latex-content"
                             style={{ whiteSpace: "pre-wrap" }}
-                            dangerouslySetInnerHTML={{ 
-                              __html: renderLatex(
-                                ocrText
-                                  .replace(/[\r\n]+/g, "")
-                                  .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n")
-                              ) 
-                            }}
-                          />
+                          >
+                            {renderOcrNodes(
+                              ocrText
+                                .replace(/[\r\n]+/g, "")
+                                .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n")
+                            )}
+                          </div>
                         ) : (
                           <Text size={100} style={{ opacity: 0.5 }}>点击段落以进行 OCR 识别</Text>
                         )}
