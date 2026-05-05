@@ -285,26 +285,12 @@
 
 .bbox {
   position: absolute;
-  border: 2px solid;
+  border: 1px solid;
   box-sizing: border-box;
   border-radius: 6px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
 }
 
-.bbox-label {
-  position: absolute;
-  color: white;
-  font-size: 11px;
-  line-height: 18px;
-  font-weight: 600;
-  padding: 0 6px;
-  border-radius: 4px;
-  max-width: 320px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-}
 
 .empty-state {
   width: 100%;

@@ -1276,37 +1276,26 @@ function App() {
                           const top = Math.max(0, box.ymin * scale.y);
                           const width = Math.max(1, (box.xmax - box.xmin) * scale.x);
                           const height = Math.max(1, (box.ymax - box.ymin) * scale.y);
-                          const label = `${CLASSES[box.cls_id] ?? `class_${box.cls_id}`}  #${box.read_order}  ${box.score.toFixed(2)}`;
                           const clickable = isVisualBox(box.cls_id);
                           const isFigSelected = selectedFigure === box;
 
                           return (
-                            <div key={`${box.cls_id}-${box.read_order}-${idx}`}>
-                              <div
-                                className="bbox"
-                                style={{
-                                  borderColor: isFigSelected ? "#00D4BB" : color,
-                                  backgroundColor: isFigSelected ? "rgba(0, 212, 187, 0.2)" : "transparent",
-                                  left,
-                                  top,
-                                  width,
-                                  height,
-                                  cursor: clickable ? "pointer" : undefined,
-                                  pointerEvents: clickable ? "auto" : undefined,
-                                }}
-                                onClick={clickable ? () => selectFigure(box) : undefined}
-                              />
-                              <div
-                                className="bbox-label"
-                                style={{
-                                  backgroundColor: isFigSelected ? "#00D4BB" : color,
-                                  left,
-                                  top: Math.max(0, top - 22),
-                                }}
-                              >
-                                {label}
-                              </div>
-                            </div>
+                            <div
+                              key={`${box.cls_id}-${box.read_order}-${idx}`}
+                              className="bbox"
+                              style={{
+                                borderColor: isFigSelected ? color : `${color}59`,
+                                borderWidth: isFigSelected ? 1 : 1,
+                                backgroundColor: isFigSelected ? "rgba(128, 128, 128, 0.12)" : "transparent",
+                                left,
+                                top,
+                                width,
+                                height,
+                                cursor: clickable ? "pointer" : undefined,
+                                pointerEvents: clickable ? "auto" : undefined,
+                              }}
+                              onClick={clickable ? () => selectFigure(box) : undefined}
+                            />
                           );
                         })}
                       </div>
