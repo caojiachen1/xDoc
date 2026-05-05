@@ -43,7 +43,7 @@ export interface LlmSettings {
 export const VENDOR_PRESETS: Record<string, { label: string; baseUrl: string; models: string[] }> = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] },
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-chat"] },
-  volcengine: { label: "火山引擎 (豆包)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", models: ["doubao-seed-2.0-mini"] },
+  volcengine: { label: "火山引擎 (豆包)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", models: ["doubao-seed-2-0-mini-260215"] },
   zhipu: { label: "智谱 AI (GLM)", baseUrl: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-plus", "glm-4-flash"] },
   moonshot: { label: "Moonshot (月之暗面)", baseUrl: "https://api.moonshot.cn/v1", models: ["moonshot-v1-8k", "moonshot-v1-32k"] },
   aliyun: { label: "阿里云百炼 (千问)", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-plus", "qwen-max"] },
