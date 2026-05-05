@@ -35,7 +35,7 @@ interface DownloadProgress {
 
 export interface LlmSettings {
   vendor: string;
-  apiKey: string;
+  vendorApiKeys: Record<string, string>;
   baseUrl: string;
   model: string;
 }
@@ -43,7 +43,7 @@ export interface LlmSettings {
 export const VENDOR_PRESETS: Record<string, { label: string; baseUrl: string; models: string[] }> = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] },
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-chat"] },
-  volcengine: { label: "火山引擎 (豆包)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", models: ["doubao-1.5-pro-256k", "doubao-1.5-lite-32k"] },
+  volcengine: { label: "火山引擎 (豆包)", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", models: ["doubao-seed-2.0-mini"] },
   zhipu: { label: "智谱 AI (GLM)", baseUrl: "https://open.bigmodel.cn/api/paas/v4", models: ["glm-4-plus", "glm-4-flash"] },
   moonshot: { label: "Moonshot (月之暗面)", baseUrl: "https://api.moonshot.cn/v1", models: ["moonshot-v1-8k", "moonshot-v1-32k"] },
   aliyun: { label: "阿里云百炼 (千问)", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", models: ["qwen-plus", "qwen-max"] },
@@ -78,7 +78,7 @@ const STORAGE_KEYS = {
   ocrEnabled: "xdoc.settings.ocr.enabled",
   ocrModelPath: "xdoc.settings.ocr.modelPath",
   llmVendor: "xdoc.settings.llm.vendor",
-  llmApiKey: "xdoc.settings.llm.apiKey",
+  llmVendorApiKeys: "xdoc.settings.llm.vendorApiKeys",
   llmBaseUrl: "xdoc.settings.llm.baseUrl",
   llmModel: "xdoc.settings.llm.model",
 } as const;
@@ -123,6 +123,12 @@ function SettingsDialog(props: Props) {
     };
   }, []);
 
+  // Clear fetched models when vendor or baseUrl changes
+  useEffect(() => {
+    setFetchedModels([]);
+    setFetchModelsError("");
+  }, [llmSettings.vendor, llmSettings.baseUrl]);
+
   /* ── download & select handlers ───────────────────────── */
   const handleSelectOcrModel = async () => {
     try {
@@ -158,8 +164,10 @@ function SettingsDialog(props: Props) {
     }
   }, [onOcrModelPathChange]);
 
+  const currentApiKey = llmSettings.vendorApiKeys[llmSettings.vendor] || "";
+
   const handleFetchModels = useCallback(async () => {
-    if (!llmSettings.baseUrl || !llmSettings.apiKey) {
+    if (!llmSettings.baseUrl || !currentApiKey) {
       setFetchModelsError("请先填写 API Base URL 和 API Key");
       return;
     }
@@ -170,7 +178,7 @@ function SettingsDialog(props: Props) {
     try {
       const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
       const response = await fetch(`${baseUrl}/models`, {
-        headers: { Authorization: `Bearer ${llmSettings.apiKey}` },
+        headers: { Authorization: `Bearer ${currentApiKey}` },
       });
       if (!response.ok) {
         const errText = await response.text();
@@ -181,17 +189,21 @@ function SettingsDialog(props: Props) {
         .map((m: any) => m.id ?? m.model ?? m.name)
         .filter(Boolean)
         .sort();
-      if (ids.length === 0) {
-        setFetchModelsError("未获取到模型列表");
+      // Volcengine: restrict to the preset model
+      const finalIds = llmSettings.vendor === "volcengine"
+        ? ids.filter((id) => VENDOR_PRESETS.volcengine.models.includes(id))
+        : ids;
+      if (finalIds.length === 0) {
+        setFetchedModels(llmSettings.vendor === "volcengine" ? VENDOR_PRESETS.volcengine.models : []);
       } else {
-        setFetchedModels(ids);
+        setFetchedModels(finalIds);
       }
     } catch (e) {
       setFetchModelsError(String(e));
     } finally {
       setFetchingModels(false);
     }
-  }, [llmSettings.baseUrl, llmSettings.apiKey]);
+  }, [llmSettings.baseUrl, currentApiKey]);
 
   /* ── render ─────────────────────────────────────────── */
   if (!open) return null;
@@ -506,7 +518,7 @@ function SettingsDialog(props: Props) {
                     <Button
                       appearance="secondary"
                       onClick={handleFetchModels}
-                      disabled={fetchingModels || !llmSettings.baseUrl || !llmSettings.apiKey}
+                      disabled={fetchingModels || !llmSettings.baseUrl || !currentApiKey}
                     >
                       {fetchingModels ? "获取中..." : "获取模型列表"}
                     </Button>
@@ -527,14 +539,17 @@ function SettingsDialog(props: Props) {
                   <div className="settings-field-row">
                     <Input
                       type="password"
-                      value={llmSettings.apiKey}
-                      onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, apiKey: d.value })}
+                      value={currentApiKey}
+                      onChange={(_, d) => onLlmSettingsChange({
+                        ...llmSettings,
+                        vendorApiKeys: { ...llmSettings.vendorApiKeys, [llmSettings.vendor]: d.value },
+                      })}
                       placeholder="输入您的 API Key"
                       className="settings-input-flex"
                     />
                   </div>
                   <Text size={100} className="settings-hint">
-                    API Key 将以密码形式存储，仅保存在本地
+                    每个厂商独立保存 API Key，切换厂商时自动切换
                   </Text>
                 </div>
               </div>

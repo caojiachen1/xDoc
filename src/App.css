@@ -400,3 +400,125 @@
   background: rgba(0, 212, 187, 0.2);
   color: #00D4BB;
 }
+
+/* ── AI Markdown Content ─────────────────────────────────── */
+.ai-markdown-content {
+  font-size: 14px;
+  line-height: 1.7;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.ai-markdown-content p {
+  margin: 0 0 8px;
+}
+
+.ai-markdown-content p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-markdown-content strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.ai-markdown-content em {
+  color: #e0e0e0;
+}
+
+.ai-markdown-content code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.ai-markdown-content pre {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  padding: 10px 14px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.ai-markdown-content pre code {
+  background: transparent;
+  padding: 0;
+  font-size: 0.85em;
+  line-height: 1.55;
+}
+
+.ai-markdown-content ul,
+.ai-markdown-content ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.ai-markdown-content li {
+  margin: 2px 0;
+}
+
+.ai-markdown-content .katex-display {
+  margin: 8px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.ai-markdown-content .katex {
+  font-size: 1.1em;
+}
+
+.ai-markdown-content .katex-display > .katex {
+  font-size: 1.2em;
+}
+
+.ai-markdown-content .math-fallback {
+  color: #888;
+  font-style: italic;
+}
+
+.ai-markdown-content blockquote {
+  border-left: 3px solid #00D4BB;
+  padding-left: 12px;
+  margin: 8px 0;
+  color: #bbb;
+}
+
+.ai-markdown-content h1,
+.ai-markdown-content h2,
+.ai-markdown-content h3,
+.ai-markdown-content h4 {
+  color: #fff;
+  margin: 10px 0 6px;
+  font-weight: 600;
+}
+
+.ai-markdown-content h1 { font-size: 1.3em; }
+.ai-markdown-content h2 { font-size: 1.15em; }
+.ai-markdown-content h3 { font-size: 1.05em; }
+
+.ai-markdown-content hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  margin: 10px 0;
+}
+
+.ai-markdown-content table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 0.9em;
+}
+
+.ai-markdown-content th,
+.ai-markdown-content td {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 4px 10px;
+  text-align: left;
+}
+
+.ai-markdown-content th {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+}

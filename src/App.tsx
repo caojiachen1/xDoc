@@ -19,6 +19,7 @@ import {
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
 import katex from "katex";
 import "katex/dist/katex.min.css";
+import { marked } from "marked";
 import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS, VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import "./App.css";
@@ -96,7 +97,7 @@ export const STORAGE_KEYS = {
   zoomMode: "xdoc.settings.zoomMode",
   pdfTextExtractionEnabled: "xdoc.settings.pdfTextExtractionEnabled",
   llmVendor: "xdoc.settings.llm.vendor",
-  llmApiKey: "xdoc.settings.llm.apiKey",
+  llmVendorApiKeys: "xdoc.settings.llm.vendorApiKeys",
   llmBaseUrl: "xdoc.settings.llm.baseUrl",
   llmModel: "xdoc.settings.llm.model",
 } as const;
@@ -109,7 +110,7 @@ function App() {
   const [boxes, setBoxes] = useState<LayoutBox[]>([]);
   const [segments, setSegments] = useState<TextSegment[]>([]);
   const [selectedParagraph, setSelectedParagraph] = useState<TextSegment | null>(null);
-  const [selectedWords, setSelectedWords] = useState<string>("");
+  const [aiAction, setAiAction] = useState<string>("");
   const [aiResult, setAiResult] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
@@ -138,7 +139,7 @@ function App() {
   // LLM settings
   const [llmSettings, setLlmSettings] = useState<LlmSettings>({
     vendor: "deepseek",
-    apiKey: "",
+    vendorApiKeys: {},
     baseUrl: VENDOR_PRESETS.deepseek.baseUrl,
     model: VENDOR_PRESETS.deepseek.models[0],
   });
@@ -205,8 +206,8 @@ function App() {
       setPdfPageCount(result.page_count);
       setSegments(result.segments);
       setSelectedParagraph(null);
-      setSelectedWords("");
       setAiResult("");
+      setAiAction("");
     } catch (e) {
       setErrorMessage(`解析文字失败: ${String(e)}`);
     } finally {
@@ -249,8 +250,8 @@ function App() {
     setBoxes([]);
     setSegments([]);
     setSelectedParagraph(null);
-    setSelectedWords("");
     setAiResult("");
+    setAiAction("");
     setImageSize({ width: 0, height: 0 });
     setDisplaySize({ width: 0, height: 0 });
     setPdfPageIndex(0);
@@ -278,8 +279,8 @@ function App() {
       setBoxes([]);
       setSegments([]);
       setSelectedParagraph(null);
-      setSelectedWords("");
       setAiResult("");
+      setAiAction("");
       setImageSize({ width: 0, height: 0 });
       setDisplaySize({ width: 0, height: 0 });
       setPdfPageIndex(0);
@@ -353,7 +354,11 @@ function App() {
 
       // LLM settings
       const savedLlmVendor = window.localStorage.getItem(STORAGE_KEYS.llmVendor) || "deepseek";
-      const savedLlmApiKey = window.localStorage.getItem(STORAGE_KEYS.llmApiKey) || "";
+      let savedVendorApiKeys: Record<string, string> = {};
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEYS.llmVendorApiKeys);
+        if (raw) savedVendorApiKeys = JSON.parse(raw);
+      } catch { /* ignore parse errors */ }
       const savedLlmBaseUrl = window.localStorage.getItem(STORAGE_KEYS.llmBaseUrl)
         || VENDOR_PRESETS[savedLlmVendor]?.baseUrl
         || VENDOR_PRESETS.deepseek.baseUrl;
@@ -362,7 +367,7 @@ function App() {
         || VENDOR_PRESETS.deepseek.models[0];
       setLlmSettings({
         vendor: savedLlmVendor,
-        apiKey: savedLlmApiKey,
+        vendorApiKeys: savedVendorApiKeys,
         baseUrl: savedLlmBaseUrl,
         model: savedLlmModel,
       });
@@ -429,7 +434,7 @@ function App() {
     if (!environmentReady) return;
     try {
       window.localStorage.setItem(STORAGE_KEYS.llmVendor, llmSettings.vendor);
-      window.localStorage.setItem(STORAGE_KEYS.llmApiKey, llmSettings.apiKey);
+      window.localStorage.setItem(STORAGE_KEYS.llmVendorApiKeys, JSON.stringify(llmSettings.vendorApiKeys));
       window.localStorage.setItem(STORAGE_KEYS.llmBaseUrl, llmSettings.baseUrl);
       window.localStorage.setItem(STORAGE_KEYS.llmModel, llmSettings.model);
     } catch { /* ignore */ }
@@ -598,40 +603,47 @@ function App() {
       setAiResult("");
       return;
     }
-    setSelectedWords(text);
     setAiResult(`正在请求 AI ${action}...`);
     setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
 
-    if (!llmSettings.apiKey || !llmSettings.baseUrl) {
-      setAiResult("请先在设置中配置 LLM API Key 和 Base URL");
+    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+    if (!apiKey || !llmSettings.baseUrl) {
+      setAiResult("");
       return;
     }
 
     try {
       const systemPrompts: Record<string, string> = {
-        "解读": "你是一个专业的文档分析助手。请对用户提供的文本进行详细的解读分析，包括：内容概要、关键概念解释、上下文含义等。使用中文回复。",
-        "翻译": "你是一个专业的翻译助手。请将用户提供的文本翻译成中文。如果原文已是中文，则翻译成英文。只输出翻译结果，不要添加额外说明。",
-        "摘要": "你是一个专业的文档分析助手。请对用户提供的文本进行简洁的摘要总结，提取关键要点。使用中文回复。",
+        "解读": "简洁明了地解读以下文本，抓住核心要点，不要展开冗长分析。用中文回复。",
+        "翻译": "将以下文本翻译成中文。如果原文已是中文，则翻译成英文。只输出翻译结果。",
+        "摘要": "用一两句话摘要以下文本的核心内容。用中文回复。",
       };
 
       const systemPrompt = systemPrompts[action] || systemPrompts["解读"];
       const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
 
+      const requestBody: Record<string, unknown> = {
+        model: llmSettings.model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: text },
+        ],
+        temperature: 0.7,
+        max_tokens: 2048,
+      };
+
+      // Volcengine Ark: disable thinking mode for seed models
+      if (llmSettings.vendor === "volcengine") {
+        requestBody.thinking = { type: "disabled" };
+      }
+
       const response = await fetch(`${baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${llmSettings.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
         },
-        body: JSON.stringify({
-          model: llmSettings.model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: text },
-          ],
-          temperature: 0.7,
-          max_tokens: 2048,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!response.ok) {
@@ -710,8 +722,39 @@ function App() {
     });
   };
 
+  const showFloatingMenu = (text: string, x: number, y: number) => {
+    const menuW = 260;
+    const menuH = 40;
+    const paneEl = rightPaneRef.current;
+    const paneRect = paneEl?.getBoundingClientRect();
+
+    let menuX = x + 6;
+    let menuY = y - menuH - 4;
+
+    if (paneRect) {
+      if (menuX + menuW > paneRect.right - 4) menuX = x - menuW - 6;
+      menuX = Math.max(paneRect.left + 4, Math.min(menuX, paneRect.right - menuW - 4));
+      if (menuY < paneRect.top) menuY = y + 4;
+      menuY = Math.max(paneRect.top + 4, Math.min(menuY, paneRect.bottom - menuH - 4));
+    } else {
+      if (menuX + menuW > window.innerWidth - 4) menuX = x - menuW - 6;
+      menuX = Math.max(4, Math.min(menuX, window.innerWidth - menuW - 4));
+      if (menuY < 0) menuY = y + 4;
+      menuY = Math.max(4, Math.min(menuY, window.innerHeight - menuH - 4));
+    }
+
+    setFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
+  };
+
+  const actionLabels: Record<string, string> = {
+    "解读": "解读文字",
+    "翻译": "翻译文字",
+    "摘要": "摘要文字",
+  };
+
   const handleFloatingAction = (action: string) => {
     if (floatingMenu.selectedText) {
+      setAiAction(actionLabels[action] || action);
       requestAiDescription(floatingMenu.selectedText, action);
     }
   };
@@ -784,9 +827,9 @@ function App() {
           <span
             key={`text-${tokenIndex}-${wIdx}`}
             className="word-span"
-            onClick={() => {
+            onClick={(e) => {
               if (window.getSelection()?.toString() !== "") return;
-              requestAiDescription(word);
+              showFloatingMenu(word, e.clientX, e.clientY);
             }}
           >
             {word}
@@ -829,6 +872,73 @@ function App() {
     }
 
     return nodes;
+  }, []);
+
+  // Markdown + LaTeX renderer for AI response
+  const renderAiContent = useCallback((text: string): React.ReactNode => {
+    if (!text) return null;
+
+    // Escape user text for safe HTML injection after markdown rendering
+    const parts: { type: "md" | "math_d" | "math_i"; content: string }[] = [];
+    let remaining = text;
+
+    // 1. Extract display math $$...$$
+    const displayRe = /\$\$([\s\S]*?)\$\$/g;
+    let lastIdx = 0;
+    let match: RegExpExecArray | null;
+    while ((match = displayRe.exec(remaining)) !== null) {
+      if (match.index > lastIdx) {
+        parts.push({ type: "md", content: remaining.slice(lastIdx, match.index) });
+      }
+      parts.push({ type: "math_d", content: match[1] });
+      lastIdx = displayRe.lastIndex;
+    }
+    if (lastIdx < remaining.length) {
+      remaining = remaining.slice(lastIdx);
+    } else {
+      remaining = "";
+    }
+
+    // 2. Extract inline math $...$ from remaining
+    const inlineRe = /\$(?!\$)([\s\S]*?[^\\])\$/g;
+    const mdParts: { type: "md" | "math_i"; content: string }[] = [];
+    lastIdx = 0;
+    while ((match = inlineRe.exec(remaining)) !== null) {
+      if (match.index > lastIdx) {
+        mdParts.push({ type: "md", content: remaining.slice(lastIdx, match.index) });
+      }
+      mdParts.push({ type: "math_i", content: match[1] });
+      lastIdx = inlineRe.lastIndex;
+    }
+    if (lastIdx < remaining.length) {
+      mdParts.push({ type: "md", content: remaining.slice(lastIdx) });
+    }
+    parts.push(...mdParts);
+
+    // 3. Render each part
+    const nodes: React.ReactNode[] = [];
+    let key = 0;
+    for (const part of parts) {
+      if (part.type === "math_d") {
+        try {
+          const html = katex.renderToString(part.content, { displayMode: true, throwOnError: false });
+          nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: html }} />);
+        } catch {
+          nodes.push(<span key={key++} className="math-fallback">{`$$${part.content}$$`}</span>);
+        }
+      } else if (part.type === "math_i") {
+        try {
+          const html = katex.renderToString(part.content, { displayMode: false, throwOnError: false });
+          nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: html }} />);
+        } catch {
+          nodes.push(<span key={key++} className="math-fallback">{`$${part.content}$`}</span>);
+        }
+      } else {
+        const mdHtml = marked.parse(part.content, { async: false }) as string;
+        nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: mdHtml }} />);
+      }
+    }
+    return <div className="ai-markdown-content">{nodes}</div>;
   }, []);
 
   const handleMouseDownV = (e: React.MouseEvent) => {
@@ -1117,9 +1227,9 @@ function App() {
                             <span
                               key={idx}
                               className="word-span"
-                              onClick={() => {
+                              onClick={(e) => {
                                 if (window.getSelection()?.toString() !== "") return;
-                                requestAiDescription(word);
+                                showFloatingMenu(word, e.clientX, e.clientY);
                               }}
                             >
                               {word}
@@ -1167,9 +1277,9 @@ function App() {
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
 
               <div className="ai-pane">
-                <h3>已选中文字：{selectedWords ? `"${selectedWords}"` : "无"}</h3>
-                <div style={{ whiteSpace: "pre-wrap", color: "#ccc" }}>
-                  {aiResult || "（请在上方文字区域点击单词或拖拽选中文本，AI 解读内容将出现在此处）"}
+                <h3>{aiAction || "AI 解读"}</h3>
+                <div style={{ color: "#ccc" }}>
+                  {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
                 </div>
               </div>
 
