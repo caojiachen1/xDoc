@@ -556,10 +556,10 @@ function App() {
   const segmentedParagraph = useMemo(() => {
     if (!selectedParagraph?.text) return [];
     
-    // Remove original physical newlines, then add newlines after Chinese and English sentence punctuations (excluding decimal points)
+    // Remove original physical newlines, then add newlines after Chinese and English sentence punctuations (excluding decimal points and common abbreviations)
     const formattedText = selectedParagraph.text
       .replace(/[\r\n]+/g, "") // Remove existing physical line breaks
-      .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n"); // Add explicit line break after punctuation
+      .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n"); // Add explicit line break after punctuation
 
     try {
       // @ts-ignore
@@ -961,7 +961,7 @@ function App() {
                             {renderOcrNodes(
                               ocrText
                                 .replace(/[\r\n]+/g, "")
-                                .replace(/([。！？.!?])(?!\d)(?:\s*)/g, "$1\n")
+                                .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
                             )}
                           </div>
                         ) : (
