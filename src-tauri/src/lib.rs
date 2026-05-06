@@ -47,6 +47,7 @@ struct CachedInference {
     pub height: u32,
     pub source_type: String,
     pub page_count: u32,
+    pub preview_data_url: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -535,6 +536,7 @@ async fn get_pdf_paragraphs(
                         height: image.height(),
                         source_type: "pdf".to_string(),
                         page_count,
+                        preview_data_url: Some(preview_data_url.clone()),
                     };
                     state
                         .inference_cache
@@ -611,6 +613,64 @@ async fn get_pdf_text(
         page_count,
         segments,
     })
+}
+
+#[derive(Serialize, Clone)]
+pub struct PagePreviewResponse {
+    pub preview_data_url: String,
+    pub width: u32,
+    pub height: u32,
+    pub page_index: u32,
+    pub page_count: u32,
+    pub source_type: String,
+}
+
+#[tauri::command]
+async fn render_page_preview(
+    file_path: String,
+    page_index: Option<u32>,
+) -> Result<PagePreviewResponse, String> {
+    let (image, source_type, actual_page_index, page_count) =
+        load_document_as_image(&file_path, page_index)?;
+    let preview_data_url = image_to_data_url(&image)?;
+
+    Ok(PagePreviewResponse {
+        preview_data_url,
+        width: image.width(),
+        height: image.height(),
+        page_index: actual_page_index,
+        page_count,
+        source_type,
+    })
+}
+
+#[tauri::command]
+async fn prefetch_document(
+    file_path: String,
+    current_page: u32,
+    score_threshold: Option<f32>,
+    state: State<'_, ModelState>,
+) -> Result<(), String> {
+    let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
+
+    let (_, _, _, page_count) = load_document_as_image(&file_path, Some(0))?;
+
+    if page_count <= 1 {
+        return Ok(());
+    }
+
+    spawn_prefetch_for_pdf(
+        file_path,
+        page_count,
+        current_page,
+        threshold,
+        state.session.clone(),
+        state.inference_cache.clone(),
+        state.response_cache.clone(),
+        state.prefetch_tasks.clone(),
+    );
+
+    Ok(())
 }
 
 pub struct ModelState {
@@ -882,11 +942,19 @@ fn spawn_prefetch_for_pdf(
     }
 
     thread::spawn(move || {
-        for p in 0..page_count {
-            if p == requested_page {
-                continue;
+        // Priority ordering: spiral outward from requested_page, forward-biased
+        let mut page_order: Vec<u32> = (0..page_count)
+            .filter(|&p| p != requested_page)
+            .collect();
+        page_order.sort_by_key(|&p| {
+            if p >= requested_page {
+                (p - requested_page) as i64 * 2
+            } else {
+                (requested_page - p) as i64 * 3 + 1
             }
+        });
 
+        for p in page_order {
             let cache_key = make_cache_key(&file_path, p, threshold);
             let has_cache = {
                 let cache = inference_cache.lock().unwrap();
@@ -902,6 +970,8 @@ fn spawn_prefetch_for_pdf(
             else {
                 continue;
             };
+
+            let preview_data_url = image_to_data_url(&image).ok();
 
             let infer_res = {
                 let mut guard = session.lock().unwrap();
@@ -921,6 +991,7 @@ fn spawn_prefetch_for_pdf(
                 height: image.height(),
                 source_type,
                 page_count: page_count_local,
+                preview_data_url: preview_data_url.clone(),
             };
 
             {
@@ -929,13 +1000,13 @@ fn spawn_prefetch_for_pdf(
             }
 
             // Also cache the full response
-            if let Ok(raw_segments) = extract_raw_text_segments(Path::new(&file_path), p) {
-                let segments = merge_segments_with_layout(raw_segments, &boxes);
-                if let Ok(preview_data_url) = image_to_data_url(&image) {
+            if let Some(ref pdu) = preview_data_url {
+                if let Ok(raw_segments) = extract_raw_text_segments(Path::new(&file_path), p) {
+                    let segments = merge_segments_with_layout(raw_segments, &boxes);
                     let full_response = ExtractContentResponse {
                         width: image.width(),
                         height: image.height(),
-                        preview_data_url,
+                        preview_data_url: pdu.clone(),
                         page_index: p,
                         page_count: page_count_local,
                         segments,
@@ -964,6 +1035,7 @@ async fn load_model(model_path: String, state: State<'_, ModelState>) -> Result<
     *state.session.lock().unwrap() = Some(session);
     state.inference_cache.lock().unwrap().clear();
     state.prefetch_tasks.lock().unwrap().clear();
+    state.response_cache.lock().unwrap().clear();
 
     Ok("Model loaded successfully".to_string())
 }
@@ -976,6 +1048,28 @@ async fn run_doclayout(
     state: State<'_, ModelState>,
 ) -> Result<DetectionResponse, String> {
     let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
+
+    // Check cache first — avoid rendering if we already have everything
+    {
+        let page_idx = page_index.unwrap_or(0);
+        let cache_key = make_cache_key(&file_path, page_idx, threshold);
+        let cache = state.inference_cache.lock().unwrap();
+        if let Some(entry) = cache.get(&cache_key) {
+            if let Some(ref pdu) = entry.preview_data_url {
+                let response = DetectionResponse {
+                    width: entry.width,
+                    height: entry.height,
+                    preview_data_url: pdu.clone(),
+                    source_type: entry.source_type.clone(),
+                    page_index: page_idx,
+                    page_count: entry.page_count,
+                    boxes: entry.boxes.clone(),
+                };
+                return Ok(response);
+            }
+        }
+    }
+
     let (image, source_type, page_index, page_count) =
         load_document_as_image(&file_path, page_index)?;
     let preview_data_url = image_to_data_url(&image)?;
@@ -986,7 +1080,7 @@ async fn run_doclayout(
         cache.get(&cache_key).cloned()
     };
 
-    let (boxes, width, height, response_source_type, response_page_count) =
+    let (boxes, width, height, response_source_type, response_page_count, cached_preview) =
         if let Some(entry) = cached_entry {
             (
                 entry.boxes,
@@ -994,6 +1088,7 @@ async fn run_doclayout(
                 entry.height,
                 entry.source_type,
                 entry.page_count,
+                entry.preview_data_url,
             )
         } else {
             let inferred_boxes = {
@@ -1010,6 +1105,7 @@ async fn run_doclayout(
                 height,
                 source_type: source_type.clone(),
                 page_count,
+                preview_data_url: Some(preview_data_url.clone()),
             };
             state
                 .inference_cache
@@ -1023,8 +1119,11 @@ async fn run_doclayout(
                 height,
                 source_type.clone(),
                 page_count,
+                Some(preview_data_url.clone()),
             )
         };
+
+    let preview_data_url = cached_preview.unwrap_or(preview_data_url);
 
     if source_type == "pdf" && page_count > 1 {
         spawn_prefetch_for_pdf(
@@ -1423,6 +1522,8 @@ pub fn run() {
             run_doclayout,
             get_pdf_text,
             get_pdf_paragraphs,
+            render_page_preview,
+            prefetch_document,
             download_ocr_model,
             init_ocr,
             run_ocr_region,

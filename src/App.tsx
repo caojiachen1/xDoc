@@ -192,6 +192,7 @@ function App() {
   const imgRef = useRef<HTMLImageElement>(null);
   const mainLayoutRef = useRef<HTMLDivElement>(null);
   const rightPaneRef = useRef<HTMLDivElement>(null);
+  const requestVersionRef = useRef(0);
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
 
@@ -258,38 +259,6 @@ function App() {
     }
   };
 
-  const loadPdfText = async (filePath: string, targetPageIndex?: number) => {
-    setErrorMessage("");
-    try {
-      setLoading(true);
-      const pageIndex = Math.max(0, targetPageIndex ?? pdfPageIndex);
-
-      // Use layout-guided paragraph detection when model is loaded
-      const command = modelLoaded ? "get_pdf_paragraphs" : "get_pdf_text";
-      const args: Record<string, unknown> = { filePath, pageIndex };
-      if (modelLoaded) {
-        args.scoreThreshold = scoreThreshold;
-      }
-
-      const result = await invoke<ExtractContentResponse>(command, args);
-
-      setPreviewSrc(result.preview_data_url);
-      setImageSize({ width: result.width, height: result.height });
-      setPdfPageIndex(result.page_index);
-      setPdfPageCount(result.page_count);
-      setSegments(result.segments);
-      setSelectedParagraph(null);
-      setSelectedFigure(null);
-      setFigureImageDataUrl("");
-      setAiResult("");
-      setAiAction("");
-    } catch (e) {
-      setErrorMessage(`解析文字失败: ${String(e)}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const runModel = async (targetPageIndex?: number, targetFilePath?: string, thresholdOverride?: number) => {
     const activeFilePath = targetFilePath ?? documentPath;
     if (!modelLoaded || !activeFilePath) return;
@@ -316,6 +285,85 @@ function App() {
       setErrorMessage(`检测失败: ${String(e)}`);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadPageData = async (filePath: string, newPage: number) => {
+    const version = ++requestVersionRef.current;
+    const isCurrent = () => requestVersionRef.current === version;
+    const isPdf = filePath.toLowerCase().endsWith(".pdf");
+
+    // Immediately update page index for instant UI feedback
+    setPdfPageIndex(newPage);
+    setSelectedParagraph(null);
+    setSelectedFigure(null);
+    setFigureImageDataUrl("");
+    setAiResult("");
+    setAiAction("");
+    setErrorMessage("");
+    setLoading(true);
+
+    try {
+      if (isPdf && modelLoaded) {
+        // Step 1: text extraction + inference (populates inference_cache as side effect)
+        const textResult = await invoke<ExtractContentResponse>("get_pdf_paragraphs", {
+          filePath,
+          pageIndex: newPage,
+          scoreThreshold,
+        });
+        if (!isCurrent()) return;
+
+        setPreviewSrc(textResult.preview_data_url);
+        setImageSize({ width: textResult.width, height: textResult.height });
+        setPdfPageIndex(textResult.page_index);
+        setPdfPageCount(textResult.page_count);
+        setSegments(textResult.segments);
+
+        // Step 2: layout boxes — cache hit now that step 1 populated inference_cache
+        const modelResult = await invoke<DetectionResponse>("run_doclayout", {
+          filePath,
+          scoreThreshold,
+          pageIndex: newPage,
+        });
+        if (!isCurrent()) return;
+
+        setPreviewSrc(modelResult.preview_data_url);
+        setBoxes(modelResult.boxes);
+      } else if (isPdf) {
+        // No model loaded — just get text
+        const textResult = await invoke<ExtractContentResponse>("get_pdf_text", {
+          filePath,
+          pageIndex: newPage,
+        });
+        if (!isCurrent()) return;
+
+        setPreviewSrc(textResult.preview_data_url);
+        setImageSize({ width: textResult.width, height: textResult.height });
+        setPdfPageIndex(textResult.page_index);
+        setPdfPageCount(textResult.page_count);
+        setSegments(textResult.segments);
+      } else if (modelLoaded) {
+        // Image file
+        const modelResult = await invoke<DetectionResponse>("run_doclayout", {
+          filePath,
+          scoreThreshold,
+          pageIndex: 0,
+        });
+        if (!isCurrent()) return;
+
+        setPreviewSrc(modelResult.preview_data_url);
+        setImageSize({ width: modelResult.width, height: modelResult.height });
+        setPdfPageIndex(modelResult.page_index);
+        setPdfPageCount(modelResult.page_count);
+        setBoxes(modelResult.boxes);
+      }
+    } catch (e) {
+      if (!isCurrent()) return;
+      setErrorMessage(`页面加载失败: ${String(e)}`);
+    } finally {
+      if (isCurrent()) {
+        setLoading(false);
+      }
     }
   };
 
@@ -366,10 +414,14 @@ function App() {
       setPdfPageCount(0);
 
       if (selected.toLowerCase().endsWith(".pdf")) {
-         await loadPdfText(selected, 0);
-         // Also run layout model to populate cache for layout-guided paragraph detection
+         await loadPageData(selected, 0);
+         // Aggressive prefetch: fire background sweep of all remaining pages
          if (modelLoaded) {
-            await runModel(0, selected);
+           invoke("prefetch_document", {
+             filePath: selected,
+             currentPage: 0,
+             scoreThreshold,
+           }).catch(() => { /* best-effort */ });
          }
       } else if (modelLoaded) {
          await runModel(0, selected);
@@ -1244,24 +1296,22 @@ function App() {
                       className="page-arrow page-arrow-left"
                       appearance="subtle"
                       icon={<ChevronLeft24Regular />}
-                      onClick={async () => {
+                      onClick={() => {
                         const newPage = Math.max(0, pdfPageIndex - 1);
-                        await loadPdfText(documentPath, newPage);
-                        if (modelLoaded) await runModel(newPage, documentPath);
+                        void loadPageData(documentPath, newPage);
                       }}
-                      disabled={!documentPath || loading || pdfPageIndex <= 0}
+                      disabled={!documentPath || pdfPageIndex <= 0}
                       aria-label="上一页"
                     />
                     <Button
                       className="page-arrow page-arrow-right"
                       appearance="subtle"
                       icon={<ChevronRight24Regular />}
-                      onClick={async () => {
+                      onClick={() => {
                         const newPage = pdfPageIndex + 1;
-                        await loadPdfText(documentPath, newPage);
-                        if (modelLoaded) await runModel(newPage, documentPath);
+                        void loadPageData(documentPath, newPage);
                       }}
-                      disabled={!documentPath || loading || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
+                      disabled={!documentPath || (pdfPageCount > 0 && pdfPageIndex >= pdfPageCount - 1)}
                       aria-label="下一页"
                     />
                   </>
