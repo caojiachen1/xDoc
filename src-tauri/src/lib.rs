@@ -58,7 +58,7 @@ pub struct TextSegment {
     pub ymax: f32,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct ExtractContentResponse {
     pub width: u32,
     pub height: u32,
@@ -485,10 +485,35 @@ async fn get_pdf_paragraphs(
     }
 
     let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
+    let cache_key = make_cache_key(&file_path, page_index, threshold);
+
+    let cached_response = {
+        let cache = state.response_cache.lock().unwrap();
+        cache.get(&cache_key).cloned()
+    };
+
+    if let Some(response) = cached_response {
+        // Trigger prefetch for other pages in background
+        if response.page_count > 1 {
+            spawn_prefetch_for_pdf(
+                file_path.clone(),
+                response.page_count,
+                page_index,
+                threshold,
+                state.session.clone(),
+                state.inference_cache.clone(),
+                state.response_cache.clone(),
+                state.prefetch_tasks.clone(),
+            );
+        }
+        return Ok(response);
+    }
+
     let (image, actual_page_index, page_count) = render_pdf_page(path, page_index)?;
     let preview_data_url = image_to_data_url(&image)?;
     let raw_segments = extract_raw_text_segments(path, actual_page_index)?;
 
+    // Also update cache_key in case actual_page_index != page_index
     let cache_key = make_cache_key(&file_path, actual_page_index, threshold);
     let cached_boxes = {
         let cache = state.inference_cache.lock().unwrap();
@@ -515,7 +540,7 @@ async fn get_pdf_paragraphs(
                         .inference_cache
                         .lock()
                         .unwrap()
-                        .insert(cache_key, entry);
+                        .insert(cache_key.clone(), entry);
                     Some(boxes)
                 }
                 Err(_) => {
@@ -543,18 +568,24 @@ async fn get_pdf_paragraphs(
             threshold,
             state.session.clone(),
             state.inference_cache.clone(),
+            state.response_cache.clone(),
             state.prefetch_tasks.clone(),
         );
     }
 
-    Ok(ExtractContentResponse {
+    let response = ExtractContentResponse {
         width: image.width(),
         height: image.height(),
         preview_data_url,
         page_index: actual_page_index,
         page_count,
         segments,
-    })
+    };
+
+    // Cache the response
+    state.response_cache.lock().unwrap().insert(cache_key, response.clone());
+
+    Ok(response)
 }
 
 #[tauri::command]
@@ -585,12 +616,14 @@ async fn get_pdf_text(
 pub struct ModelState {
     session: Arc<Mutex<Option<Session>>>,
     inference_cache: Arc<Mutex<HashMap<String, CachedInference>>>,
+    response_cache: Arc<Mutex<HashMap<String, ExtractContentResponse>>>,
     prefetch_tasks: Arc<Mutex<HashSet<String>>>,
 }
 
 pub struct OcrState {
     backend: Arc<Mutex<Option<gguf_ocr::GgufBackend>>>,
     model_root: Arc<Mutex<Option<PathBuf>>>,
+    ocr_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
 fn threshold_cache_key(threshold: f32) -> i32 {
@@ -836,6 +869,7 @@ fn spawn_prefetch_for_pdf(
     threshold: f32,
     session: Arc<Mutex<Option<Session>>>,
     inference_cache: Arc<Mutex<HashMap<String, CachedInference>>>,
+    response_cache: Arc<Mutex<HashMap<String, ExtractContentResponse>>>,
     prefetch_tasks: Arc<Mutex<HashSet<String>>>,
 ) {
     let task_key = make_prefetch_task_key(&file_path, threshold);
@@ -856,7 +890,8 @@ fn spawn_prefetch_for_pdf(
             let cache_key = make_cache_key(&file_path, p, threshold);
             let has_cache = {
                 let cache = inference_cache.lock().unwrap();
-                cache.contains_key(&cache_key)
+                let full_cache = response_cache.lock().unwrap();
+                cache.contains_key(&cache_key) && full_cache.contains_key(&cache_key)
             };
             if has_cache {
                 continue;
@@ -881,15 +916,33 @@ fn spawn_prefetch_for_pdf(
             };
 
             let entry = CachedInference {
-                boxes,
+                boxes: boxes.clone(),
                 width: image.width(),
                 height: image.height(),
                 source_type,
                 page_count: page_count_local,
             };
 
-            let mut cache = inference_cache.lock().unwrap();
-            cache.insert(cache_key, entry);
+            {
+                let mut cache = inference_cache.lock().unwrap();
+                cache.insert(cache_key.clone(), entry);
+            }
+
+            // Also cache the full response
+            if let Ok(raw_segments) = extract_raw_text_segments(Path::new(&file_path), p) {
+                let segments = merge_segments_with_layout(raw_segments, &boxes);
+                if let Ok(preview_data_url) = image_to_data_url(&image) {
+                    let full_response = ExtractContentResponse {
+                        width: image.width(),
+                        height: image.height(),
+                        preview_data_url,
+                        page_index: p,
+                        page_count: page_count_local,
+                        segments,
+                    };
+                    response_cache.lock().unwrap().insert(cache_key, full_response);
+                }
+            }
         }
 
         let mut tasks = prefetch_tasks.lock().unwrap();
@@ -981,6 +1034,7 @@ async fn run_doclayout(
             threshold,
             state.session.clone(),
             state.inference_cache.clone(),
+            state.response_cache.clone(),
             state.prefetch_tasks.clone(),
         );
     }
@@ -1237,6 +1291,14 @@ async fn run_ocr_region(
     ymax: f32,
     state: State<'_, OcrState>,
 ) -> Result<OcrRegionResult, String> {
+    let cache_key = format!("{}::{}_{}_{}_{}_{}", file_path, page_index, xmin.round() as i32, ymin.round() as i32, xmax.round() as i32, ymax.round() as i32);
+    if let Some(cached_text) = state.ocr_cache.lock().unwrap().get(&cache_key) {
+        // Ensure frontend still receives this text (if it relies on either the return value,
+        // or we can emit it as a single chunk). The frontend does setOcrText(result.text)
+        // so returning it immediately will display it instantly.
+        return Ok(OcrRegionResult { text: cached_text.clone() });
+    }
+
     let model_root = {
         let guard = state.model_root.lock().unwrap();
         guard.clone().ok_or("OCR model not initialized")?
@@ -1300,6 +1362,8 @@ async fn run_ocr_region(
     // Clean up temp file
     let _ = std::fs::remove_file(&temp_path);
 
+    state.ocr_cache.lock().unwrap().insert(cache_key, text.clone());
+
     Ok(OcrRegionResult { text })
 }
 
@@ -1343,11 +1407,13 @@ pub fn run() {
         .manage(ModelState {
             session: Arc::new(Mutex::new(None)),
             inference_cache: Arc::new(Mutex::new(HashMap::new())),
+            response_cache: Arc::new(Mutex::new(HashMap::new())),
             prefetch_tasks: Arc::new(Mutex::new(HashSet::new())),
         })
         .manage(OcrState {
             backend: Arc::new(Mutex::new(None)),
             model_root: Arc::new(Mutex::new(None)),
+            ocr_cache: Arc::new(Mutex::new(HashMap::new())),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
