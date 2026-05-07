@@ -232,8 +232,9 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
         alignItems: "flex-start",
         height: "100vh",
         backgroundColor: "rgb(32, 32, 32)",
-        overflow: "auto",
+        overflow: "hidden",
         padding: "40px 0",
+        boxSizing: "border-box",
       }}
     >
       <Card
@@ -243,6 +244,8 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
           display: "flex",
           flexDirection: "column",
           gap: 16,
+          maxHeight: "100%",
+          overflow: "auto",
         }}
       >
         <Title2>初始设置</Title2>
