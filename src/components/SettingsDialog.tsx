@@ -20,7 +20,6 @@ import {
   Dismiss24Regular,
   BrainCircuit24Regular,
 } from "@fluentui/react-icons";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import "./SettingsDialog.css";
 
 /* ── types ─────────────────────────────────────────────── */
@@ -28,9 +27,20 @@ type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type SettingsSection = "general" | "ocr" | "llm";
 
 interface DownloadProgress {
+  model_type: string;
+  filename: string;
+  current: number;
+  total: number;
+  progress: number;
+  status: string;
+  message: string;
+}
+
+interface OcrDownloadState {
+  downloading: boolean;
   progress: number;
   message: string;
-  status: "downloading" | "completed" | "error" | "checking" | "idle";
+  status: string;
 }
 
 export interface LlmSettings {
@@ -96,8 +106,8 @@ function SettingsDialog(props: Props) {
   } = props;
 
   const [section, setSection] = useState<SettingsSection>("general");
-  const [download, setDownload] = useState<DownloadProgress>({
-    progress: 0, message: "", status: "idle",
+  const [download, setDownload] = useState<OcrDownloadState>({
+    downloading: false, progress: 0, message: "", status: "idle",
   });
 
   // Model list fetching
@@ -111,9 +121,19 @@ function SettingsDialog(props: Props) {
   useEffect(() => {
     const setup = async () => {
       unlistenRef.current = await listen<DownloadProgress>(
-        "ocr-download-progress",
+        "model-download-progress",
         (event) => {
-          setDownload(event.payload);
+          const p = event.payload;
+          if (p.model_type !== "ocr") return;
+          setDownload({
+            downloading: p.status === "downloading" || p.status === "file_completed",
+            progress: p.progress,
+            message: p.message,
+            status: p.status,
+          });
+          if (p.status === "completed") {
+            onOcrModelPathChange("../model/GLM-OCR-GGUF");
+          }
         },
       );
     };
@@ -129,40 +149,27 @@ function SettingsDialog(props: Props) {
     setFetchModelsError("");
   }, [llmSettings.vendor, llmSettings.baseUrl]);
 
-  /* ── download & select handlers ───────────────────────── */
-  const handleSelectOcrModel = async () => {
-    try {
-      const selected = await openDialog({
-        directory: true,
-        multiple: false,
-        title: "选择 OCR 模型文件夹",
-      });
-      if (typeof selected === "string") {
-        onOcrModelPathChange(selected);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
+  /* ── download handler ─────────────────────────────────── */
   const handleDownload = useCallback(async () => {
-    setDownload({ progress: 0, message: "启动下载...", status: "checking" });
+    setDownload({
+      downloading: true,
+      progress: 0,
+      message: "准备下载...",
+      status: "downloading",
+    });
     try {
-      const REPO_URL = "https://www.modelscope.cn/ggml-org/GLM-OCR-GGUF.git";
-      const targetDir = "../model/GLM-OCR-GGUF";
-      const result = await invoke<string>("download_ocr_model", {
-        repoUrl: REPO_URL,
-        targetDir,
+      await invoke<string>("download_ocr_models", {
+        targetDir: "../model/GLM-OCR-GGUF",
       });
-      onOcrModelPathChange(result);
     } catch (e) {
       setDownload({
+        downloading: false,
         progress: 0,
         message: String(e),
         status: "error",
       });
     }
-  }, [onOcrModelPathChange]);
+  }, []);
 
   const currentApiKey = llmSettings.vendorApiKeys[llmSettings.vendor] || "";
 
@@ -208,7 +215,7 @@ function SettingsDialog(props: Props) {
   /* ── render ─────────────────────────────────────────── */
   if (!open) return null;
 
-  const isDownloading = download.status === "downloading" || download.status === "checking";
+  const isDownloading = download.downloading;
 
   return (
     <div className="settings-overlay" onClick={onClose}>
@@ -356,34 +363,24 @@ function SettingsDialog(props: Props) {
 
                 {/* ── Local Model Path ───────────── */}
                 <div className="settings-field">
-                  <Text weight="semibold">本地模型路径</Text>
+                  <Text weight="semibold">模型路径</Text>
                   <div className="settings-field-row">
                     <Input
                       value={ocrModelPath}
-                      onChange={(_, d) => onOcrModelPathChange(d.value)}
-                      placeholder="未选择，本地如果没有可以点击左侧选择或者右侧下载"
-                      disabled={isDownloading}
+                      readOnly
+                      placeholder="默认: model/GLM-OCR-GGUF"
                       className="settings-input-flex"
                     />
                     <Button
-                      appearance="secondary"
-                      onClick={handleSelectOcrModel}
+                      appearance="primary"
+                      onClick={handleDownload}
                       disabled={isDownloading}
                     >
-                      选择文件夹
+                      {isDownloading ? "下载中..." : "下载模型"}
                     </Button>
-                    {!ocrModelPath && (
-                      <Button
-                        appearance="primary"
-                        onClick={handleDownload}
-                        disabled={isDownloading}
-                      >
-                        {isDownloading ? "下载中..." : "自动下载"}
-                      </Button>
-                    )}
                   </div>
                   <Text size={100} className="settings-hint">
-                    点击"自动下载"从默认仓库克隆模型文件到根目录的 model 文件夹中
+                    点击"下载模型"从 ModelScope 下载 OCR 模型文件到 model/GLM-OCR-GGUF 目录
                   </Text>
                 </div>
 
@@ -394,8 +391,8 @@ function SettingsDialog(props: Props) {
                     <div className="settings-field">
                       <div className="settings-progress-header">
                         <Text weight="semibold">
-                          {download.status === "checking" && "检查环境..."}
                           {download.status === "downloading" && "下载中..."}
+                          {download.status === "file_completed" && "处理中..."}
                           {download.status === "completed" && "下载完成"}
                           {download.status === "error" && "下载失败"}
                         </Text>

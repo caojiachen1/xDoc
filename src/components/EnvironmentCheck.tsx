@@ -1,19 +1,42 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import {
   Button,
   Card,
   Text,
   Spinner,
   Switch,
-  Input,
   Title2,
   Divider,
+  ProgressBar,
 } from "@fluentui/react-components";
-import { CheckmarkCircle24Regular, ErrorCircle24Regular, FolderOpen24Regular, ArrowRight24Regular } from "@fluentui/react-icons";
-import { STORAGE_KEYS as APP_KEYS } from "../App";
-import { STORAGE_KEYS as OCR_KEYS } from "./SettingsDialog";
+import {
+  CheckmarkCircle24Regular,
+  ErrorCircle24Regular,
+  ArrowRight24Regular,
+  ArrowDownload24Regular,
+} from "@fluentui/react-icons";
+
+const DEFAULT_LAYOUT_MODEL_PATH = "../model/PP-DocLayoutV3.onnx";
+const DEFAULT_OCR_MODEL_PATH = "../model/GLM-OCR-GGUF";
+
+interface DownloadProgress {
+  model_type: string;
+  filename: string;
+  current: number;
+  total: number;
+  progress: number;
+  status: string;
+  message: string;
+}
+
+interface ModelDownloadState {
+  downloading: boolean;
+  progress: number;
+  message: string;
+  status: string;
+}
 
 interface Props {
   onAllChecksPassed: () => void;
@@ -27,10 +50,60 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
   const [layoutModelOk, setLayoutModelOk] = useState<boolean | null>(null);
   const [ocrModelOk, setOcrModelOk] = useState<boolean | null>(null);
 
-  // Values
-  const [layoutModelPath, setLayoutModelPath] = useState(localStorage.getItem(APP_KEYS?.modelPath || "xdoc.settings.modelPath") || "");
-  const [ocrEnabled, setOcrEnabled] = useState(localStorage.getItem(OCR_KEYS?.ocrEnabled || "xdoc.settings.ocr.enabled") === "true");
-  const [ocrModelPath, setOcrModelPath] = useState(localStorage.getItem(OCR_KEYS?.ocrModelPath || "xdoc.settings.ocr.modelPath") || "");
+  // OCR toggle
+  const [ocrEnabled, setOcrEnabled] = useState(
+    localStorage.getItem("xdoc.settings.ocr.enabled") === "true"
+  );
+
+  // Download states
+  const [layoutDownload, setLayoutDownload] = useState<ModelDownloadState>({
+    downloading: false,
+    progress: 0,
+    message: "",
+    status: "idle",
+  });
+  const [ocrDownload, setOcrDownload] = useState<ModelDownloadState>({
+    downloading: false,
+    progress: 0,
+    message: "",
+    status: "idle",
+  });
+
+  const unlistenRef = useRef<(() => void) | null>(null);
+
+  // Listen for download progress events
+  useEffect(() => {
+    const setup = async () => {
+      unlistenRef.current = await listen<DownloadProgress>(
+        "model-download-progress",
+        (event) => {
+          const p = event.payload;
+          const state: ModelDownloadState = {
+            downloading: p.status === "downloading" || p.status === "file_completed",
+            progress: p.progress,
+            message: p.message,
+            status: p.status,
+          };
+
+          if (p.model_type === "layout") {
+            setLayoutDownload(state);
+            if (p.status === "completed") {
+              checkLayoutModel(DEFAULT_LAYOUT_MODEL_PATH);
+            }
+          } else if (p.model_type === "ocr") {
+            setOcrDownload(state);
+            if (p.status === "completed") {
+              checkOcrModel(DEFAULT_OCR_MODEL_PATH);
+            }
+          }
+        }
+      );
+    };
+    setup();
+    return () => {
+      unlistenRef.current?.();
+    };
+  }, [ocrEnabled]);
 
   const checkGit = async () => {
     try {
@@ -65,8 +138,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     }
     try {
       const exists = await invoke<boolean>("check_model_exists", { modelPath: path });
-      // In a real app we might check if 'configuration.json' exists in this directory, 
-      // but simplistic check for the folder for now.
       setOcrModelOk(exists);
     } catch {
       setOcrModelOk(false);
@@ -76,8 +147,8 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
   const runChecks = async () => {
     setChecking(true);
     await checkGit();
-    await checkLayoutModel(layoutModelPath);
-    await checkOcrModel(ocrModelPath);
+    await checkLayoutModel(DEFAULT_LAYOUT_MODEL_PATH);
+    await checkOcrModel(DEFAULT_OCR_MODEL_PATH);
     setChecking(false);
   };
 
@@ -85,37 +156,49 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     runChecks();
   }, [ocrEnabled]);
 
-  const selectLayoutModel = async () => {
+  const downloadLayoutModel = async () => {
+    setLayoutDownload({
+      downloading: true,
+      progress: 0,
+      message: "准备下载...",
+      status: "downloading",
+    });
     try {
-      const selected = await openDialog({
-        multiple: false,
-        filters: [{ name: "ONNX", extensions: ["onnx"] }],
-        title: "选择 Layout 模型 (PP-DocLayoutV3.onnx)",
+      await invoke<string>("download_onnx_model", {
+        targetDir: "../model",
       });
-      if (typeof selected === "string") {
-        setLayoutModelPath(selected);
-        localStorage.setItem("xdoc.settings.modelPath", selected);
-        runChecks();
-      }
+      // Save the default path
+      localStorage.setItem("xdoc.settings.modelPath", DEFAULT_LAYOUT_MODEL_PATH);
     } catch (e) {
-      console.error(e);
+      setLayoutDownload({
+        downloading: false,
+        progress: 0,
+        message: String(e),
+        status: "error",
+      });
     }
   };
 
-  const selectOcrModelFolder = async () => {
+  const downloadOcrModels = async () => {
+    setOcrDownload({
+      downloading: true,
+      progress: 0,
+      message: "准备下载...",
+      status: "downloading",
+    });
     try {
-      const selected = await openDialog({
-        directory: true,
-        multiple: false,
-        title: "选择 OCR 模型文件夹 (GLM-OCR-GGUF)",
+      await invoke<string>("download_ocr_models", {
+        targetDir: "../model/GLM-OCR-GGUF",
       });
-      if (typeof selected === "string") {
-        setOcrModelPath(selected);
-        localStorage.setItem("xdoc.settings.ocr.modelPath", selected);
-        runChecks();
-      }
+      // Save the default path
+      localStorage.setItem("xdoc.settings.ocr.modelPath", DEFAULT_OCR_MODEL_PATH);
     } catch (e) {
-      console.error(e);
+      setOcrDownload({
+        downloading: false,
+        progress: 0,
+        message: String(e),
+        status: "error",
+      });
     }
   };
 
@@ -127,62 +210,187 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
   const isReady = gitOk && layoutModelOk && (!ocrEnabled || ocrModelOk);
 
   return (
-    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", height: "100vh", backgroundColor: "rgb(32, 32, 32)" }}>
-      <Card style={{ width: 500, padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        height: "100vh",
+        backgroundColor: "rgb(32, 32, 32)",
+      }}
+    >
+      <Card
+        style={{
+          width: 500,
+          padding: 24,
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+        }}
+      >
         <Title2>环境检测</Title2>
-        <Text style={{ color: "gray" }}>在开始使用之前，我们需要确保所有必要的环境和模型已就绪。</Text>
+        <Text style={{ color: "gray" }}>
+          在开始使用之前，我们需要确保所有必要的环境和模型已就绪。如果模型未安装，可以在此一键下载。
+        </Text>
 
         <Divider />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {/* Git */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {checking ? <Spinner size="tiny" /> : gitOk ? <CheckmarkCircle24Regular primaryFill="green" /> : <ErrorCircle24Regular primaryFill="red" />}
+              {checking ? (
+                <Spinner size="tiny" />
+              ) : gitOk ? (
+                <CheckmarkCircle24Regular primaryFill="green" />
+              ) : (
+                <ErrorCircle24Regular primaryFill="red" />
+              )}
               <Text>Git 环境</Text>
             </div>
-            {!gitOk && !checking && <Text size={100} style={{ color: "red" }}>需要安装 Git</Text>}
+            {!gitOk && !checking && (
+              <Text size={100} style={{ color: "red" }}>
+                需要安装 Git
+              </Text>
+            )}
           </div>
 
           {/* Layout Model */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                {checking ? <Spinner size="tiny" /> : layoutModelOk ? <CheckmarkCircle24Regular primaryFill="green" /> : <ErrorCircle24Regular primaryFill="red" />}
+                {checking || layoutDownload.downloading ? (
+                  <Spinner size="tiny" />
+                ) : layoutModelOk ? (
+                  <CheckmarkCircle24Regular primaryFill="green" />
+                ) : (
+                  <ErrorCircle24Regular primaryFill="red" />
+                )}
                 <Text>布局分析模型 (PP-DocLayoutV3.onnx)</Text>
               </div>
+              {!layoutModelOk && !checking && !layoutDownload.downloading && (
+                <Button
+                  size="small"
+                  icon={<ArrowDownload24Regular />}
+                  onClick={downloadLayoutModel}
+                >
+                  下载
+                </Button>
+              )}
             </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <Input value={layoutModelPath} readOnly style={{ flex: 1 }} placeholder="模型路径" />
-              <Button icon={<FolderOpen24Regular />} onClick={selectLayoutModel}>选择文件</Button>
-            </div>
-            {!layoutModelOk && !checking && <Text size={100} style={{ color: "red" }}>请选择有效的模型文件</Text>}
+            <Text size={100} style={{ color: "gray" }}>
+              {DEFAULT_LAYOUT_MODEL_PATH}
+            </Text>
+            {layoutDownload.downloading && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <ProgressBar
+                  value={layoutDownload.progress / 100}
+                  color={
+                    layoutDownload.status === "error" ? "error" : "brand"
+                  }
+                />
+                <Text size={100} style={{ color: layoutDownload.status === "error" ? "red" : "gray" }}>
+                  {layoutDownload.message}
+                </Text>
+              </div>
+            )}
+            {!layoutModelOk &&
+              !checking &&
+              !layoutDownload.downloading &&
+              layoutDownload.status === "error" && (
+                <Text size={100} style={{ color: "red" }}>
+                  下载失败: {layoutDownload.message}
+                </Text>
+              )}
           </div>
 
           <Divider />
 
           {/* OCR Setup */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}
+          >
             <Text weight="semibold">开启 GLM-OCR</Text>
-            <Switch checked={ocrEnabled} onChange={(_, data) => handleOcrToggle(data.checked)} />
+            <Switch
+              checked={ocrEnabled}
+              onChange={(_, data) => handleOcrToggle(data.checked)}
+            />
           </div>
 
           {ocrEnabled && (
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}
+              >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  {checking ? <Spinner size="tiny" /> : ocrModelOk ? <CheckmarkCircle24Regular primaryFill="green" /> : <ErrorCircle24Regular primaryFill="red" />}
-                  <Text>OCR 模型目录 (GLM-OCR-GGUF)</Text>
+                  {checking || ocrDownload.downloading ? (
+                    <Spinner size="tiny" />
+                  ) : ocrModelOk ? (
+                    <CheckmarkCircle24Regular primaryFill="green" />
+                  ) : (
+                    <ErrorCircle24Regular primaryFill="red" />
+                  )}
+                  <Text>OCR 模型 (GLM-OCR-GGUF)</Text>
                 </div>
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <Input value={ocrModelPath} readOnly style={{ flex: 1 }} placeholder="目录路径" />
-                <Button icon={<FolderOpen24Regular />} onClick={selectOcrModelFolder}>选择目录</Button>
+                {!ocrModelOk && !checking && !ocrDownload.downloading && (
+                  <Button
+                    size="small"
+                    icon={<ArrowDownload24Regular />}
+                    onClick={downloadOcrModels}
+                  >
+                    下载
+                  </Button>
+                )}
               </div>
               <Text size={100} style={{ color: "gray" }}>
-                您也可以在进入应用后在设置中下载该模型。
+                {DEFAULT_OCR_MODEL_PATH}
               </Text>
-              {!ocrModelOk && !checking && <Text size={100} style={{ color: "red" }}>请选择有效的模型目录</Text>}
+              {ocrDownload.downloading && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <ProgressBar
+                    value={ocrDownload.progress / 100}
+                    color={
+                      ocrDownload.status === "error" ? "error" : "brand"
+                    }
+                  />
+                  <Text
+                    size={100}
+                    style={{
+                      color: ocrDownload.status === "error" ? "red" : "gray",
+                    }}
+                  >
+                    {ocrDownload.message}
+                  </Text>
+                </div>
+              )}
+              {!ocrModelOk &&
+                !checking &&
+                !ocrDownload.downloading &&
+                ocrDownload.status === "error" && (
+                  <Text size={100} style={{ color: "red" }}>
+                    下载失败: {ocrDownload.message}
+                  </Text>
+                )}
             </div>
           )}
         </div>
@@ -190,9 +398,9 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
         <Divider />
 
         <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <Button 
-            appearance="primary" 
-            disabled={!isReady || checking} 
+          <Button
+            appearance="primary"
+            disabled={!isReady || checking}
             icon={<ArrowRight24Regular />}
             iconPosition="after"
             onClick={onAllChecksPassed}

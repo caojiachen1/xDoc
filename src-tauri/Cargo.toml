@@ -31,4 +31,7 @@ pdfium-render = "0.8.37"
 base64 = "0.22.1"
 libloading = "0.8"
 anyhow = "1"
+models-cat = { version = "0.1", features = ["tokio"] }
+async-trait = "0.1"
+walkdir = "2.5"
 

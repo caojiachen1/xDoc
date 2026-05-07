@@ -1,5 +1,8 @@
+use async_trait::async_trait;
 use base64::Engine;
 use image::{imageops::FilterType, DynamicImage, ImageFormat};
+use models_cat::asynchronous::{ModelsCat, Progress, ProgressUnit};
+use models_cat::{OpsError, Repo};
 use ndarray::{Array2, Array4};
 use ort::{session::Session, value::Tensor};
 use pdfium_render::prelude::*;
@@ -7,9 +10,8 @@ use serde::Serialize;
 use std::{
     collections::{HashMap, HashSet},
     env,
-    io::{BufRead, BufReader, Cursor},
+    io::Cursor,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::{Arc, Mutex},
     thread,
 };
@@ -1150,169 +1152,209 @@ async fn run_doclayout(
 }
 
 #[derive(Serialize, Clone)]
-struct DownloadProgress {
-    progress: f64,
+struct ModelDownloadProgress {
+    model_type: String,   // "layout" | "ocr"
+    filename: String,
+    current: u64,
+    total: u64,
+    progress: f64,        // 0.0 - 100.0
+    status: String,       // "downloading" | "file_completed" | "completed" | "error"
     message: String,
-    status: String, // "downloading" | "completed" | "error" | "checking"
+}
+
+#[derive(Clone)]
+struct TauriProgress {
+    app: AppHandle,
+    model_type: String,
+}
+
+#[async_trait]
+impl Progress for TauriProgress {
+    async fn on_start(&mut self, unit: &ProgressUnit) -> std::result::Result<(), OpsError> {
+        let _ = self.app.emit(
+            "model-download-progress",
+            ModelDownloadProgress {
+                model_type: self.model_type.clone(),
+                filename: unit.filename().to_string(),
+                current: 0,
+                total: unit.total_size(),
+                progress: 0.0,
+                status: "downloading".to_string(),
+                message: format!("开始下载 {}", unit.filename()),
+            },
+        );
+        Ok(())
+    }
+
+    async fn on_progress(&mut self, unit: &ProgressUnit) -> std::result::Result<(), OpsError> {
+        let pct = if unit.total_size() > 0 {
+            (unit.current() as f64 / unit.total_size() as f64) * 100.0
+        } else {
+            0.0
+        };
+        let _ = self.app.emit(
+            "model-download-progress",
+            ModelDownloadProgress {
+                model_type: self.model_type.clone(),
+                filename: unit.filename().to_string(),
+                current: unit.current(),
+                total: unit.total_size(),
+                progress: pct,
+                status: "downloading".to_string(),
+                message: format!("下载中 {} ({:.1}%)", unit.filename(), pct),
+            },
+        );
+        Ok(())
+    }
+
+    async fn on_finish(&mut self, unit: &ProgressUnit) -> std::result::Result<(), OpsError> {
+        let _ = self.app.emit(
+            "model-download-progress",
+            ModelDownloadProgress {
+                model_type: self.model_type.clone(),
+                filename: unit.filename().to_string(),
+                current: unit.total_size(),
+                total: unit.total_size(),
+                progress: 100.0,
+                status: "file_completed".to_string(),
+                message: format!("{} 下载完成", unit.filename()),
+            },
+        );
+        Ok(())
+    }
 }
 
 #[tauri::command]
-async fn download_ocr_model(
+async fn download_onnx_model(
     app: tauri::AppHandle,
-    repo_url: String,
     target_dir: String,
 ) -> Result<String, String> {
-    let target_path = Path::new(&target_dir);
-    let dir_name = target_path
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("GLM-OCR-GGUF"))
-        .to_string_lossy()
-        .to_string();
+    let target_path = PathBuf::from(&target_dir);
+    std::fs::create_dir_all(&target_path).map_err(|e| format!("无法创建目录: {e}"))?;
 
-    // Check if target already exists
-    if target_path.exists() {
-        return Err(format!("目录已存在: {}", target_dir));
-    }
-
-    let emit_progress = |app: &tauri::AppHandle, progress: f64, message: &str, status: &str| {
-        let _ = app.emit(
-            "ocr-download-progress",
-            DownloadProgress {
-                progress,
-                message: message.to_string(),
-                status: status.to_string(),
-            },
-        );
+    let repo = Repo::new_model("cjc1887415157/PP-DocLayoutV3-ONNX");
+    let mc = ModelsCat::new(repo);
+    let progress = TauriProgress {
+        app: app.clone(),
+        model_type: "layout".to_string(),
     };
 
-    // Step 1: Check git availability
-    emit_progress(&app, 0.0, "正在检查 git ...", "checking");
+    mc.download_with_progress("PP-DocLayoutV3.onnx", progress)
+        .await
+        .map_err(|e| format!("下载失败: {e}"))?;
 
-    let git_check = Command::new("git")
-        .args(["--version"])
-        .output()
-        .map_err(|e| format!("git 未安装或不在 PATH 中: {e}"))?;
+    // Copy from models-cat cache to target directory
+    let cache_dir = mc.repo().cache_dir();
+    copy_from_cache(&cache_dir, "PP-DocLayoutV3.onnx", &target_path)?;
 
-    if !git_check.status.success() {
-        return Err("git 命令不可用".to_string());
+    let target_file = target_path.join("PP-DocLayoutV3.onnx");
+
+    let _ = app.emit(
+        "model-download-progress",
+        ModelDownloadProgress {
+            model_type: "layout".to_string(),
+            filename: String::new(),
+            current: 0,
+            total: 0,
+            progress: 100.0,
+            status: "completed".to_string(),
+            message: "布局分析模型下载完成".to_string(),
+        },
+    );
+
+    Ok(target_file.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn download_ocr_models(
+    app: tauri::AppHandle,
+    target_dir: String,
+) -> Result<String, String> {
+    let target_path = PathBuf::from(&target_dir);
+    std::fs::create_dir_all(&target_path).map_err(|e| format!("无法创建目录: {e}"))?;
+
+    let repo = Repo::new_model("ggml-org/GLM-OCR-GGUF");
+    let mc = ModelsCat::new(repo);
+
+    // List all available files and exclude the large fp16 variant
+    let all_files = mc
+        .list_hub_files()
+        .await
+        .map_err(|e| format!("获取文件列表失败: {e}"))?;
+
+    let files_to_download: Vec<String> = all_files
+        .into_iter()
+        .filter(|f| f != "GLM-OCR-f16.gguf")
+        .collect();
+
+    if files_to_download.is_empty() {
+        return Err("未找到可下载的文件".to_string());
     }
 
-    // Step 2: Check git-lfs availability
-    emit_progress(&app, 0.0, "正在检查 git-lfs ...", "checking");
+    for (i, file) in files_to_download.iter().enumerate() {
+        let progress = TauriProgress {
+            app: app.clone(),
+            model_type: "ocr".to_string(),
+        };
 
-    let lfs_check = Command::new("git")
-        .args(["lfs", "version"])
-        .output()
-        .map_err(|_| "git-lfs 未安装。请运行: git lfs install".to_string())?;
+        mc.download_with_progress(file, progress)
+            .await
+            .map_err(|e| format!("下载 {} 失败: {}", file, e))?;
 
-    if !lfs_check.status.success() {
-        return Err("git-lfs 不可用，请先安装 git-lfs".to_string());
-    }
+        // Copy each file after download
+        let cache_dir = mc.repo().cache_dir();
+        copy_from_cache(&cache_dir, file, &target_path)?;
 
-    emit_progress(&app, 0.0, "开始克隆仓库...", "downloading");
-
-    // Step 3: Run git lfs clone
-    let parent_dir = target_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
-
-    if parent_dir.to_str() != Some("") && parent_dir.to_str() != Some(".") {
-        std::fs::create_dir_all(parent_dir).map_err(|e| format!("无法创建父目录: {e}"))?;
-    }
-
-    let mut child = Command::new("git")
-        .args([
-            "lfs",
-            "clone",
-            "--progress",
-            &repo_url,
-            &dir_name,
-        ])
-        .current_dir(parent_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("无法启动 git: {e}"))?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or("无法读取 git stderr".to_string())?;
-
-    let reader = BufReader::new(stderr);
-    for line_result in reader.lines() {
-        if let Ok(line) = line_result {
-            // Parse progress from git output
-            // Git outputs: "Receiving objects:  45% (123/456)"
-            // Git LFS outputs: "Git LFS: (1 of 3 files) 1.2 GB / 4.2 GB"
-            let mut progress = -1.0;
-            let message = line.clone();
-
-            // Try to find percentage
-            if let Some(pct_start) = line.find(|c: char| c.is_ascii_digit()) {
-                if let Some(pct_idx) = line[pct_start..].find('%') {
-                    let pct_str = &line[pct_start..pct_start + pct_idx];
-                    if let Ok(pct) = pct_str.parse::<f64>() {
-                        progress = pct.clamp(0.0, 100.0);
-                    }
-                }
-            }
-
-            // Try parse LFS fraction: "X/Y" or "X of Y"
-            if progress < 0.0 {
-                if let Some(frac_start) = line.find("(") {
-                    if let Some(slash) = line[frac_start..].find('/') {
-                        let before_slash = &line[frac_start + 1..frac_start + slash];
-                        if let Some(space) = before_slash.find(" of ") {
-                            let num_str = &before_slash[space + 4..];
-                            if let Ok(current) = num_str.trim().parse::<f64>() {
-                                if let Some(after_slash) = line[frac_start + slash + 1..].find(|c: char| !c.is_ascii_digit()) {
-                                    let denom_str = &line[frac_start + slash + 1..frac_start + slash + 1 + after_slash];
-                                    if let Ok(total) = denom_str.trim().parse::<f64>() {
-                                        if total > 0.0 {
-                                            progress = (current / total * 100.0).clamp(0.0, 99.0);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if progress >= 0.0 {
-                emit_progress(&app, progress, &message, "downloading");
-            } else {
-                emit_progress(&app, 0.0, &message, "downloading");
-            }
-        }
-    }
-
-    // Also read stdout
-    if let Some(stdout) = child.stdout.take() {
-        let stdout_reader = BufReader::new(stdout);
-        for line_result in stdout_reader.lines() {
-            if let Ok(line) = line_result {
-                emit_progress(&app, 0.0, &line, "downloading");
-            }
-        }
-    }
-
-    let status = child.wait().map_err(|e| format!("等待 git 进程失败: {e}"))?;
-
-    if status.success() {
-        emit_progress(&app, 100.0, "下载完成", "completed");
-        let final_path = parent_dir.join(&dir_name);
-        Ok(final_path.to_string_lossy().to_string())
-    } else {
-        emit_progress(
-            &app,
-            0.0,
-            &format!("git clone 失败，退出码: {:?}", status.code()),
-            "error",
+        let overall_pct = ((i + 1) as f64 / files_to_download.len() as f64) * 100.0;
+        let _ = app.emit(
+            "model-download-progress",
+            ModelDownloadProgress {
+                model_type: "ocr".to_string(),
+                filename: format!("{}/{}", i + 1, files_to_download.len()),
+                current: (i + 1) as u64,
+                total: files_to_download.len() as u64,
+                progress: overall_pct,
+                status: "downloading".to_string(),
+                message: format!("已完成 {}/{} 个文件", i + 1, files_to_download.len()),
+            },
         );
-        Err(format!("git clone 失败，退出码: {:?}", status.code()))
     }
+
+    let _ = app.emit(
+        "model-download-progress",
+        ModelDownloadProgress {
+            model_type: "ocr".to_string(),
+            filename: String::new(),
+            current: 0,
+            total: 0,
+            progress: 100.0,
+            status: "completed".to_string(),
+            message: "OCR 模型下载完成".to_string(),
+        },
+    );
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+
+/// Walk the models-cat cache directory and copy a file by name to the target directory.
+fn copy_from_cache(
+    cache_dir: &std::path::Path,
+    filename: &str,
+    target_dir: &std::path::Path,
+) -> Result<(), String> {
+    for entry in walkdir::WalkDir::new(cache_dir)
+        .max_depth(10)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file() && entry.file_name() == filename {
+            let target = target_dir.join(filename);
+            std::fs::copy(entry.path(), &target)
+                .map_err(|e| format!("复制文件失败: {e}"))?;
+            return Ok(());
+        }
+    }
+    Err(format!("在缓存中未找到文件: {}", filename))
 }
 
 fn resolve_dll_dir() -> PathBuf {
@@ -1524,7 +1566,8 @@ pub fn run() {
             get_pdf_paragraphs,
             render_page_preview,
             prefetch_document,
-            download_ocr_model,
+            download_onnx_model,
+            download_ocr_models,
             init_ocr,
             run_ocr_region,
             check_git,
