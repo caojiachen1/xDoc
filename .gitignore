@@ -24,3 +24,5 @@ model/
 *.sln
 *.sw?
 .*/
+lib/
+!lib/pdfium.dll
