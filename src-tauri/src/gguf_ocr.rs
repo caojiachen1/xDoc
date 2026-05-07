@@ -12,16 +12,16 @@ use libloading::Library;
 
 // ── Opaque types ──────────────────────────────────────────────────────────────
 
-enum LlamaModel {}
-enum LlamaContext {}
-enum LlamaVocab {}
+pub(crate) enum LlamaModel {}
+pub(crate) enum LlamaContext {}
+pub(crate) enum LlamaVocab {}
 // llama_memory_t is a pointer typedef in C. Must be pointer-sized (8 bytes),
 // NOT a ZST, because we pass it to/from FFI functions by value.
 type LlamaMemoryT = *mut c_void;
-enum MtmdContext {}
-enum MtmdBitmap {}
-enum MtmdInputChunk {}
-enum MtmdInputChunks {}
+pub(crate) enum MtmdContext {}
+pub(crate) enum MtmdBitmap {}
+pub(crate) enum MtmdInputChunk {}
+pub(crate) enum MtmdInputChunks {}
 
 // ── Basic types ──────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ pub(crate) enum LlamaFlashAttnType {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct LlamaBatch {
+pub(crate) struct LlamaBatch {
     n_tokens: c_int,
     token: *mut LlamaToken,
     embd: *mut c_float,
