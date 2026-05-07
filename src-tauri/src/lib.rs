@@ -1025,13 +1025,14 @@ fn spawn_prefetch_for_pdf(
 
 #[tauri::command]
 async fn load_model(model_path: String, state: State<'_, ModelState>) -> Result<String, String> {
-    if !std::path::Path::new(&model_path).exists() {
-        return Err("Model file not found".to_string());
+    let resolved = resolve_model_path(&model_path);
+    if !resolved.exists() {
+        return Err(format!("Model file not found: {}", resolved.display()));
     }
 
     let session = Session::builder()
         .map_err(|e| e.to_string())?
-        .commit_from_file(&model_path)
+        .commit_from_file(resolved.to_str().unwrap_or(&model_path))
         .map_err(|e| e.to_string())?;
 
     *state.session.lock().unwrap() = Some(session);
@@ -1229,7 +1230,7 @@ async fn download_onnx_model(
     app: tauri::AppHandle,
     target_dir: String,
 ) -> Result<String, String> {
-    let target_path = PathBuf::from(&target_dir);
+    let target_path = resolve_model_path(&target_dir);
     std::fs::create_dir_all(&target_path).map_err(|e| format!("无法创建目录: {e}"))?;
 
     let repo = Repo::new_model("cjc1887415157/PP-DocLayoutV3-ONNX");
@@ -1270,7 +1271,7 @@ async fn download_ocr_models(
     app: tauri::AppHandle,
     target_dir: String,
 ) -> Result<String, String> {
-    let target_path = PathBuf::from(&target_dir);
+    let target_path = resolve_model_path(&target_dir);
     std::fs::create_dir_all(&target_path).map_err(|e| format!("无法创建目录: {e}"))?;
 
     let repo = Repo::new_model("ggml-org/GLM-OCR-GGUF");
@@ -1358,8 +1359,14 @@ fn copy_from_cache(
 }
 
 fn resolve_dll_dir() -> PathBuf {
+    // 1. Look in the exe's own directory (bundled DLLs for installed app)
     if let Ok(exe) = env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
+            let bundled = exe_dir.join("llama.dll");
+            if bundled.exists() {
+                return exe_dir.to_path_buf();
+            }
+            // 2. Walk up from exe to find lib/ directory (dev environment)
             for ancestor in exe_dir.ancestors() {
                 let candidate = ancestor.join("lib").join("llama.dll");
                 if candidate.exists() {
@@ -1368,7 +1375,23 @@ fn resolve_dll_dir() -> PathBuf {
             }
         }
     }
+    // 3. Fallback: lib/ relative to current working directory
     PathBuf::from("lib")
+}
+
+fn resolve_model_path(model_path: &str) -> PathBuf {
+    let path = PathBuf::from(model_path);
+    if path.is_absolute() {
+        return path;
+    }
+    // Resolve relative paths against the exe directory so that
+    // "model/PP-DocLayoutV3.onnx" points to <exe_dir>/model/...
+    if let Ok(exe) = env::current_exe() {
+        if let Some(exe_dir) = exe.parent() {
+            return exe_dir.join(path);
+        }
+    }
+    path
 }
 
 #[tauri::command]
@@ -1376,9 +1399,9 @@ async fn init_ocr(
     ocr_model_path: String,
     state: State<'_, OcrState>,
 ) -> Result<String, String> {
-    let model_root = PathBuf::from(&ocr_model_path);
+    let model_root = resolve_model_path(&ocr_model_path);
     if !model_root.exists() {
-        return Err(format!("OCR model directory not found: {ocr_model_path}"));
+        return Err(format!("OCR model directory not found: {}", model_root.display()));
     }
 
     let gguf_file = model_root.join("GLM-OCR-Q8_0.gguf");
@@ -1523,7 +1546,7 @@ async fn check_git() -> Result<bool, String> {
 
 #[tauri::command]
 async fn check_model_exists(model_path: String) -> bool {
-    std::path::Path::new(&model_path).exists()
+    resolve_model_path(&model_path).exists()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

@@ -461,7 +461,7 @@ function App() {
       }
 
       const savedModelPath = window.localStorage.getItem(STORAGE_KEYS.modelPath)
-        || "../model/PP-DocLayoutV3.onnx";
+        || "model/PP-DocLayoutV3.onnx";
       setModelPath(savedModelPath);
       setLoading(true);
       invoke("load_model", { modelPath: savedModelPath })
@@ -480,7 +480,7 @@ function App() {
       const savedOcrEnabled = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrEnabled);
       setOcrEnabled(savedOcrEnabled === null ? true : savedOcrEnabled === "true");
       const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath)
-        || "../model/GLM-OCR-GGUF";
+        || "model/GLM-OCR-GGUF";
       setOcrModelPath(savedOcrPath);
 
       // LLM settings

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    doclayout_app_lib::run()
+    xdoc_lib::run()
 }

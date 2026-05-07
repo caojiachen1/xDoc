@@ -22,8 +22,8 @@ import {
 } from "@fluentui/react-icons";
 import { VENDOR_PRESETS, type LlmSettings } from "./SettingsDialog";
 
-const DEFAULT_LAYOUT_MODEL_PATH = "../model/PP-DocLayoutV3.onnx";
-const DEFAULT_OCR_MODEL_PATH = "../model/GLM-OCR-GGUF";
+const DEFAULT_LAYOUT_MODEL_PATH = "model/PP-DocLayoutV3.onnx";
+const DEFAULT_OCR_MODEL_PATH = "model/GLM-OCR-GGUF";
 
 interface DownloadProgress {
   model_type: string;
@@ -182,7 +182,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     });
     try {
       await invoke<string>("download_onnx_model", {
-        targetDir: "../model",
+        targetDir: "model",
       });
       localStorage.setItem("xdoc.settings.modelPath", DEFAULT_LAYOUT_MODEL_PATH);
     } catch (e) {
@@ -204,7 +204,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     });
     try {
       await invoke<string>("download_ocr_models", {
-        targetDir: "../model/GLM-OCR-GGUF",
+        targetDir: "model/GLM-OCR-GGUF",
       });
       localStorage.setItem("xdoc.settings.ocr.modelPath", DEFAULT_OCR_MODEL_PATH);
     } catch (e) {

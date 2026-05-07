@@ -30,7 +30,7 @@
     "typescript": "~5.8.3",
     "vite": "^7.0.4"
   },
-  "name": "doclayout-app",
+  "name": "xdoc",
   "private": true,
   "scripts": {
     "build": "tsc && vite build",

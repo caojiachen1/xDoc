@@ -12,8 +12,7 @@ dist
 dist-ssr
 *.local
 
-README.md
-PP-DocLayoutV3.onnx
+model/
 
 # Editor directories and files
 .vscode/
@@ -25,4 +24,3 @@ PP-DocLayoutV3.onnx
 *.sln
 *.sw?
 .*/
-model/

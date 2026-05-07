@@ -132,7 +132,7 @@ function SettingsDialog(props: Props) {
             status: p.status,
           });
           if (p.status === "completed") {
-            onOcrModelPathChange("../model/GLM-OCR-GGUF");
+            onOcrModelPathChange("model/GLM-OCR-GGUF");
           }
         },
       );
@@ -159,7 +159,7 @@ function SettingsDialog(props: Props) {
     });
     try {
       await invoke<string>("download_ocr_models", {
-        targetDir: "../model/GLM-OCR-GGUF",
+        targetDir: "model/GLM-OCR-GGUF",
       });
     } catch (e) {
       setDownload({

@@ -1025,29 +1025,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "doclayout-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64 0.22.1",
- "image",
- "libloading 0.8.9",
- "models-cat",
- "ndarray",
- "ort",
- "pdfium-render",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-http",
- "tauri-plugin-opener",
- "walkdir",
-]
-
-[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6884,6 +6861,29 @@ dependencies = [
  "libc",
  "once_cell",
  "pkg-config",
+]
+
+[[package]]
+name = "xdoc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "image",
+ "libloading 0.8.9",
+ "models-cat",
+ "ndarray",
+ "ort",
+ "pdfium-render",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-http",
+ "tauri-plugin-opener",
+ "walkdir",
 ]
 
 [[package]]
