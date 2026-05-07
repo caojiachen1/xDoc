@@ -10,6 +10,9 @@ import {
   Title2,
   Divider,
   ProgressBar,
+  Dropdown,
+  Option,
+  Input,
 } from "@fluentui/react-components";
 import {
   CheckmarkCircle24Regular,
@@ -17,6 +20,7 @@ import {
   ArrowRight24Regular,
   ArrowDownload24Regular,
 } from "@fluentui/react-icons";
+import { VENDOR_PRESETS, type LlmSettings } from "./SettingsDialog";
 
 const DEFAULT_LAYOUT_MODEL_PATH = "../model/PP-DocLayoutV3.onnx";
 const DEFAULT_OCR_MODEL_PATH = "../model/GLM-OCR-GGUF";
@@ -45,8 +49,7 @@ interface Props {
 export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
   const [checking, setChecking] = useState(true);
 
-  // Status
-  const [gitOk, setGitOk] = useState<boolean | null>(null);
+  // Model status
   const [layoutModelOk, setLayoutModelOk] = useState<boolean | null>(null);
   const [ocrModelOk, setOcrModelOk] = useState<boolean | null>(null);
 
@@ -68,6 +71,30 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     message: "",
     status: "idle",
   });
+
+  // LLM settings
+  const [llmSettings, setLlmSettings] = useState<LlmSettings>(() => {
+    const vendor = localStorage.getItem("xdoc.settings.llm.vendor") || "deepseek";
+    let vendorApiKeys: Record<string, string> = {};
+    try {
+      const raw = localStorage.getItem("xdoc.settings.llm.vendorApiKeys");
+      if (raw) vendorApiKeys = JSON.parse(raw);
+    } catch {}
+    const preset = VENDOR_PRESETS[vendor];
+    const baseUrl = localStorage.getItem("xdoc.settings.llm.baseUrl") || preset?.baseUrl || "";
+    const model = localStorage.getItem("xdoc.settings.llm.model") || preset?.models?.[0] || "";
+    return { vendor, vendorApiKeys, baseUrl, model };
+  });
+
+  const currentApiKey = llmSettings.vendorApiKeys[llmSettings.vendor] || "";
+
+  // Persist LLM settings
+  useEffect(() => {
+    localStorage.setItem("xdoc.settings.llm.vendor", llmSettings.vendor);
+    localStorage.setItem("xdoc.settings.llm.vendorApiKeys", JSON.stringify(llmSettings.vendorApiKeys));
+    localStorage.setItem("xdoc.settings.llm.baseUrl", llmSettings.baseUrl);
+    localStorage.setItem("xdoc.settings.llm.model", llmSettings.model);
+  }, [llmSettings]);
 
   const unlistenRef = useRef<(() => void) | null>(null);
 
@@ -105,15 +132,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     };
   }, [ocrEnabled]);
 
-  const checkGit = async () => {
-    try {
-      const ok = await invoke<boolean>("check_git");
-      setGitOk(ok);
-    } catch {
-      setGitOk(false);
-    }
-  };
-
   const checkLayoutModel = async (path: string) => {
     if (!path) {
       setLayoutModelOk(false);
@@ -146,7 +164,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
 
   const runChecks = async () => {
     setChecking(true);
-    await checkGit();
     await checkLayoutModel(DEFAULT_LAYOUT_MODEL_PATH);
     await checkOcrModel(DEFAULT_OCR_MODEL_PATH);
     setChecking(false);
@@ -167,7 +184,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
       await invoke<string>("download_onnx_model", {
         targetDir: "../model",
       });
-      // Save the default path
       localStorage.setItem("xdoc.settings.modelPath", DEFAULT_LAYOUT_MODEL_PATH);
     } catch (e) {
       setLayoutDownload({
@@ -190,7 +206,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
       await invoke<string>("download_ocr_models", {
         targetDir: "../model/GLM-OCR-GGUF",
       });
-      // Save the default path
       localStorage.setItem("xdoc.settings.ocr.modelPath", DEFAULT_OCR_MODEL_PATH);
     } catch (e) {
       setOcrDownload({
@@ -207,60 +222,40 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     localStorage.setItem("xdoc.settings.ocr.enabled", checked.toString());
   };
 
-  const isReady = gitOk && layoutModelOk && (!ocrEnabled || ocrModelOk);
+  const isReady = layoutModelOk && (!ocrEnabled || ocrModelOk);
 
   return (
     <div
       style={{
         display: "flex",
         justifyContent: "center",
-        alignItems: "center",
+        alignItems: "flex-start",
         height: "100vh",
         backgroundColor: "rgb(32, 32, 32)",
+        overflow: "auto",
+        padding: "40px 0",
       }}
     >
       <Card
         style={{
-          width: 500,
+          width: 520,
           padding: 24,
           display: "flex",
           flexDirection: "column",
           gap: 16,
         }}
       >
-        <Title2>环境检测</Title2>
+        <Title2>初始设置</Title2>
         <Text style={{ color: "gray" }}>
-          在开始使用之前，我们需要确保所有必要的环境和模型已就绪。如果模型未安装，可以在此一键下载。
+          在使用之前，请确认本地模型已就绪。未安装的模型可在此一键下载，LLM 服务可选配置。
         </Text>
 
         <Divider />
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Git */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              {checking ? (
-                <Spinner size="tiny" />
-              ) : gitOk ? (
-                <CheckmarkCircle24Regular primaryFill="green" />
-              ) : (
-                <ErrorCircle24Regular primaryFill="red" />
-              )}
-              <Text>Git 环境</Text>
-            </div>
-            {!gitOk && !checking && (
-              <Text size={100} style={{ color: "red" }}>
-                需要安装 Git
-              </Text>
-            )}
-          </div>
+        {/* ════ 模型配置 ════ */}
+        <Text weight="semibold" style={{ fontSize: 14 }}>模型配置</Text>
 
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {/* Layout Model */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             <div
@@ -316,8 +311,6 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
               )}
           </div>
 
-          <Divider />
-
           {/* OCR Setup */}
           <div
             style={{
@@ -326,7 +319,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
               justifyContent: "space-between",
             }}
           >
-            <Text weight="semibold">开启 GLM-OCR</Text>
+            <Text>GLM-OCR</Text>
             <Switch
               checked={ocrEnabled}
               onChange={(_, data) => handleOcrToggle(data.checked)}
@@ -393,6 +386,109 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
                 )}
             </div>
           )}
+        </div>
+
+        <Divider />
+
+        {/* ════ AI 服务 ════ */}
+        <Text weight="semibold" style={{ fontSize: 14 }}>AI 服务 (可选)</Text>
+        <Text size={100} style={{ color: "gray" }}>
+          配置大语言模型后可在应用中直接使用 AI 功能，也可稍后在设置中配置。
+        </Text>
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* Vendor */}
+          <div>
+            <Text size={100} weight="semibold">模型厂商</Text>
+            <Dropdown
+              value={VENDOR_PRESETS[llmSettings.vendor]?.label ?? "自定义"}
+              selectedOptions={[llmSettings.vendor]}
+              onOptionSelect={(_, d) => {
+                const vendor = d.optionValue as string;
+                const preset = VENDOR_PRESETS[vendor];
+                setLlmSettings({
+                  ...llmSettings,
+                  vendor,
+                  baseUrl: preset?.baseUrl ?? llmSettings.baseUrl,
+                  model: preset?.models?.[0] ?? llmSettings.model,
+                });
+              }}
+              style={{ width: "100%", marginTop: 4 }}
+            >
+              {Object.entries(VENDOR_PRESETS).map(([key, preset]) => (
+                <Option key={key} value={key}>
+                  {preset.label}
+                </Option>
+              ))}
+            </Dropdown>
+          </div>
+
+          {/* API Key */}
+          <div>
+            <Text size={100} weight="semibold">API Key</Text>
+            <Input
+              type="password"
+              value={currentApiKey}
+              onChange={(_, d) =>
+                setLlmSettings({
+                  ...llmSettings,
+                  vendorApiKeys: {
+                    ...llmSettings.vendorApiKeys,
+                    [llmSettings.vendor]: d.value,
+                  },
+                })
+              }
+              placeholder="输入 API Key"
+              style={{ width: "100%", marginTop: 4 }}
+            />
+          </div>
+
+          {/* Base URL */}
+          <div>
+            <Text size={100} weight="semibold">API Base URL</Text>
+            <Input
+              value={llmSettings.baseUrl}
+              onChange={(_, d) =>
+                setLlmSettings({ ...llmSettings, baseUrl: d.value })
+              }
+              placeholder="https://api.example.com/v1"
+              style={{ width: "100%", marginTop: 4 }}
+            />
+            <Text size={100} style={{ color: "gray" }}>
+              选择厂商后自动填入，也可手动修改
+            </Text>
+          </div>
+
+          {/* Model */}
+          <div>
+            <Text size={100} weight="semibold">模型名称</Text>
+            {VENDOR_PRESETS[llmSettings.vendor]?.models.length > 0 ? (
+              <Dropdown
+                value={llmSettings.model}
+                selectedOptions={[llmSettings.model]}
+                onOptionSelect={(_, d) => {
+                  const model = d.optionValue as string;
+                  if (model) setLlmSettings({ ...llmSettings, model });
+                }}
+                style={{ width: "100%", marginTop: 4 }}
+              >
+                {VENDOR_PRESETS[llmSettings.vendor].models.map((m) => (
+                  <Option key={m} value={m}>
+                    {m}
+                  </Option>
+                ))}
+              </Dropdown>
+            ) : (
+              <Input
+                value={llmSettings.model}
+                onChange={(_, d) =>
+                  setLlmSettings({ ...llmSettings, model: d.value })
+                }
+                placeholder="输入模型名称，如 gpt-4o"
+                style={{ width: "100%", marginTop: 4 }}
+              />
+            )}
+          </div>
         </div>
 
         <Divider />
