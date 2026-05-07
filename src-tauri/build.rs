@@ -19,9 +19,25 @@ fn collect_pdfium_source_candidates(manifest_dir: &Path) -> Vec<PathBuf> {
     if let Some(workspace_root) = manifest_dir.parent() {
         candidates.push(workspace_root.join("pdfium.dll"));
         candidates.push(workspace_root.join("resources").join("pdfium.dll"));
+        candidates.push(workspace_root.join("lib").join("pdfium.dll"));
+    }
+
+    if let Some(lib) = find_lib_dir(manifest_dir) {
+        candidates.push(lib.join("pdfium.dll"));
     }
 
     candidates
+}
+
+fn find_lib_dir(manifest_dir: &Path) -> Option<PathBuf> {
+    for ancestor in manifest_dir.ancestors().take(8) {
+        let candidate = ancestor.join("lib").join("llama.dll");
+        if candidate.exists() {
+            return Some(ancestor.join("lib"));
+        }
+    }
+    let workspace_lib = manifest_dir.parent()?.join("lib");
+    workspace_lib.exists().then_some(workspace_lib)
 }
 
 fn collect_output_dirs(manifest_dir: &Path) -> Vec<PathBuf> {
@@ -56,7 +72,7 @@ fn try_copy_pdfium_dll() {
 
     let Some(source_dll) = source else {
         println!(
-            "cargo:warning=pdfium.dll not found during build. Expected in src-tauri/, workspace root, resources/, or PDFIUM_DYNAMIC_LIB_PATH."
+            "cargo:warning=pdfium.dll not found during build. Expected in src-tauri/, lib/, workspace root, resources/, or set PDFIUM_DYNAMIC_LIB_PATH."
         );
         return;
     };
@@ -88,6 +104,7 @@ fn main() {
     println!("cargo:rerun-if-changed=pdfium.dll");
     println!("cargo:rerun-if-changed=../pdfium.dll");
     println!("cargo:rerun-if-changed=../resources/pdfium.dll");
+    println!("cargo:rerun-if-changed=../lib/pdfium.dll");
 
     try_copy_pdfium_dll();
     tauri_build::build()
