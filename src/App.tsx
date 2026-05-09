@@ -18,6 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
+import { Bot, Languages, FileText } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
@@ -1485,18 +1486,18 @@ function App() {
                   </div>
                   {selectedFigure ? (
                     <button className="batch-ai-btn" onClick={handleImageAiAction}>
-                      🤖 解读图片
+                      <Bot size={13} /> 解读图片
                     </button>
                   ) : (selectedParagraph || ocrText) ? (
                     <>
                       <button className="batch-ai-btn" onClick={() => handleBatchAiAction("解读")}>
-                        🤖 解读
+                        <Bot size={13} /> 解读
                       </button>
                       <button className="batch-ai-btn" onClick={() => handleBatchAiAction("翻译")}>
-                        🌐 翻译
+                        <Languages size={13} /> 翻译
                       </button>
                       <button className="batch-ai-btn" onClick={() => handleBatchAiAction("摘要")}>
-                        📝 摘要
+                        <FileText size={13} /> 摘要
                       </button>
                     </>
                   ) : null}
