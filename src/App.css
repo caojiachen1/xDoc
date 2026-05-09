@@ -414,9 +414,33 @@
   color: #00D4BB;
 }
 
+/* ── Font Size Buttons ──────────────────────────────────── */
+.font-size-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #e0e0e0;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  line-height: 1;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+
+.font-size-btn:hover {
+  background: rgba(0, 212, 187, 0.18);
+  border-color: #00D4BB;
+  color: #00D4BB;
+}
+
 /* ── AI Markdown Content ─────────────────────────────────── */
 .ai-markdown-content {
-  font-size: 14px;
   line-height: 1.7;
   word-break: break-word;
   overflow-wrap: break-word;

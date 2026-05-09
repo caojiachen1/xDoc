@@ -130,6 +130,8 @@ export const STORAGE_KEYS = {
   llmVendorApiKeys: "xdoc.settings.llm.vendorApiKeys",
   llmBaseUrl: "xdoc.settings.llm.baseUrl",
   llmModel: "xdoc.settings.llm.model",
+  textFontSize: "xdoc.settings.textFontSize",
+  aiFontSize: "xdoc.settings.aiFontSize",
 } as const;
 
 function App() {
@@ -183,6 +185,10 @@ function App() {
     y: number;
     selectedText: string;
   }>({ visible: false, x: 0, y: 0, selectedText: "" });
+
+  // Font size state
+  const [textFontSize, setTextFontSize] = useState(15);
+  const [aiFontSize, setAiFontSize] = useState(14);
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -483,6 +489,22 @@ function App() {
         || "model/GLM-OCR-GGUF";
       setOcrModelPath(savedOcrPath);
 
+      // Font size settings
+      const savedTextFontSize = window.localStorage.getItem(STORAGE_KEYS.textFontSize);
+      if (savedTextFontSize !== null) {
+        const parsed = Number(savedTextFontSize);
+        if (!Number.isNaN(parsed)) {
+          setTextFontSize(Math.max(10, Math.min(40, parsed)));
+        }
+      }
+      const savedAiFontSize = window.localStorage.getItem(STORAGE_KEYS.aiFontSize);
+      if (savedAiFontSize !== null) {
+        const parsed = Number(savedAiFontSize);
+        if (!Number.isNaN(parsed)) {
+          setAiFontSize(Math.max(10, Math.min(40, parsed)));
+        }
+      }
+
       // LLM settings
       const savedLlmVendor = window.localStorage.getItem(STORAGE_KEYS.llmVendor) || "deepseek";
       let savedVendorApiKeys: Record<string, string> = {};
@@ -570,6 +592,20 @@ function App() {
       window.localStorage.setItem(STORAGE_KEYS.llmModel, llmSettings.model);
     } catch { /* ignore */ }
   }, [llmSettings, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.textFontSize, String(textFontSize));
+    } catch { /* ignore */ }
+  }, [textFontSize, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    try {
+      window.localStorage.setItem(STORAGE_KEYS.aiFontSize, String(aiFontSize));
+    } catch { /* ignore */ }
+  }, [aiFontSize, environmentReady]);
 
   // Initialize OCR backend when enabled and model path is set
   useEffect(() => {
@@ -1434,6 +1470,19 @@ function App() {
                 {/* ── Header with batch AI action buttons ── */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                   <h3 style={{ margin: 0, flex: "0 0 auto" }}>选取段落及分词区域</h3>
+                  <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setTextFontSize(s => Math.max(10, s - 1))}
+                      title="缩小字号"
+                    >A-</button>
+                    <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{textFontSize}</span>
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setTextFontSize(s => Math.min(40, s + 1))}
+                      title="放大字号"
+                    >A+</button>
+                  </div>
                   {selectedFigure ? (
                     <button className="batch-ai-btn" onClick={handleImageAiAction}>
                       🤖 解读图片
@@ -1477,7 +1526,7 @@ function App() {
                         <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
                           PDF 原文
                         </Text>
-                        <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap" }}>
+                        <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap", fontSize: textFontSize }}>
                           {segmentedParagraph.map((word, idx) => (
                             <span
                               key={idx}
@@ -1510,7 +1559,7 @@ function App() {
                         ) : ocrText ? (
                           <div
                             className="ocr-latex-content"
-                            style={{ whiteSpace: "pre-wrap" }}
+                            style={{ whiteSpace: "pre-wrap", fontSize: textFontSize }}
                           >
                             {renderOcrNodes(
                               ocrText
@@ -1532,8 +1581,23 @@ function App() {
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
 
               <div className="ai-pane">
-                <h3>{aiAction || "AI 解读"}</h3>
-                <div style={{ color: "#ffffff" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                  <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
+                  <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
+                      title="缩小字号"
+                    >A-</button>
+                    <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{aiFontSize}</span>
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
+                      title="放大字号"
+                    >A+</button>
+                  </div>
+                </div>
+                <div style={{ color: "#ffffff", fontSize: aiFontSize }}>
                   {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
                 </div>
               </div>
