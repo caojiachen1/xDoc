@@ -1456,7 +1456,7 @@ function App() {
                 {/* ── Figure image display ── */}
                 {selectedFigure ? (
                   <div style={{ overflow: "hidden" }}>
-                    <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                    <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
                       {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
                     </Text>
                     {figureImageDataUrl ? (
@@ -1474,7 +1474,7 @@ function App() {
                     {/* PDF-extracted text with word segmentation */}
                     {pdfTextExtractionEnabled && (
                       <div>
-                        <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                        <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
                           PDF 原文
                         </Text>
                         <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap" }}>
@@ -1497,7 +1497,7 @@ function App() {
                     {/* OCR result with LaTeX rendering */}
                     {ocrEnabled && (
                       <div>
-                        <Text size={100} weight="semibold" style={{ color: "#888", marginBottom: 4, display: "block" }}>
+                        <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
                           OCR 识别结果
                         </Text>
                         {ocrLoading ? (
@@ -1533,7 +1533,7 @@ function App() {
 
               <div className="ai-pane">
                 <h3>{aiAction || "AI 解读"}</h3>
-                <div style={{ color: "#ccc" }}>
+                <div style={{ color: "#ffffff" }}>
                   {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
                 </div>
               </div>

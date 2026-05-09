@@ -143,6 +143,8 @@
   font-size: 15px;
   line-height: 1.6;
   box-sizing: border-box;
+  font-family: "Times New Roman", SimSun, serif;
+  color: #ffffff;
 }
 
 .resizer-h {
@@ -177,6 +179,8 @@
   flex: 1;
   padding: 16px;
   overflow: auto;
+  font-family: "Times New Roman", SimSun, serif;
+  color: #ffffff;
 }
 
 .ai-pane h3 {
@@ -330,8 +334,9 @@
 .ocr-latex-content {
   font-size: 14px;
   line-height: 1.7;
-  color: #e0e0e0;
+  color: #ffffff;
   word-break: break-word;
+  font-family: "Times New Roman", SimSun, serif;
 }
 
 .ocr-latex-content .katex-display {
@@ -415,6 +420,8 @@
   line-height: 1.7;
   word-break: break-word;
   overflow-wrap: break-word;
+  color: #ffffff;
+  font-family: "Times New Roman", SimSun, serif;
 }
 
 .ai-markdown-content p {
