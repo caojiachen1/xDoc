@@ -147,6 +147,13 @@ function App() {
   const [figureImageDataUrl, setFigureImageDataUrl] = useState<string>("");
   const [aiAction, setAiAction] = useState<string>("");
   const [aiResult, setAiResult] = useState<string>("");
+
+  // Q&A follow-up state
+  const [qaHistory, setQaHistory] = useState<{ question: string; answer: string }[]>([]);
+  const [qaInput, setQaInput] = useState("");
+  const [qaLoading, setQaLoading] = useState(false);
+  const qaSourceTextRef = useRef("");
+  const qaChatRef = useRef<HTMLDivElement>(null);
   const [loading, setLoading] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [scoreThreshold, setScoreThreshold] = useState(0.5);
@@ -808,6 +815,11 @@ function App() {
     }
     setAiResult(`正在请求 AI ${action}...`);
     setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    // Reset Q&A state for new action
+    setQaHistory([]);
+    setQaInput("");
+    setQaLoading(false);
+    qaSourceTextRef.current = text;
 
     const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
     if (!apiKey || !llmSettings.baseUrl) {
@@ -1141,6 +1153,118 @@ function App() {
   const handleFulltextCancel = () => {
     fulltextCancelRef.current = true;
   };
+
+  const handleQaSubmit = async () => {
+    const question = qaInput.trim();
+    if (!question || qaLoading) return;
+
+    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+    if (!apiKey || !llmSettings.baseUrl) return;
+
+    setQaInput("");
+    setQaLoading(true);
+
+    // Add question with empty answer immediately
+    setQaHistory(prev => [...prev, { question, answer: "" }]);
+
+    try {
+      const systemPrompt = "你是一位专业的文档分析助手。以下是文档的原文内容以及之前的AI解读。请根据用户的问题进行回答，用中文回复，简洁准确。";
+      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+
+      // Build conversation messages (snapshot current history before this question)
+      const messages: { role: string; content: string }[] = [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: qaSourceTextRef.current },
+        { role: "assistant", content: aiResult },
+      ];
+      for (const qa of qaHistory) {
+        messages.push({ role: "user", content: qa.question });
+        messages.push({ role: "assistant", content: qa.answer });
+      }
+      messages.push({ role: "user", content: question });
+
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model: llmSettings.model,
+          messages,
+          temperature: 0.7,
+          max_tokens: 2048,
+          stream: true,
+        }),
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API 请求失败 (${response.status}): ${errText}`);
+      }
+
+      // Stream the answer
+      const reader = response.body?.getReader();
+      if (reader) {
+        const decoder = new TextDecoder();
+        let result = "";
+        let buffer = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            const data = trimmed.slice(6);
+            if (data === "[DONE]") continue;
+            try {
+              const parsed = JSON.parse(data);
+              const delta = parsed.choices?.[0]?.delta?.content;
+              if (delta) {
+                result += delta;
+                setQaHistory(prev => {
+                  const updated = [...prev];
+                  updated[updated.length - 1] = { question, answer: result };
+                  return updated;
+                });
+              }
+            } catch {
+              // skip unparseable chunks
+            }
+          }
+        }
+      } else {
+        const data = await response.json();
+        const content = data.choices?.[0]?.message?.content;
+        setQaHistory(prev => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { question, answer: content || "AI 返回了空内容" };
+          return updated;
+        });
+      }
+    } catch (e) {
+      setQaHistory(prev => {
+        const updated = [...prev];
+        updated[updated.length - 1] = { question, answer: `请求失败: ${String(e)}` };
+        return updated;
+      });
+    } finally {
+      setQaLoading(false);
+    }
+  };
+
+  // Auto-scroll Q&A chat to bottom
+  useEffect(() => {
+    if (qaChatRef.current) {
+      qaChatRef.current.scrollTop = qaChatRef.current.scrollHeight;
+    }
+  }, [qaHistory]);
 
   const dismissFloatingMenu = () => {
     setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
@@ -1726,25 +1850,63 @@ function App() {
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
 
               <div className="ai-pane">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                  <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
-                  <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
-                    <button
-                      className="font-size-btn"
-                      onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
-                      title="缩小字号"
-                    >A-</button>
-                    <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{aiFontSize}</span>
-                    <button
-                      className="font-size-btn"
-                      onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
-                      title="放大字号"
-                    >A+</button>
+                <div className="ai-pane-scroll">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                    <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
+                    <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
+                      <button
+                        className="font-size-btn"
+                        onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
+                        title="缩小字号"
+                      >A-</button>
+                      <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{aiFontSize}</span>
+                      <button
+                        className="font-size-btn"
+                        onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
+                        title="放大字号"
+                      >A+</button>
+                    </div>
                   </div>
+                  <div style={{ color: "#ffffff", fontSize: aiFontSize }}>
+                    {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
+                  </div>
+
+                  {/* Q&A follow-up history */}
+                  {qaHistory.length > 0 && (
+                    <div className="qa-history" ref={qaChatRef} style={{ fontSize: aiFontSize }}>
+                      {qaHistory.map((qa, idx) => (
+                        <div key={idx} className="qa-pair">
+                          <div className="qa-question">Q: {qa.question}</div>
+                          <div className="qa-answer">
+                            {qa.answer ? renderAiContent(qa.answer) : <Spinner size="tiny" />}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <div style={{ color: "#ffffff", fontSize: aiFontSize }}>
-                  {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
-                </div>
+
+                {/* Q&A input - pinned to bottom */}
+                {aiResult && (
+                  <div className="qa-input-row">
+                    <input
+                      className="qa-input"
+                      type="text"
+                      placeholder="输入追问..."
+                      value={qaInput}
+                      onChange={e => setQaInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleQaSubmit(); } }}
+                      disabled={qaLoading}
+                    />
+                    <button
+                      className="qa-send-btn"
+                      onClick={() => void handleQaSubmit()}
+                      disabled={qaLoading || !qaInput.trim()}
+                    >
+                      {qaLoading ? <Spinner size="tiny" /> : "发送"}
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Floating AI Action Menu */}
