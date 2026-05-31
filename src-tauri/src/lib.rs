@@ -1549,6 +1549,13 @@ async fn check_model_exists(model_path: String) -> bool {
     resolve_model_path(&model_path).exists()
 }
 
+#[tauri::command]
+fn save_fulltext_debug(text: String) -> Result<String, String> {
+    let path = env::temp_dir().join("xdoc_fulltext_debug.txt");
+    std::fs::write(&path, &text).map_err(|e| format!("Failed to write: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -1594,7 +1601,8 @@ pub fn run() {
             init_ocr,
             run_ocr_region,
             check_git,
-            check_model_exists
+            check_model_exists,
+            save_fulltext_debug
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

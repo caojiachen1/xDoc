@@ -171,6 +171,11 @@ function App() {
   const [ocrInitialized, setOcrInitialized] = useState(false);
   const [ocrError, setOcrError] = useState("");
 
+  // Fulltext extraction state
+  const [fulltextExtracting, setFulltextExtracting] = useState(false);
+  const [fulltextProgress, setFulltextProgress] = useState({ current: 0, total: 0 });
+  const fulltextCancelRef = useRef(false);
+
   // LLM settings
   const [llmSettings, setLlmSettings] = useState<LlmSettings>({
     vendor: "deepseek",
@@ -207,6 +212,23 @@ function App() {
     // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
     const visual = new Set([3, 5, 9, 13, 14, 15, 20, 21]);
     return visual.has(clsId);
+  };
+
+  const isGarbageBox = (clsId: number) => {
+    // footer, footer_image, header, header_image, number (page number), seal, formula_number
+    const garbage = new Set([8, 9, 12, 13, 16, 20, 11]);
+    return garbage.has(clsId);
+  };
+
+  const isSegmentGarbage = (seg: TextSegment, layoutBoxes: LayoutBox[]): boolean => {
+    const cx = (seg.xmin + seg.xmax) / 2;
+    const cy = (seg.ymin + seg.ymax) / 2;
+    return layoutBoxes.some(
+      (box) =>
+        isGarbageBox(box.cls_id) &&
+        cx >= box.xmin && cx <= box.xmax &&
+        cy >= box.ymin && cy <= box.ymax
+    );
   };
 
   const selectFigure = async (box: LayoutBox) => {
@@ -305,8 +327,11 @@ function App() {
     setSelectedParagraph(null);
     setSelectedFigure(null);
     setFigureImageDataUrl("");
-    setAiResult("");
-    setAiAction("");
+    // Preserve fulltext AI result across page navigation
+    if (aiAction !== "全文解读") {
+      setAiResult("");
+      setAiAction("");
+    }
     setErrorMessage("");
     setLoading(true);
 
@@ -795,6 +820,7 @@ function App() {
         "解读": "简洁明了地解读以下文本，抓住核心要点，不要展开冗长分析。用中文回复。",
         "翻译": "将以下文本翻译成中文。如果原文已是中文，则翻译成英文。只输出翻译结果。",
         "摘要": "用一两句话摘要以下文本的核心内容。用中文回复。",
+        "全文解读": "你是一位专业的文档分析专家。以下是从一份PDF文档中按页面顺序提取的全文内容。请提供全面深入的解读分析，包括：\n1. 文档主题和核心观点概述\n2. 主要内容结构梳理\n3. 关键论点和重要发现\n4. 总结评价\n请用中文回复，使用 Markdown 格式组织内容。",
       };
 
       const systemPrompt = systemPrompts[action] || systemPrompts["解读"];
@@ -815,7 +841,7 @@ function App() {
           { role: "user", content: userContent },
         ],
         temperature: 0.7,
-        max_tokens: 2048,
+        max_tokens: action === "全文解读" ? 8192 : 2048,
         stream: true,
       };
 
@@ -981,6 +1007,7 @@ function App() {
     "解读": "解读文字",
     "翻译": "翻译文字",
     "摘要": "摘要文字",
+    "全文解读": "全文解读",
   };
 
   const handleFloatingAction = (action: string) => {
@@ -1019,6 +1046,100 @@ function App() {
     if (!figureImageDataUrl) return;
     setAiAction("解读图片");
     requestAiDescription("请解读这张图片的内容", "解读", figureImageDataUrl);
+  };
+
+  const handleFulltextAiAction = async () => {
+    if (!isPdfSelected || !documentPath || fulltextExtracting) return;
+
+    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+    if (!apiKey || !llmSettings.baseUrl) {
+      setErrorMessage("请先在设置中配置 LLM API Key");
+      return;
+    }
+    if (!modelLoaded) {
+      setErrorMessage("请先加载模型后再使用全文解读");
+      return;
+    }
+
+    setFulltextExtracting(true);
+    fulltextCancelRef.current = false;
+    setFulltextProgress({ current: 0, total: pdfPageCount });
+    setAiAction("全文解读");
+    setAiResult(`正在提取全文内容 (0/${pdfPageCount} 页)...`);
+
+    try {
+      const allTextParts: string[] = [];
+
+      for (let page = 0; page < pdfPageCount; page++) {
+        if (fulltextCancelRef.current) {
+          setAiResult("已取消全文提取");
+          return;
+        }
+
+        setFulltextProgress({ current: page + 1, total: pdfPageCount });
+        setAiResult(`正在提取全文内容 (${page + 1}/${pdfPageCount} 页)...`);
+
+        const result = await invoke<ExtractContentResponse>("get_pdf_paragraphs", {
+          filePath: documentPath,
+          pageIndex: page,
+          scoreThreshold,
+        });
+
+        if (fulltextCancelRef.current) {
+          setAiResult("已取消全文提取");
+          return;
+        }
+
+        // Use per-page layout boxes for visual filtering (hits inference cache)
+        const layoutResult = await invoke<DetectionResponse>("run_doclayout", {
+          filePath: documentPath,
+          scoreThreshold,
+          pageIndex: page,
+        });
+        const pageBoxes = layoutResult.boxes;
+
+        const textSegments = result.segments.filter(
+          (seg) => !isSegmentGarbage(seg, pageBoxes) && seg.text.trim()
+        );
+
+        if (textSegments.length > 0) {
+          const pageText = textSegments.map((s) => s.text.trim()).join("\n");
+          allTextParts.push(pageText);
+        }
+      }
+
+      if (fulltextCancelRef.current) {
+        setAiResult("已取消全文提取");
+        return;
+      }
+
+      const fullText = allTextParts.join("\n\n");
+      if (!fullText.trim()) {
+        setAiResult("未提取到文本内容");
+        return;
+      }
+
+      // Save fulltext to temp file for debugging
+      try {
+        const savedPath = await invoke<string>("save_fulltext_debug", { text: fullText });
+        console.log("Fulltext saved to:", savedPath);
+      } catch {
+        // non-critical, ignore
+      }
+
+      setAiResult("正在请求 AI 全文解读...");
+      await requestAiDescription(fullText, "全文解读");
+    } catch (e) {
+      setErrorMessage(`全文提取失败: ${String(e)}`);
+      setAiResult("");
+    } finally {
+      setFulltextExtracting(false);
+      setFulltextProgress({ current: 0, total: 0 });
+    }
+  };
+
+  const handleFulltextCancel = () => {
+    fulltextCancelRef.current = true;
   };
 
   const dismissFloatingMenu = () => {
@@ -1312,6 +1433,29 @@ function App() {
           <Text className="menu-status">{modelPath ? "模型已加载" : "模型未设置"}</Text>
           <Text className="menu-status">阈值: {scoreThreshold.toFixed(2)}</Text>
           {loading && <Spinner size="tiny" />}
+          {isPdfSelected && (
+            fulltextExtracting ? (
+              <Button
+                appearance="transparent"
+                className="menu-btn"
+                onClick={handleFulltextCancel}
+                title="取消全文提取"
+              >
+                <Spinner size="tiny" style={{ marginRight: 4 }} />
+                取消 ({fulltextProgress.current}/{fulltextProgress.total})
+              </Button>
+            ) : (
+              <Button
+                appearance="transparent"
+                className="menu-btn"
+                onClick={() => void handleFulltextAiAction()}
+                disabled={!documentPath || !modelLoaded || loading}
+                title={modelLoaded ? "提取所有页面文本并进行 AI 解读" : "请先加载模型"}
+              >
+                全文解读
+              </Button>
+            )
+          )}
         </div>
 
         <Card className="panel-card visual-card">
