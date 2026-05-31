@@ -154,6 +154,10 @@ function App() {
   const [qaLoading, setQaLoading] = useState(false);
   const qaSourceTextRef = useRef("");
   const qaChatRef = useRef<HTMLDivElement>(null);
+  // Fulltext memory — persists across selection changes
+  const fulltextAiResultRef = useRef("");
+  const fulltextQaHistoryRef = useRef<{ question: string; answer: string }[]>([]);
+  const fulltextSourceTextRef = useRef("");
   const [loading, setLoading] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [scoreThreshold, setScoreThreshold] = useState(0.5);
@@ -808,10 +812,10 @@ function App() {
     return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
   }, [zoomMode, customScale, imageSize.width, imageSize.height]);
 
-  const requestAiDescription = async (text: string, action: string = "解读", imageDataUrl?: string) => {
+  const requestAiDescription = async (text: string, action: string = "解读", imageDataUrl?: string): Promise<string> => {
     if (!text.trim() && !imageDataUrl) {
       setAiResult("");
-      return;
+      return "";
     }
     setAiResult(`正在请求 AI ${action}...`);
     setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
@@ -824,7 +828,7 @@ function App() {
     const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
     if (!apiKey || !llmSettings.baseUrl) {
       setAiResult("");
-      return;
+      return "";
     }
 
     try {
@@ -911,12 +915,14 @@ function App() {
           }
         } catch {
           if (result) {
-            setAiResult(result + "\n\n[流式输出中断]");
+            const interrupted = result + "\n\n[流式输出中断]";
+            setAiResult(interrupted);
+            return interrupted;
           } else {
             throw new Error("流式读取失败");
           }
         }
-        return;
+        return result;
       }
 
       // Fallback: non-streaming response
@@ -924,11 +930,15 @@ function App() {
       const content = data.choices?.[0]?.message?.content;
       if (content) {
         setAiResult(content);
+        return content;
       } else {
         setAiResult("AI 返回了空内容");
+        return "AI 返回了空内容";
       }
     } catch (e) {
-      setAiResult(`请求失败: ${String(e)}`);
+      const errMsg = `请求失败: ${String(e)}`;
+      setAiResult(errMsg);
+      return errMsg;
     }
   };
 
@@ -1140,7 +1150,11 @@ function App() {
       }
 
       setAiResult("正在请求 AI 全文解读...");
-      await requestAiDescription(fullText, "全文解读");
+      const aiText = await requestAiDescription(fullText, "全文解读");
+      // Persist fulltext content in memory
+      fulltextAiResultRef.current = aiText;
+      fulltextQaHistoryRef.current = [];
+      fulltextSourceTextRef.current = fullText;
     } catch (e) {
       setErrorMessage(`全文提取失败: ${String(e)}`);
       setAiResult("");
@@ -1265,6 +1279,13 @@ function App() {
       qaChatRef.current.scrollTop = qaChatRef.current.scrollHeight;
     }
   }, [qaHistory]);
+
+  // Sync fulltext Q&A memory when in fulltext mode
+  useEffect(() => {
+    if (aiAction === "全文解读") {
+      fulltextQaHistoryRef.current = qaHistory;
+    }
+  }, [qaHistory, aiAction]);
 
   const dismissFloatingMenu = () => {
     setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
@@ -1625,6 +1646,24 @@ function App() {
                 <div
                   ref={stageRef}
                   className={`visual-stage ${zoomMode === "fit_height" ? "visual-stage-fit-height" : ""} ${!previewSrc ? "visual-stage-empty" : ""}`}
+                  onClick={(e) => {
+                    // Only trigger on clicks directly on the stage or image-wrap (blank area)
+                    const target = e.target as HTMLElement;
+                    if (target.closest(".bbox")) return;
+                    setSelectedParagraph(null);
+                    setSelectedFigure(null);
+                    setFigureImageDataUrl("");
+                    if (fulltextAiResultRef.current) {
+                      setAiAction("全文解读");
+                      setAiResult(fulltextAiResultRef.current);
+                      setQaHistory(fulltextQaHistoryRef.current);
+                      qaSourceTextRef.current = fulltextSourceTextRef.current;
+                    } else {
+                      setAiAction("");
+                      setAiResult("");
+                      setQaHistory([]);
+                    }
+                  }}
                 >
                   {previewSrc ? (
                     <div className="image-wrap" style={imageWrapSx}>
@@ -1868,7 +1907,11 @@ function App() {
                     </div>
                   </div>
                   <div style={{ color: "#ffffff", fontSize: aiFontSize }}>
-                    {aiResult ? renderAiContent(aiResult) : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
+                    {aiResult
+                      ? renderAiContent(aiResult)
+                      : fulltextAiResultRef.current
+                        ? renderAiContent(fulltextAiResultRef.current)
+                        : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
                   </div>
 
                   {/* Q&A follow-up history */}
@@ -1887,7 +1930,7 @@ function App() {
                 </div>
 
                 {/* Q&A input - pinned to bottom */}
-                {aiResult && (
+                {(aiResult || fulltextAiResultRef.current) && (
                   <div className="qa-input-row">
                     <input
                       className="qa-input"
