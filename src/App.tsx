@@ -153,7 +153,7 @@ function App() {
   const [qaInput, setQaInput] = useState("");
   const [qaLoading, setQaLoading] = useState(false);
   const qaSourceTextRef = useRef("");
-  const qaChatRef = useRef<HTMLDivElement>(null);
+  const aiScrollRef = useRef<HTMLDivElement>(null);
   // Fulltext memory — persists across selection changes
   const fulltextAiResultRef = useRef("");
   const fulltextQaHistoryRef = useRef<{ question: string; answer: string }[]>([]);
@@ -1273,12 +1273,12 @@ function App() {
     }
   };
 
-  // Auto-scroll Q&A chat to bottom
+  // Auto-scroll AI pane to bottom
   useEffect(() => {
-    if (qaChatRef.current) {
-      qaChatRef.current.scrollTop = qaChatRef.current.scrollHeight;
+    if (aiScrollRef.current) {
+      aiScrollRef.current.scrollTop = aiScrollRef.current.scrollHeight;
     }
-  }, [qaHistory]);
+  }, [aiResult, qaHistory]);
 
   // Sync fulltext Q&A memory when in fulltext mode
   useEffect(() => {
@@ -1889,7 +1889,7 @@ function App() {
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
 
               <div className="ai-pane">
-                <div className="ai-pane-scroll">
+                <div className="ai-pane-scroll" ref={aiScrollRef}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                     <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
                     <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
@@ -1916,7 +1916,7 @@ function App() {
 
                   {/* Q&A follow-up history */}
                   {qaHistory.length > 0 && (
-                    <div className="qa-history" ref={qaChatRef} style={{ fontSize: aiFontSize }}>
+                    <div className="qa-history" style={{ fontSize: aiFontSize }}>
                       {qaHistory.map((qa, idx) => (
                         <div key={idx} className="qa-pair">
                           <div className="qa-question">Q: {qa.question}</div>
