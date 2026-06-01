@@ -18,12 +18,13 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText } from "lucide-react";
+import { Bot, Languages, FileText, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
 import SettingsDialog, { VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
+import HomePage, { type PaperInfo } from "./components/HomePage";
 import "./App.css";
 
 interface LayoutBox {
@@ -135,6 +136,15 @@ export const STORAGE_KEYS = {
   aiFontSize: "xdoc.settings.aiFontSize",
 } as const;
 
+interface TabInfo {
+  id: string;
+  title: string;
+  type: "home" | "reader";
+  documentPath?: string;
+}
+
+const HOME_TAB_ID = "home";
+
 function App() {
   const [environmentReady, setEnvironmentReady] = useState(false);
   const [modelPath, setModelPath] = useState("");
@@ -211,6 +221,18 @@ function App() {
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
   const [topPaneHeight, setTopPaneHeight] = useState<number | string>("50%");
 
+  // Tab state
+  const [tabs, setTabs] = useState<TabInfo[]>([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
+  const [activeTabId, setActiveTabId] = useState(HOME_TAB_ID);
+  const [papersList, setPapersList] = useState<PaperInfo[]>(() => {
+    try {
+      const stored = localStorage.getItem("xdoc.papersList");
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
+
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   const mainLayoutRef = useRef<HTMLDivElement>(null);
@@ -230,6 +252,191 @@ function App() {
   const selectedFigurePageRef = useRef(-1);
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
+
+  // Persist papers list to localStorage
+  useEffect(() => {
+    localStorage.setItem("xdoc.papersList", JSON.stringify(papersList));
+  }, [papersList]);
+
+  // ── Tab System Handlers ────────────────────────────────────────────────────
+  const openPaperTab = useCallback((paper: PaperInfo) => {
+    // Check if tab already exists for this paper
+    const existingTab = tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
+    if (existingTab) {
+      setActiveTabId(existingTab.id);
+      return;
+    }
+
+    // Extract filename from path
+    const pathParts = paper.path.replace(/\\/g, "/").split("/");
+    const fileName = pathParts[pathParts.length - 1] || paper.name;
+    const tabTitle = fileName.replace(/\.[^.]+$/, "");
+
+    const newTab: TabInfo = {
+      id: `reader-${Date.now()}`,
+      title: tabTitle,
+      type: "reader",
+      documentPath: paper.path,
+    };
+
+    setTabs(prev => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+
+    // Update lastReadDate
+    setPapersList(prev => prev.map(p =>
+      p.id === paper.id ? { ...p, lastReadDate: new Date().toISOString() } : p
+    ));
+
+    // Load document
+    setDocumentPath(paper.path);
+    setPreviewSrc("");
+    setBoxes([]);
+    setSegments([]);
+    setSelectedParagraph(null);
+    setSelectedFigure(null);
+    setFigureImageDataUrl("");
+    setAiResult("");
+    setAiAction("");
+    setImageSize({ width: 0, height: 0 });
+    setDisplaySize({ width: 0, height: 0 });
+    setPdfPageIndex(0);
+    setPdfPageCount(0);
+    paragraphAiCacheRef.current.clear();
+
+    if (paper.path.toLowerCase().endsWith(".pdf")) {
+      loadPageData(paper.path, 0).then(() => {
+        if (modelLoaded) {
+          invoke("prefetch_document", {
+            filePath: paper.path,
+            currentPage: 0,
+            scoreThreshold,
+          }).catch(() => {});
+        }
+      });
+    } else if (modelLoaded) {
+      runModel(0, paper.path);
+    }
+  }, [tabs, modelLoaded, scoreThreshold]);
+
+  const closeTab = useCallback((tabId: string) => {
+    setTabs(prev => {
+      const idx = prev.findIndex(t => t.id === tabId);
+      if (idx === -1) return prev;
+
+      const newTabs = prev.filter(t => t.id !== tabId);
+      // Ensure at least home tab exists
+      if (newTabs.length === 0) {
+        newTabs.push({ id: HOME_TAB_ID, title: "主页", type: "home" });
+      }
+
+      if (activeTabId === tabId) {
+        const newActiveIdx = Math.min(idx, newTabs.length - 1);
+        const newActive = newTabs[newActiveIdx];
+        setActiveTabId(newActive.id);
+        if (newActive.type === "home") {
+          setDocumentPath("");
+          setPreviewSrc("");
+          setBoxes([]);
+          setSegments([]);
+          setSelectedParagraph(null);
+          setSelectedFigure(null);
+          setFigureImageDataUrl("");
+          setAiResult("");
+          setAiAction("");
+          setErrorMessage("");
+        } else if (newActive.documentPath) {
+          // Switch to that tab's document
+          const newPath = newActive.documentPath;
+          setDocumentPath(newPath);
+          setPreviewSrc("");
+          setBoxes([]);
+          setSegments([]);
+          setSelectedParagraph(null);
+          setSelectedFigure(null);
+          setFigureImageDataUrl("");
+          setAiResult("");
+          setAiAction("");
+          setPdfPageIndex(0);
+          setPdfPageCount(0);
+          paragraphAiCacheRef.current.clear();
+          if (newPath.toLowerCase().endsWith(".pdf")) {
+            loadPageData(newPath, 0);
+          } else if (modelLoaded) {
+            runModel(0, newPath);
+          }
+        }
+      }
+
+      return newTabs;
+    });
+  }, [activeTabId, modelLoaded]);
+
+  const switchToTab = useCallback((tabId: string) => {
+    if (tabId === activeTabId) return;
+    setActiveTabId(tabId);
+
+    const tab = tabs.find(t => t.id === tabId);
+    if (!tab) return;
+
+    if (tab.type === "home") {
+      setDocumentPath("");
+      setPreviewSrc("");
+      setBoxes([]);
+      setSegments([]);
+      setSelectedParagraph(null);
+      setSelectedFigure(null);
+      setFigureImageDataUrl("");
+      setAiResult("");
+      setAiAction("");
+      setErrorMessage("");
+    } else if (tab.documentPath && tab.documentPath !== documentPath) {
+      // Load the tab's document
+      setDocumentPath(tab.documentPath);
+      setPreviewSrc("");
+      setBoxes([]);
+      setSegments([]);
+      setSelectedParagraph(null);
+      setSelectedFigure(null);
+      setFigureImageDataUrl("");
+      setAiResult("");
+      setAiAction("");
+      setPdfPageIndex(0);
+      setPdfPageCount(0);
+      paragraphAiCacheRef.current.clear();
+      if (tab.documentPath.toLowerCase().endsWith(".pdf")) {
+        loadPageData(tab.documentPath, 0);
+      } else if (modelLoaded) {
+        runModel(0, tab.documentPath);
+      }
+    }
+  }, [activeTabId, tabs, documentPath, modelLoaded]);
+
+  const handleImportPapers = useCallback(async () => {
+    const selected = await open({
+      multiple: true,
+      filters: [{ name: "Documents", extensions: ["pdf", "png", "jpg", "jpeg", "bmp", "webp"] }],
+    });
+    if (selected && Array.isArray(selected)) {
+      const newPapers: PaperInfo[] = selected.map(path => ({
+        id: `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+        name: path.replace(/\\/g, "/").split("/").pop() || path,
+        path,
+        importDate: new Date().toISOString(),
+      }));
+      setPapersList(prev => [...prev, ...newPapers]);
+    }
+  }, []);
+
+  const handleDeletePaper = useCallback((id: string) => {
+    const paper = papersList.find(p => p.id === id);
+    if (!paper) return;
+    setPapersList(prev => prev.filter(p => p.id !== id));
+    // Close any open tab for this paper
+    const tab = tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
+    if (tab) {
+      closeTab(tab.id);
+    }
+  }, [papersList, tabs, closeTab]);
 
   const isVisualBox = (clsId: number) => {
     // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
@@ -1578,8 +1785,14 @@ function App() {
             </MenuTrigger>
             <MenuPopover className="menu-popover-smooth">
               <MenuList>
-                <MenuItem onClick={clearCurrentDocument}>新建</MenuItem>
+                <MenuItem onClick={() => {
+                  // Close all reader tabs and go home
+                  setTabs([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
+                  setActiveTabId(HOME_TAB_ID);
+                  clearCurrentDocument();
+                }}>新建</MenuItem>
                 <MenuItem onClick={() => void selectDocument()}>打开</MenuItem>
+                <MenuItem onClick={() => void handleImportPapers()}>导入文件</MenuItem>
               </MenuList>
             </MenuPopover>
           </Menu>
@@ -1642,6 +1855,56 @@ function App() {
           )}
         </div>
 
+        {/* ── Tab Bar ── */}
+        <div className="tab-bar">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              className={`tab-item ${activeTabId === tab.id ? "active" : ""}`}
+              onClick={() => switchToTab(tab.id)}
+            >
+              <span className="tab-title">{tab.title}</span>
+              {tab.type === "reader" && (
+                <button
+                  className="tab-close-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTab(tab.id);
+                  }}
+                  title="关闭标签"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+          ))}
+          <button
+            className="tab-add-btn"
+            onClick={() => {
+              setTabs(prev => {
+                const homeTab: TabInfo = { id: HOME_TAB_ID, title: "主页", type: "home" };
+                const withoutHome = prev.filter(t => t.id !== HOME_TAB_ID);
+                return [...withoutHome, homeTab];
+              });
+              setActiveTabId(HOME_TAB_ID);
+              clearCurrentDocument();
+            }}
+            title="返回主页"
+          >
+            +
+          </button>
+        </div>
+
+        {activeTabId === HOME_TAB_ID ? (
+          <Card className="panel-card">
+            <HomePage
+              papers={papersList}
+              onOpenPaper={openPaperTab}
+              onImportPapers={handleImportPapers}
+              onDeletePaper={handleDeletePaper}
+            />
+          </Card>
+        ) : (
         <Card className="panel-card visual-card">
           <div className="main-layout" ref={mainLayoutRef}>
             <div className="pdf-pane" style={{ 
@@ -2059,6 +2322,7 @@ function App() {
             </div>
           </div>
         </Card>
+        )}
       </div>
 
       <SettingsDialog
