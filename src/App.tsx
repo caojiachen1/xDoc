@@ -22,7 +22,7 @@ import { Bot, Languages, FileText } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
-import SettingsDialog, { STORAGE_KEYS as OCR_STORAGE_KEYS, VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
+import SettingsDialog, { VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import "./App.css";
 
@@ -503,25 +503,47 @@ function App() {
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      const savedThreshold = window.localStorage.getItem(STORAGE_KEYS.scoreThreshold);
+    (async () => {
+      // ── Read everything from the C:\xDoc\settings.db cache via Tauri commands ──
+      // The Tauri side will fall back to exe dir if the C drive is unavailable.
+      type DbEntry = { key: string; value: string };
+      let rows: DbEntry[] = [];
+      try {
+        rows = await invoke<DbEntry[]>("db_get_all_settings");
+      } catch (e) {
+        console.warn("[settings] db_get_all_settings failed, falling back to defaults:", e);
+      }
+      const map: Record<string, string> = {};
+      for (const r of rows) map[r.key] = r.value;
+
+      const readNum = (key: string): number | null => {
+        const v = map[key];
+        if (v === undefined) return null;
+        const n = Number(v);
+        return Number.isNaN(n) ? null : n;
+      };
+      const readBool = (key: string, def: boolean): boolean => {
+        const v = map[key];
+        return v === undefined ? def : v === "true";
+      };
+      const readStr = (key: string, def: string): string => {
+        const v = map[key];
+        return v === undefined || v === null ? def : v;
+      };
+
+      const savedThreshold = readNum("ui.scoreThreshold");
       if (savedThreshold !== null) {
-        const parsed = Number(savedThreshold);
-        if (!Number.isNaN(parsed)) {
-          setScoreThreshold(Math.min(1, Math.max(0, parsed)));
-        }
+        setScoreThreshold(Math.min(1, Math.max(0, savedThreshold)));
       }
 
-      const savedPdfText = window.localStorage.getItem(STORAGE_KEYS.pdfTextExtractionEnabled);
-      setPdfTextExtractionEnabled(savedPdfText === null ? true : savedPdfText === "true");
+      setPdfTextExtractionEnabled(readBool("ui.pdfTextExtractionEnabled", true));
 
-      const savedZoom = window.localStorage.getItem(STORAGE_KEYS.zoomMode) as ZoomMode | null;
+      const savedZoom = readStr("ui.zoomMode", "") as ZoomMode;
       if (savedZoom && ["fit_page", "fit_width", "fit_height", "actual", "custom"].includes(savedZoom)) {
         setZoomMode(savedZoom);
       }
 
-      const savedModelPath = window.localStorage.getItem(STORAGE_KEYS.modelPath)
-        || "model/PP-DocLayoutV3.onnx";
+      const savedModelPath = readStr("ui.modelPath", "") || "model/PP-DocLayoutV3.onnx";
       setModelPath(savedModelPath);
       setLoading(true);
       invoke("load_model", { modelPath: savedModelPath })
@@ -537,39 +559,30 @@ function App() {
         });
 
       // OCR settings
-      const savedOcrEnabled = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrEnabled);
-      setOcrEnabled(savedOcrEnabled === null ? true : savedOcrEnabled === "true");
-      const savedOcrPath = window.localStorage.getItem(OCR_STORAGE_KEYS.ocrModelPath)
-        || "model/GLM-OCR-GGUF";
-      setOcrModelPath(savedOcrPath);
+      setOcrEnabled(readBool("ocr.enabled", true));
+      setOcrModelPath(readStr("ocr.modelPath", "") || "model/GLM-OCR-GGUF");
 
       // Font size settings
-      const savedTextFontSize = window.localStorage.getItem(STORAGE_KEYS.textFontSize);
+      const savedTextFontSize = readNum("ui.textFontSize");
       if (savedTextFontSize !== null) {
-        const parsed = Number(savedTextFontSize);
-        if (!Number.isNaN(parsed)) {
-          setTextFontSize(Math.max(10, Math.min(40, parsed)));
-        }
+        setTextFontSize(Math.max(10, Math.min(40, savedTextFontSize)));
       }
-      const savedAiFontSize = window.localStorage.getItem(STORAGE_KEYS.aiFontSize);
+      const savedAiFontSize = readNum("ui.aiFontSize");
       if (savedAiFontSize !== null) {
-        const parsed = Number(savedAiFontSize);
-        if (!Number.isNaN(parsed)) {
-          setAiFontSize(Math.max(10, Math.min(40, parsed)));
-        }
+        setAiFontSize(Math.max(10, Math.min(40, savedAiFontSize)));
       }
 
-      // LLM settings
-      const savedLlmVendor = window.localStorage.getItem(STORAGE_KEYS.llmVendor) || "deepseek";
+      // LLM settings — bootstrap with the JSON helper, then fall back to presets.
+      const savedLlmVendor = readStr("llm.vendor", "deepseek");
       let savedVendorApiKeys: Record<string, string> = {};
       try {
-        const raw = window.localStorage.getItem(STORAGE_KEYS.llmVendorApiKeys);
+        const raw = map["llm.vendorApiKeys"];
         if (raw) savedVendorApiKeys = JSON.parse(raw);
       } catch { /* ignore parse errors */ }
-      const savedLlmBaseUrl = window.localStorage.getItem(STORAGE_KEYS.llmBaseUrl)
+      const savedLlmBaseUrl = readStr("llm.baseUrl", "")
         || VENDOR_PRESETS[savedLlmVendor]?.baseUrl
         || VENDOR_PRESETS.deepseek.baseUrl;
-      const savedLlmModel = window.localStorage.getItem(STORAGE_KEYS.llmModel)
+      const savedLlmModel = readStr("llm.model", "")
         || VENDOR_PRESETS[savedLlmVendor]?.models?.[0]
         || VENDOR_PRESETS.deepseek.models[0];
       setLlmSettings({
@@ -578,87 +591,72 @@ function App() {
         baseUrl: savedLlmBaseUrl,
         model: savedLlmModel,
       });
-    } catch {
-      // ignore storage failures
-    }
+    })();
   }, [environmentReady]);
 
+  // Persist individual scalar UI settings to the C:\xDoc\settings.db cache.
+  // Failures are non-fatal: the user can still use the app with in-memory state.
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.scoreThreshold, String(scoreThreshold));
-    } catch {
-      // ignore storage failures
-    }
+    void invoke("db_set_setting", { key: "ui.scoreThreshold", value: String(scoreThreshold) })
+      .catch((e) => console.warn("[settings] persist ui.scoreThreshold failed:", e));
   }, [scoreThreshold, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.pdfTextExtractionEnabled, String(pdfTextExtractionEnabled));
-    } catch {
-      // ignore storage failures
-    }
+    void invoke("db_set_setting", { key: "ui.pdfTextExtractionEnabled", value: String(pdfTextExtractionEnabled) })
+      .catch((e) => console.warn("[settings] persist ui.pdfTextExtractionEnabled failed:", e));
   }, [pdfTextExtractionEnabled, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.zoomMode, zoomMode);
-    } catch {
-      // ignore storage failures
-    }
+    void invoke("db_set_setting", { key: "ui.zoomMode", value: zoomMode })
+      .catch((e) => console.warn("[settings] persist ui.zoomMode failed:", e));
   }, [zoomMode, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      if (modelPath) {
-        window.localStorage.setItem(STORAGE_KEYS.modelPath, modelPath);
-      } else {
-        window.localStorage.removeItem(STORAGE_KEYS.modelPath);
-      }
-    } catch {
-      // ignore storage failures
-    }
+    const op = modelPath
+      ? invoke("db_set_setting", { key: "ui.modelPath", value: modelPath })
+      : invoke("db_delete_setting", { key: "ui.modelPath" });
+    void op.catch((e) => console.warn("[settings] persist ui.modelPath failed:", e));
   }, [modelPath, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrEnabled, String(ocrEnabled));
-    } catch { /* ignore */ }
+    void invoke("db_set_setting", { key: "ocr.enabled", value: String(ocrEnabled) })
+      .catch((e) => console.warn("[settings] persist ocr.enabled failed:", e));
   }, [ocrEnabled, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(OCR_STORAGE_KEYS.ocrModelPath, ocrModelPath);
-    } catch { /* ignore */ }
+    void invoke("db_set_setting", { key: "ocr.modelPath", value: ocrModelPath })
+      .catch((e) => console.warn("[settings] persist ocr.modelPath failed:", e));
   }, [ocrModelPath, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.llmVendor, llmSettings.vendor);
-      window.localStorage.setItem(STORAGE_KEYS.llmVendorApiKeys, JSON.stringify(llmSettings.vendorApiKeys));
-      window.localStorage.setItem(STORAGE_KEYS.llmBaseUrl, llmSettings.baseUrl);
-      window.localStorage.setItem(STORAGE_KEYS.llmModel, llmSettings.model);
-    } catch { /* ignore */ }
+    // Use the convenience command so vendor_api_keys (a map) is serialized as JSON.
+    void invoke("db_set_ai_config", {
+      config: {
+        vendor: llmSettings.vendor,
+        vendor_api_keys: llmSettings.vendorApiKeys,
+        base_url: llmSettings.baseUrl,
+        model: llmSettings.model,
+      },
+    }).catch((e) => console.warn("[settings] persist llm config failed:", e));
   }, [llmSettings, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.textFontSize, String(textFontSize));
-    } catch { /* ignore */ }
+    void invoke("db_set_setting", { key: "ui.textFontSize", value: String(textFontSize) })
+      .catch((e) => console.warn("[settings] persist ui.textFontSize failed:", e));
   }, [textFontSize, environmentReady]);
 
   useEffect(() => {
     if (!environmentReady) return;
-    try {
-      window.localStorage.setItem(STORAGE_KEYS.aiFontSize, String(aiFontSize));
-    } catch { /* ignore */ }
+    void invoke("db_set_setting", { key: "ui.aiFontSize", value: String(aiFontSize) })
+      .catch((e) => console.warn("[settings] persist ui.aiFontSize failed:", e));
   }, [aiFontSize, environmentReady]);
 
   // Initialize OCR backend when enabled and model path is set

@@ -34,4 +34,6 @@ anyhow = "1"
 models-cat = { version = "0.1", features = ["tokio"] }
 async-trait = "0.1"
 walkdir = "2.5"
+rusqlite = { version = "0.32", features = ["bundled"] }
+parking_lot = "0.12"
 

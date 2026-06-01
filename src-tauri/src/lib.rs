@@ -19,6 +19,8 @@ use tauri::{AppHandle, Emitter, State};
 
 #[allow(dead_code)]
 mod gguf_ocr;
+mod settings_db;
+use settings_db::{AiConfig, SettingEntry, SettingsDb};
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -1556,6 +1558,71 @@ fn save_fulltext_debug(text: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Settings database commands (C:\xDoc\settings.db)
+// ────────────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn db_get_all_settings(db: State<'_, SettingsDb>) -> Result<Vec<SettingEntry>, String> {
+    db.get_all().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_get_setting(key: String, db: State<'_, SettingsDb>) -> Result<Option<String>, String> {
+    db.get(&key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_set_setting(key: String, value: String, db: State<'_, SettingsDb>) -> Result<(), String> {
+    db.set(&key, &value).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_delete_setting(key: String, db: State<'_, SettingsDb>) -> Result<(), String> {
+    db.delete(&key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn db_get_ai_config(db: State<'_, SettingsDb>) -> Result<AiConfig, String> {
+    let vendor = db.get("llm.vendor").map_err(|e| e.to_string())?.unwrap_or_default();
+    let base_url = db.get("llm.baseUrl").map_err(|e| e.to_string())?.unwrap_or_default();
+    let model = db.get("llm.model").map_err(|e| e.to_string())?.unwrap_or_default();
+    let vendor_api_keys = db.get_vendor_api_keys().map_err(|e| e.to_string())?;
+    Ok(AiConfig {
+        vendor,
+        vendor_api_keys,
+        base_url,
+        model,
+    })
+}
+
+#[tauri::command]
+fn db_set_ai_config(config: AiConfig, db: State<'_, SettingsDb>) -> Result<(), String> {
+    if !config.vendor.is_empty() {
+        db.set("llm.vendor", &config.vendor).map_err(|e| e.to_string())?;
+    } else {
+        db.delete("llm.vendor").map_err(|e| e.to_string())?;
+    }
+    if !config.base_url.is_empty() {
+        db.set("llm.baseUrl", &config.base_url).map_err(|e| e.to_string())?;
+    } else {
+        db.delete("llm.baseUrl").map_err(|e| e.to_string())?;
+    }
+    if !config.model.is_empty() {
+        db.set("llm.model", &config.model).map_err(|e| e.to_string())?;
+    } else {
+        db.delete("llm.model").map_err(|e| e.to_string())?;
+    }
+    db.set_vendor_api_keys(&config.vendor_api_keys)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_path(db: State<'_, SettingsDb>) -> Result<String, String> {
+    Ok(db.path.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -1574,6 +1641,43 @@ pub fn run() {
         unsafe { SetDllDirectoryW(wide.as_ptr()); }
     }
 
+    // Open (or create) the settings DB. If the C drive is somehow unavailable,
+    // we fall back to the executable directory so the app still boots.
+    let settings_db = match SettingsDb::open() {
+        Ok(db) => {
+            eprintln!("[xDoc] settings db resolved to: {}", db.path.display());
+            db
+        }
+        Err(e) => {
+            eprintln!("[xDoc] failed to open C:\\xDoc\\settings.db ({e}); falling back to exe dir");
+            let fallback_dir = env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."));
+            std::fs::create_dir_all(&fallback_dir).ok();
+            let path = fallback_dir.join("settings.db");
+            let conn = rusqlite::Connection::open(&path)
+                .expect("failed to open fallback settings.db");
+            conn.execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA synchronous  = NORMAL;",
+            )
+            .ok();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS settings (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                 )",
+                [],
+            )
+            .ok();
+            SettingsDb {
+                conn: parking_lot::Mutex::new(conn),
+                path,
+            }
+        }
+    };
+
     tauri::Builder::default()
         .manage(ModelState {
             session: Arc::new(Mutex::new(None)),
@@ -1586,6 +1690,7 @@ pub fn run() {
             model_root: Arc::new(Mutex::new(None)),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+        .manage(settings_db)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
@@ -1602,7 +1707,14 @@ pub fn run() {
             run_ocr_region,
             check_git,
             check_model_exists,
-            save_fulltext_debug
+            save_fulltext_debug,
+            db_get_all_settings,
+            db_get_setting,
+            db_set_setting,
+            db_delete_setting,
+            db_get_ai_config,
+            db_set_ai_config,
+            db_get_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
