@@ -217,6 +217,18 @@ function App() {
   const rightPaneRef = useRef<HTMLDivElement>(null);
   const requestVersionRef = useRef(0);
 
+  // AI result cache per paragraph — persists across page switches
+  const paragraphAiCacheRef = useRef<Map<string, {
+    aiAction: string;
+    aiResult: string;
+    qaHistory: { question: string; answer: string }[];
+    qaSourceText: string;
+  }>>(new Map());
+
+  // Track which page the currently selected paragraph/figure belongs to
+  const selectedParagraphPageRef = useRef(-1);
+  const selectedFigurePageRef = useRef(-1);
+
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
 
   const isVisualBox = (clsId: number) => {
@@ -243,6 +255,17 @@ function App() {
   };
 
   const selectFigure = async (box: LayoutBox) => {
+    // Save current paragraph's AI result to cache before switching to figure
+    if (selectedParagraph && aiResult) {
+      const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+      paragraphAiCacheRef.current.set(currentKey, {
+        aiAction: aiAction,
+        aiResult: aiResult,
+        qaHistory: qaHistory,
+        qaSourceText: qaSourceTextRef.current,
+      });
+    }
+    selectedFigurePageRef.current = pdfPageIndex;
     setSelectedParagraph(null);
     setSelectedFigure(box);
     setAiResult("");
@@ -335,14 +358,8 @@ function App() {
 
     // Immediately update page index for instant UI feedback
     setPdfPageIndex(newPage);
-    setSelectedParagraph(null);
-    setSelectedFigure(null);
-    setFigureImageDataUrl("");
-    // Preserve fulltext AI result across page navigation
-    if (aiAction !== "全文解读") {
-      setAiResult("");
-      setAiAction("");
-    }
+    // Don't clear selectedParagraph/figure/aiResult — keep them displayed
+    // across page switches; they refresh only when user clicks a new paragraph
     setErrorMessage("");
     setLoading(true);
 
@@ -670,6 +687,12 @@ function App() {
       return;
     }
 
+    // If the selected paragraph is from a different page (page was switched),
+    // don't re-run OCR — keep the existing OCR text displayed
+    if (selectedParagraphPageRef.current !== pdfPageIndex) {
+      return;
+    }
+
     let cancelled = false;
     setOcrLoading(true);
     setOcrError("");
@@ -825,6 +848,21 @@ function App() {
     setQaLoading(false);
     qaSourceTextRef.current = text;
 
+    // Capture current paragraph key for caching AI result
+    const aiCacheKey = selectedParagraph
+      ? `${selectedParagraphPageRef.current}:${selectedParagraph.text}`
+      : null;
+    const saveAiResultToCache = (finalResult: string) => {
+      if (aiCacheKey && finalResult) {
+        paragraphAiCacheRef.current.set(aiCacheKey, {
+          aiAction: action,
+          aiResult: finalResult,
+          qaHistory: [],
+          qaSourceText: text,
+        });
+      }
+    };
+
     const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
     if (!apiKey || !llmSettings.baseUrl) {
       setAiResult("");
@@ -922,6 +960,7 @@ function App() {
             throw new Error("流式读取失败");
           }
         }
+        saveAiResultToCache(result);
         return result;
       }
 
@@ -930,9 +969,11 @@ function App() {
       const content = data.choices?.[0]?.message?.content;
       if (content) {
         setAiResult(content);
+        saveAiResultToCache(content);
         return content;
       } else {
         setAiResult("AI 返回了空内容");
+        saveAiResultToCache("AI 返回了空内容");
         return "AI 返回了空内容";
       }
     } catch (e) {
@@ -1650,6 +1691,16 @@ function App() {
                     // Only trigger on clicks directly on the stage or image-wrap (blank area)
                     const target = e.target as HTMLElement;
                     if (target.closest(".bbox")) return;
+                    // Save current AI result to cache before clearing
+                    if (selectedParagraph && aiResult) {
+                      const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+                      paragraphAiCacheRef.current.set(currentKey, {
+                        aiAction: aiAction,
+                        aiResult: aiResult,
+                        qaHistory: qaHistory,
+                        qaSourceText: qaSourceTextRef.current,
+                      });
+                    }
                     setSelectedParagraph(null);
                     setSelectedFigure(null);
                     setFigureImageDataUrl("");
@@ -1705,7 +1756,36 @@ function App() {
                                 cursor: "pointer",
                                 pointerEvents: "auto",
                               }}
-                              onClick={() => { setSelectedFigure(null); setFigureImageDataUrl(""); setSelectedParagraph(seg); }}
+                              onClick={() => {
+                                // Save current paragraph's AI result to cache before switching
+                                if (selectedParagraph && selectedParagraph !== seg && aiResult) {
+                                  const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+                                  paragraphAiCacheRef.current.set(currentKey, {
+                                    aiAction: aiAction,
+                                    aiResult: aiResult,
+                                    qaHistory: qaHistory,
+                                    qaSourceText: qaSourceTextRef.current,
+                                  });
+                                }
+                                // Check if new paragraph has cached AI result
+                                const newKey = `${pdfPageIndex}:${seg.text}`;
+                                const cached = paragraphAiCacheRef.current.get(newKey);
+                                selectedParagraphPageRef.current = pdfPageIndex;
+                                setSelectedFigure(null);
+                                setFigureImageDataUrl("");
+                                setSelectedParagraph(seg);
+                                if (cached) {
+                                  setAiAction(cached.aiAction);
+                                  setAiResult(cached.aiResult);
+                                  setQaHistory(cached.qaHistory);
+                                  qaSourceTextRef.current = cached.qaSourceText;
+                                } else {
+                                  setAiAction("");
+                                  setAiResult("");
+                                  setQaHistory([]);
+                                  qaSourceTextRef.current = "";
+                                }
+                              }}
                               onMouseEnter={(e) => {
                                 if (selectedParagraph !== seg) {
                                   e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
