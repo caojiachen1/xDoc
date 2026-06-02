@@ -289,9 +289,16 @@
   overflow: hidden;
 }
 
-.visual-stage-fit-height {
-  align-items: center;
-  justify-content: center;
+.visual-stage-move {
+  cursor: grab;
+}
+
+.visual-stage-dragging {
+  cursor: grabbing !important;
+}
+
+.visual-stage-move .image-wrap {
+  user-select: none;
 }
 
 .page-arrow {
@@ -327,6 +334,7 @@
 .image-wrap {
   position: relative;
   display: inline-block;
+  margin: auto;
 }
 
 .preview-image {
@@ -381,6 +389,66 @@
   text-align: center;
   opacity: 0.82;
   font-size: 12px;
+}
+
+/* PDF Toolbar */
+.pdf-toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  user-select: none;
+  background: rgba(30, 30, 30, 0.85);
+}
+
+.pdf-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.pdf-toolbar-separator {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.pdf-toolbar .toolbar-btn {
+  min-width: 26px !important;
+  height: 26px !important;
+  padding: 0 5px !important;
+  color: rgba(255, 255, 255, 0.72) !important;
+  border-radius: 4px !important;
+}
+
+.pdf-toolbar .toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.08) !important;
+  color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.pdf-toolbar .toolbar-btn-active {
+  background: rgba(255, 255, 255, 0.12) !important;
+  color: rgba(255, 255, 255, 0.95) !important;
+}
+
+.toolbar-btn.zoom-label-btn {
+  gap: 3px !important;
+  padding: 0 6px !important;
+}
+
+.zoom-label {
+  font-size: 11px;
+  min-width: 32px;
+  text-align: center;
+  line-height: 1;
+}
+
+.toolbar-menu-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.1);
+  margin: 4px 0;
 }
 
 /* OCR LaTeX content */

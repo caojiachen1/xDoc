@@ -18,7 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
@@ -131,6 +131,7 @@ const COLORS = [
 ];
 
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
+type DragMode = "move" | "select";
 type TopMenuKey = "file" | "settings" | "help" | null;
 
 export const STORAGE_KEYS = {
@@ -191,6 +192,7 @@ function App() {
   const [customScale, setCustomScale] = useState(1);
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [dragMode, setDragMode] = useState<DragMode>("select");
 
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(true);
@@ -246,6 +248,8 @@ function App() {
   const mainLayoutRef = useRef<HTMLDivElement>(null);
   const rightPaneRef = useRef<HTMLDivElement>(null);
   const requestVersionRef = useRef(0);
+  const isDraggingRef = useRef(false);
+  const justDraggedRef = useRef(false);
 
   // AI result cache per paragraph — persists across page switches
   const paragraphAiCacheRef = useRef<Map<string, {
@@ -1090,22 +1094,142 @@ function App() {
         const delta = e.deltaY > 0 ? -0.15 : 0.15;
         const factor = 1 + delta;
 
-        setZoomMode("custom");
+        // Current visual scale
+        const oldScale = currentVisScaleRef.current || 1;
+        let baseScale = zoomModeRef.current === "custom"
+          ? customScaleRef.current
+          : oldScale;
+        const newScale = Math.max(0.1, Math.min(baseScale * factor, 8.0));
+        const ratio = newScale / oldScale;
 
-        setCustomScale((prevScale) => {
-          let baseScale = prevScale;
-          if (zoomModeRef.current !== "custom") {
-            baseScale = currentVisScaleRef.current || 1;
-            zoomModeRef.current = "custom"; // 马上同步防止下一次事件跳档
+        // Cursor position relative to the stage viewport
+        const rect = stage.getBoundingClientRect();
+        const cursorX = e.clientX - rect.left;
+        const cursorY = e.clientY - rect.top;
+        const oldScrollLeft = stage.scrollLeft;
+        const oldScrollTop = stage.scrollTop;
+
+        // Apply size change directly to DOM — avoids a paint frame with wrong scroll
+        const img = imgRef.current;
+        const wrap = img?.parentElement;
+        if (img && imageSize.width > 0 && imageSize.height > 0) {
+          const newW = imageSize.width * newScale;
+          const newH = imageSize.height * newScale;
+          img.style.width = `${newW}px`;
+          img.style.height = `${newH}px`;
+          img.style.maxWidth = "none";
+          img.style.maxHeight = "none";
+          if (wrap) {
+            wrap.style.width = `${newW}px`;
+            wrap.style.height = `${newH}px`;
           }
-          return Math.max(0.1, Math.min(baseScale * factor, 8.0));
-        });
+        }
+
+        // Adjust scroll to keep the point under the cursor fixed (same synchronous frame)
+        stage.scrollLeft = (oldScrollLeft + cursorX) * ratio - cursorX;
+        stage.scrollTop = (oldScrollTop + cursorY) * ratio - cursorY;
+
+        // Update React state for consistency — next render uses the same values, no visual change
+        zoomModeRef.current = "custom";
+        setZoomMode("custom");
+        setCustomScale(newScale);
       }
     };
 
     stage.addEventListener("wheel", handleWheel, { passive: false });
     return () => stage.removeEventListener("wheel", handleWheel);
+  }, [activeTabId, imageSize.width, imageSize.height]);
+
+  // Zoom helper functions
+  const handleZoomIn = useCallback(() => {
+    setZoomMode("custom");
+    setCustomScale((prev) => {
+      const base = zoomModeRef.current === "custom" ? prev : (currentVisScaleRef.current || 1);
+      return Math.min(base * 1.25, 8.0);
+    });
   }, []);
+
+  const handleZoomOut = useCallback(() => {
+    setZoomMode("custom");
+    setCustomScale((prev) => {
+      const base = zoomModeRef.current === "custom" ? prev : (currentVisScaleRef.current || 1);
+      return Math.max(base / 1.25, 0.1);
+    });
+  }, []);
+
+  const handleZoomPreset = useCallback((scale: number) => {
+    setZoomMode("custom");
+    setCustomScale(scale);
+  }, []);
+
+  const effectiveZoomPercent = useMemo(() => {
+    if (imageSize.width === 0 || displaySize.width === 0) return 100;
+    return Math.round((displaySize.width / imageSize.width) * 100);
+  }, [displaySize.width, imageSize.width]);
+
+  // Drag-to-pan (move mode) — uses Pointer Events + setPointerCapture for reliability
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage || dragMode !== "move") return;
+
+    let capturedPointerId: number | null = null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest(".pdf-toolbar") || target.closest(".page-arrow")) return;
+
+      // Prevent browser default image drag behavior from stealing mouseup
+      e.preventDefault();
+
+      isDraggingRef.current = true;
+      stage.classList.add("visual-stage-dragging");
+
+      // Capture all subsequent pointer events to this element
+      stage.setPointerCapture(e.pointerId);
+      capturedPointerId = e.pointerId;
+
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startScrollLeft = stage.scrollLeft;
+      const startScrollTop = stage.scrollTop;
+
+      const onPointerMove = (e: PointerEvent) => {
+        if (!isDraggingRef.current) return;
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        stage.scrollLeft = startScrollLeft - dx;
+        stage.scrollTop = startScrollTop - dy;
+      };
+
+      const onPointerUp = () => {
+        isDraggingRef.current = false;
+        justDraggedRef.current = true;
+        stage.classList.remove("visual-stage-dragging");
+        if (capturedPointerId !== null) {
+          try { stage.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
+          capturedPointerId = null;
+        }
+        stage.removeEventListener("pointermove", onPointerMove);
+        stage.removeEventListener("pointerup", onPointerUp);
+        stage.removeEventListener("pointercancel", onPointerUp);
+        setTimeout(() => { justDraggedRef.current = false; }, 150);
+      };
+
+      stage.addEventListener("pointermove", onPointerMove);
+      stage.addEventListener("pointerup", onPointerUp);
+      stage.addEventListener("pointercancel", onPointerUp);
+    };
+
+    stage.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      stage.removeEventListener("pointerdown", onPointerDown);
+      stage.classList.remove("visual-stage-dragging");
+      if (capturedPointerId !== null) {
+        try { stage.releasePointerCapture(capturedPointerId); } catch { /* */ }
+        capturedPointerId = null;
+      }
+    };
+  }, [dragMode, activeTabId]);
 
   const scale = useMemo(() => {
     if (imageSize.width === 0 || imageSize.height === 0) {
@@ -2074,6 +2198,75 @@ function App() {
                 )}
 
                 {isPdfSelected && previewSrc && (
+                  <div className="pdf-toolbar">
+                    <div className="pdf-toolbar-group">
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        className="toolbar-btn"
+                        icon={<ZoomOut size={15} />}
+                        onClick={handleZoomOut}
+                        title="缩小"
+                      />
+                      <Menu positioning="below-end">
+                        <MenuTrigger>
+                          <Button
+                            appearance="subtle"
+                            size="small"
+                            className="toolbar-btn zoom-label-btn"
+                            title="缩放比例"
+                          >
+                            <span className="zoom-label">{effectiveZoomPercent}%</span>
+                            <ChevronDown size={12} />
+                          </Button>
+                        </MenuTrigger>
+                        <MenuPopover className="menu-popover-smooth">
+                          <MenuList>
+                            <MenuItem onClick={() => handleZoomPreset(0.5)}>50%</MenuItem>
+                            <MenuItem onClick={() => handleZoomPreset(0.75)}>75%</MenuItem>
+                            <MenuItem onClick={() => handleZoomPreset(1.0)}>100%</MenuItem>
+                            <MenuItem onClick={() => handleZoomPreset(1.25)}>125%</MenuItem>
+                            <MenuItem onClick={() => handleZoomPreset(1.5)}>150%</MenuItem>
+                            <MenuItem onClick={() => handleZoomPreset(2.0)}>200%</MenuItem>
+                            <div className="toolbar-menu-divider" />
+                            <MenuItem onClick={() => setZoomMode("fit_page")}>适应页面</MenuItem>
+                            <MenuItem onClick={() => setZoomMode("fit_width")}>适应宽度</MenuItem>
+                            <MenuItem onClick={() => setZoomMode("fit_height")}>适应高度</MenuItem>
+                          </MenuList>
+                        </MenuPopover>
+                      </Menu>
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        className="toolbar-btn"
+                        icon={<ZoomIn size={15} />}
+                        onClick={handleZoomIn}
+                        title="放大"
+                      />
+                    </div>
+                    <div className="pdf-toolbar-separator" />
+                    <div className="pdf-toolbar-group">
+                      <Button
+                        appearance={dragMode === "move" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${dragMode === "move" ? "toolbar-btn-active" : ""}`}
+                        icon={<Hand size={15} />}
+                        onClick={() => setDragMode("move")}
+                        title="移动模式 - 拖拽平移"
+                      />
+                      <Button
+                        appearance={dragMode === "select" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${dragMode === "select" ? "toolbar-btn-active" : ""}`}
+                        icon={<MousePointer size={15} />}
+                        onClick={() => setDragMode("select")}
+                        title="框选模式 - 选择内容"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {isPdfSelected && previewSrc && (
                   <>
                     <Button
                       className="page-arrow page-arrow-left"
@@ -2102,8 +2295,9 @@ function App() {
 
                 <div
                   ref={stageRef}
-                  className={`visual-stage ${zoomMode === "fit_height" ? "visual-stage-fit-height" : ""} ${!previewSrc ? "visual-stage-empty" : ""}`}
+                  className={`visual-stage ${!previewSrc ? "visual-stage-empty" : ""} ${dragMode === "move" && previewSrc ? "visual-stage-move" : ""}`}
                   onClick={(e) => {
+                    if (justDraggedRef.current) return;
                     // Only trigger on clicks directly on the stage or image-wrap (blank area)
                     const target = e.target as HTMLElement;
                     if (target.closest(".bbox")) return;
@@ -2169,8 +2363,8 @@ function App() {
                                 height,
                                 borderColor: isSelected ? "#00D4BB" : "transparent",
                                 backgroundColor: isSelected ? "rgba(0, 212, 187, 0.2)" : "rgba(255,255,255,0)",
-                                cursor: "pointer",
-                                pointerEvents: "auto",
+                                cursor: dragMode === "move" ? undefined : "pointer",
+                                pointerEvents: dragMode === "move" ? "none" : "auto",
                               }}
                               onClick={() => {
                                 // Save current paragraph's AI result to cache before switching
@@ -2237,8 +2431,8 @@ function App() {
                                 top,
                                 width,
                                 height,
-                                cursor: clickable ? "pointer" : undefined,
-                                pointerEvents: clickable ? "auto" : undefined,
+                                cursor: dragMode === "move" ? undefined : (clickable ? "pointer" : undefined),
+                                pointerEvents: dragMode === "move" ? "none" : (clickable ? "auto" : undefined),
                               }}
                               onClick={clickable ? () => selectFigure(box) : undefined}
                             />
