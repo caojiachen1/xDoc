@@ -602,8 +602,8 @@
   cursor: pointer;
   border-left: 2px solid transparent;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
+  line-height: 1.5;
   transition: background 0.12s, border-color 0.12s;
 }
 
