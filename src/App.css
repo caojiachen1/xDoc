@@ -451,6 +451,172 @@
   margin: 4px 0;
 }
 
+.pdf-toolbar-spacer {
+  flex: 1;
+}
+
+/* PDF Sidebar */
+.pdf-view-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  position: relative;
+}
+
+.pdf-stage-column {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pdf-sidebar {
+  flex-shrink: 0;
+  width: 220px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(25, 25, 25, 0.95);
+  overflow: hidden;
+}
+
+.pdf-sidebar-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.pdf-sidebar-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 7px 0;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.pdf-sidebar-tab:hover {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.pdf-sidebar-tab.active {
+  color: rgba(255, 255, 255, 0.9);
+  border-bottom-color: rgba(255, 255, 255, 0.6);
+}
+
+.pdf-sidebar-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.pdf-sidebar-content::-webkit-scrollbar {
+  width: 6px;
+}
+
+.pdf-sidebar-content::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+}
+
+.pdf-sidebar-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 0;
+}
+
+.pdf-sidebar-empty {
+  padding: 20px 12px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.4);
+  text-align: center;
+}
+
+/* Thumbnails */
+.pdf-sidebar-thumbnails {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+}
+
+.pdf-thumbnail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 4px;
+  border: 2px solid transparent;
+  transition: border-color 0.15s;
+  width: 100%;
+}
+
+.pdf-thumbnail:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.pdf-thumbnail.active {
+  border-color: rgba(100, 180, 255, 0.6);
+}
+
+.pdf-thumbnail img {
+  width: 100%;
+  max-width: 160px;
+  display: block;
+  border-radius: 2px;
+}
+
+.pdf-thumbnail-label {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.pdf-thumbnail.active .pdf-thumbnail-label {
+  color: rgba(100, 180, 255, 0.8);
+}
+
+/* Outline */
+.pdf-sidebar-outline {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+.pdf-outline-item {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  border-left: 2px solid transparent;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.pdf-outline-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.pdf-outline-item.active {
+  background: rgba(100, 180, 255, 0.08);
+  border-left-color: rgba(100, 180, 255, 0.6);
+  color: rgba(255, 255, 255, 0.95);
+}
+
 /* OCR LaTeX content */
 .ocr-latex-content {
   font-size: 14px;

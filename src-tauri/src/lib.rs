@@ -98,6 +98,25 @@ pub struct FirstPageMetadata {
     pub page_height: f32,
 }
 
+#[derive(Serialize, Clone)]
+pub struct PdfOutlineItem {
+    pub title: String,
+    pub page_index: u32,
+    pub depth: u32,
+}
+
+#[derive(Serialize)]
+pub struct PdfOutlineResponse {
+    pub items: Vec<PdfOutlineItem>,
+    pub page_count: u32,
+}
+
+#[derive(Serialize)]
+pub struct PdfThumbnailsResponse {
+    pub thumbnails: Vec<String>,
+    pub page_count: u32,
+}
+
 fn extract_font_segments_from_page(
     page: &PdfPage<'_>,
 ) -> Result<(Vec<FontTextSegment>, f32, f32), String> {
@@ -967,6 +986,84 @@ fn image_to_data_url(image: &DynamicImage) -> Result<String, String> {
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes.into_inner());
     Ok(format!("data:image/png;base64,{encoded}"))
+}
+
+#[tauri::command]
+async fn render_pdf_thumbnails(file_path: String) -> Result<PdfThumbnailsResponse, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let bindings = bind_pdfium_with_candidates()?;
+    let pdfium = Pdfium::new(bindings);
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+    let page_count = document.pages().len() as u32;
+    let mut thumbnails = Vec::with_capacity(page_count as usize);
+
+    for i in 0..page_count {
+        let page = document
+            .pages()
+            .get(i as u16)
+            .map_err(|e| format!("Failed to get page {i}: {e}"))?;
+
+        let rendered = page
+            .render_with_config(
+                &PdfRenderConfig::new()
+                    .set_target_width(200)
+                    .rotate_if_landscape(PdfPageRenderRotation::None, true),
+            )
+            .map_err(|e| format!("Failed to render page {i}: {e}"))?;
+
+        let data_url = image_to_data_url(&rendered.as_image())?;
+        thumbnails.push(data_url);
+    }
+
+    Ok(PdfThumbnailsResponse { thumbnails, page_count })
+}
+
+#[tauri::command]
+async fn extract_pdf_outline(file_path: String) -> Result<PdfOutlineResponse, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let bindings = bind_pdfium_with_candidates()?;
+    let pdfium = Pdfium::new(bindings);
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+    let page_count = document.pages().len() as u32;
+    let mut items: Vec<PdfOutlineItem> = Vec::new();
+
+    fn walk(bookmark: &PdfBookmark<'_>, depth: u32, items: &mut Vec<PdfOutlineItem>) {
+        let title = bookmark.title().unwrap_or_default();
+        let page_index = bookmark
+            .destination()
+            .and_then(|dest| dest.page_index().ok())
+            .map(|idx| idx as u32)
+            .unwrap_or(0);
+
+        items.push(PdfOutlineItem { title, page_index, depth });
+
+        if let Some(child) = bookmark.first_child() {
+            walk(&child, depth + 1, items);
+        }
+        if let Some(sibling) = bookmark.next_sibling() {
+            walk(&sibling, depth, items);
+        }
+    }
+
+    if let Some(root) = document.bookmarks().root() {
+        walk(&root, 0, &mut items);
+    }
+
+    Ok(PdfOutlineResponse { items, page_count })
 }
 
 fn infer_layout_boxes(
@@ -2200,6 +2297,8 @@ pub fn run() {
             get_pdf_text,
             get_pdf_paragraphs,
             render_page_preview,
+            render_pdf_thumbnails,
+            extract_pdf_outline,
             prefetch_document,
             download_onnx_model,
             download_ocr_models,

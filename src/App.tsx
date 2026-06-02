@@ -18,7 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
@@ -193,6 +193,13 @@ function App() {
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragMode, setDragMode] = useState<DragMode>("select");
+
+  // Sidebar state
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarMode, setSidebarMode] = useState<"thumbnails" | "outline">("thumbnails");
+  const [thumbnails, setThumbnails] = useState<string[]>([]);
+  const [outlineItems, setOutlineItems] = useState<{ title: string; page_index: number; depth: number }[]>([]);
+  const [sidebarLoading, setSidebarLoading] = useState(false);
 
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(true);
@@ -749,6 +756,9 @@ function App() {
     setPdfPageIndex(0);
     setPdfPageCount(0);
     setErrorMessage("");
+    setThumbnails([]);
+    setOutlineItems([]);
+    setSidebarOpen(false);
   };
 
   const applyScoreThreshold = async (nextThreshold: number) => {
@@ -1166,6 +1176,44 @@ function App() {
     if (imageSize.width === 0 || displaySize.width === 0) return 100;
     return Math.round((displaySize.width / imageSize.width) * 100);
   }, [displaySize.width, imageSize.width]);
+
+  // Reset sidebar when document changes
+  useEffect(() => {
+    setThumbnails([]);
+    setOutlineItems([]);
+  }, [documentPath]);
+
+  // Sidebar data loading
+  const loadSidebarData = useCallback(async (mode: "thumbnails" | "outline") => {
+    if (!documentPath || !isPdfSelected) return;
+    setSidebarLoading(true);
+    try {
+      if (mode === "thumbnails" && thumbnails.length === 0) {
+        const res = await invoke<{ thumbnails: string[]; page_count: number }>("render_pdf_thumbnails", { filePath: documentPath });
+        setThumbnails(res.thumbnails);
+      } else if (mode === "outline" && outlineItems.length === 0) {
+        const res = await invoke<{ items: { title: string; page_index: number; depth: number }[]; page_count: number }>("extract_pdf_outline", { filePath: documentPath });
+        setOutlineItems(res.items);
+      }
+    } catch (e) {
+      console.error("Failed to load sidebar data:", e);
+    } finally {
+      setSidebarLoading(false);
+    }
+  }, [documentPath, isPdfSelected, thumbnails.length, outlineItems.length]);
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarOpen((prev) => {
+      const next = !prev;
+      if (next) loadSidebarData(sidebarMode);
+      return next;
+    });
+  }, [sidebarMode, loadSidebarData]);
+
+  const switchSidebarMode = useCallback((mode: "thumbnails" | "outline") => {
+    setSidebarMode(mode);
+    loadSidebarData(mode);
+  }, [loadSidebarData]);
 
   // Drag-to-pan (move mode) — uses Pointer Events + setPointerCapture for reliability
   useEffect(() => {
@@ -2263,6 +2311,77 @@ function App() {
                         title="框选模式 - 选择内容"
                       />
                     </div>
+                    <div className="pdf-toolbar-spacer" />
+                    <Button
+                      appearance={sidebarOpen ? "subtle" : "transparent"}
+                      size="small"
+                      className={`toolbar-btn ${sidebarOpen ? "toolbar-btn-active" : ""}`}
+                      icon={<LayoutPanelLeft size={15} />}
+                      onClick={toggleSidebar}
+                      title="文献大纲"
+                    />
+                  </div>
+                )}
+
+                <div className="pdf-view-row">
+                {isPdfSelected && previewSrc && sidebarOpen && (
+                  <div className="pdf-sidebar">
+                    <div className="pdf-sidebar-tabs">
+                      <button
+                        className={`pdf-sidebar-tab ${sidebarMode === "thumbnails" ? "active" : ""}`}
+                        onClick={() => switchSidebarMode("thumbnails")}
+                      >
+                        <Images size={13} />
+                        <span>缩略图</span>
+                      </button>
+                      <button
+                        className={`pdf-sidebar-tab ${sidebarMode === "outline" ? "active" : ""}`}
+                        onClick={() => switchSidebarMode("outline")}
+                      >
+                        <ListTree size={13} />
+                        <span>大纲</span>
+                      </button>
+                    </div>
+                    <div className="pdf-sidebar-content">
+                      {sidebarLoading ? (
+                        <div className="pdf-sidebar-loading"><Spinner size="small" /></div>
+                      ) : sidebarMode === "thumbnails" ? (
+                        <div className="pdf-sidebar-thumbnails">
+                          {thumbnails.map((thumb, idx) => (
+                            <div
+                              key={idx}
+                              className={`pdf-thumbnail ${idx === pdfPageIndex ? "active" : ""}`}
+                              onClick={() => {
+                                if (idx !== pdfPageIndex) void loadPageData(documentPath, idx);
+                              }}
+                            >
+                              <img src={thumb} alt={`第 ${idx + 1} 页`} />
+                              <span className="pdf-thumbnail-label">{idx + 1}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="pdf-sidebar-outline">
+                          {outlineItems.length === 0 ? (
+                            <div className="pdf-sidebar-empty">此文档无大纲</div>
+                          ) : (
+                            outlineItems.map((item, idx) => (
+                              <div
+                                key={idx}
+                                className={`pdf-outline-item ${item.page_index === pdfPageIndex ? "active" : ""}`}
+                                style={{ paddingLeft: 8 + item.depth * 14 }}
+                                onClick={() => {
+                                  if (item.page_index !== pdfPageIndex) void loadPageData(documentPath, item.page_index);
+                                }}
+                                title={item.title}
+                              >
+                                {item.title}
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -2293,6 +2412,7 @@ function App() {
                   </>
                 )}
 
+                <div className="pdf-stage-column">
                 <div
                   ref={stageRef}
                   className={`visual-stage ${!previewSrc ? "visual-stage-empty" : ""} ${dragMode === "move" && previewSrc ? "visual-stage-move" : ""}`}
@@ -2455,6 +2575,8 @@ function App() {
                     <Text>{pdfPageCount > 0 ? `第 ${pdfPageIndex + 1} / ${pdfPageCount} 页` : "页数未加载"}</Text>
                   </div>
                 )}
+                </div>
+                </div>
               </div>
             </div>
 
