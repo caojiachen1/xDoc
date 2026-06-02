@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getDocument, TextLayer } from "pdfjs-dist";
+import * as pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -137,6 +139,7 @@ const COLORS = [
 
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type DragMode = "move" | "select";
+type SelectMode = "box" | "text";
 type AnnotationTool = "pen" | "eraser" | "text" | "rect" | "ellipse" | "line" | null;
 type EraserMode = "free" | "stroke";
 type TopMenuKey = "file" | "settings" | "help" | null;
@@ -185,6 +188,9 @@ const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   + '</svg>'
 )}") 6 22, auto`;
 
+// Register pdfjs worker on global scope (fake-worker mode for Tauri webview)
+(globalThis as Record<string, unknown>).pdfjsWorker = pdfjsWorker;
+
 function App() {
   const [environmentReady, setEnvironmentReady] = useState(false);
   const [modelPath, setModelPath] = useState("");
@@ -222,6 +228,7 @@ function App() {
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragMode, setDragMode] = useState<DragMode>("select");
+  const [selectMode, setSelectMode] = useState<SelectMode>("box");
 
   // Sidebar state
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -279,6 +286,19 @@ function App() {
     y: number;
     selectedText: string;
   }>({ visible: false, x: 0, y: 0, selectedText: "" });
+
+  // PDF text-layer floating menu state
+  const [pdfFloatingMenu, setPdfFloatingMenu] = useState<{
+    visible: boolean;
+    x: number;
+    y: number;
+    selectedText: string;
+  }>({ visible: false, x: 0, y: 0, selectedText: "" });
+
+  // TextLayer refs (pdfjs-dist)
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const pdfJsDocRef = useRef<any>(null);
+  const textLayerInstanceRef = useRef<any>(null);
 
   // Font size state
   const [textFontSize, setTextFontSize] = useState(15);
@@ -814,6 +834,14 @@ function App() {
     setAnnotationRedoStack([]);
     pageAnnotationsRef.current.clear();
     annotationPageRef.current = 0;
+    // Clear select mode state
+    setSelectMode("box");
+    setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    // Clean up pdfjs document
+    if (pdfJsDocRef.current) {
+      pdfJsDocRef.current.destroy().catch(() => {});
+      pdfJsDocRef.current = null;
+    }
   };
 
   const applyScoreThreshold = async (nextThreshold: number) => {
@@ -1059,6 +1087,87 @@ function App() {
       setOcrInitialized(false);
     }
   }, [ocrEnabled, ocrModelPath]);
+
+  // ── Load pdfjs document when a PDF file is opened ──────────────────────────
+  useEffect(() => {
+    if (!documentPath || !isPdfSelected) {
+      pdfJsDocRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const base64Data = await invoke<string>("read_file_base64", { filePath: documentPath });
+        if (cancelled) return;
+        const uint8Array = new Uint8Array(atob(base64Data).length);
+        const binStr = atob(base64Data);
+        for (let i = 0; i < binStr.length; i++) uint8Array[i] = binStr.charCodeAt(i);
+        const loadingTask = getDocument({ data: uint8Array });
+        const doc = await loadingTask.promise;
+        if (cancelled) { loadingTask.destroy(); return; }
+        pdfJsDocRef.current = doc;
+      } catch (e) {
+        console.warn("[TextLayer] Failed to load pdfjs document:", e);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (pdfJsDocRef.current) {
+        pdfJsDocRef.current.destroy().catch(() => {});
+        pdfJsDocRef.current = null;
+      }
+    };
+  }, [documentPath, isPdfSelected]);
+
+  // ── Render pdfjs TextLayer when in text mode ──────────────────────────────
+  useEffect(() => {
+    if (selectMode !== "text" || !isPdfSelected || !pdfJsDocRef.current ||
+        !textLayerRef.current || displaySize.width === 0 || displaySize.height === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const container = textLayerRef.current;
+        if (!container) return;
+        container.innerHTML = "";
+
+        const doc = pdfJsDocRef.current;
+        if (!doc) return;
+
+        const page = await doc.getPage(pdfPageIndex + 1);
+        if (cancelled) return;
+
+        const textContent = await page.getTextContent();
+        if (cancelled) return;
+
+        const baseViewport = page.getViewport({ scale: 1 });
+        const scale = displaySize.width / baseViewport.width;
+        const viewport = page.getViewport({ scale });
+
+        // Set CSS variables required by pdfjs v6 TextLayer span sizing
+        container.style.setProperty("--total-scale-factor", String(scale));
+        container.style.setProperty("--scale-round-x", "1px");
+        container.style.setProperty("--scale-round-y", "1px");
+
+        const textLayer = new TextLayer({
+          textContentSource: textContent,
+          container,
+          viewport,
+        });
+        textLayerInstanceRef.current = textLayer;
+        await textLayer.render();
+      } catch (e) {
+        if (!cancelled) console.warn("[TextLayer] render failed:", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      textLayerInstanceRef.current = null;
+    };
+  }, [selectMode, pdfPageIndex, displaySize.width, displaySize.height, isPdfSelected]);
 
   // Run OCR when a paragraph is selected and OCR is enabled
   useEffect(() => {
@@ -2008,6 +2117,44 @@ function App() {
     });
   };
 
+  const handlePdfTextSelection = (_e: React.MouseEvent) => {
+    const selection = window.getSelection();
+    if (!selection || !selection.toString().trim()) {
+      setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+      return;
+    }
+
+    const selectedText = selection.toString().trim();
+    const range = selection.getRangeAt(0);
+    const rect = range.getBoundingClientRect();
+
+    // Get image-wrap bounds for relative positioning
+    const wrapEl = textLayerRef.current?.parentElement;
+    if (!wrapEl) return;
+    const wrapRect = wrapEl.getBoundingClientRect();
+
+    const menuW = 260;
+    const menuH = 40;
+
+    let menuX = rect.left - wrapRect.left + rect.width / 2 - menuW / 2;
+    let menuY = rect.top - wrapRect.top - menuH - 4;
+
+    // Constrain within wrap bounds
+    menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
+    if (menuY < 4) menuY = rect.bottom - wrapRect.top + 4;
+    menuY = Math.max(4, menuY);
+
+    setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText });
+  };
+
+  const handlePdfFloatingAction = (action: string) => {
+    if (pdfFloatingMenu.selectedText) {
+      setAiAction(actionLabels[action] || action);
+      requestAiDescription(pdfFloatingMenu.selectedText, action);
+    }
+    setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+  };
+
   const showFloatingMenu = (text: string, x: number, y: number) => {
     const menuW = 260;
     const menuH = 40;
@@ -2317,6 +2464,26 @@ function App() {
       document.removeEventListener("keydown", handleKey);
     };
   }, [floatingMenu.visible]);
+
+  // Global click listener to dismiss PDF floating menu
+  useEffect(() => {
+    if (!pdfFloatingMenu.visible) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".pdf-floating-ai-menu")) {
+        setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [pdfFloatingMenu.visible]);
 
   const segmentedParagraph = useMemo(() => {
     if (!selectedParagraph?.text) return [];
@@ -2806,6 +2973,33 @@ function App() {
                     <div className="pdf-toolbar-separator" />
                     <div className="pdf-toolbar-group">
                       <Button
+                        appearance={selectMode === "text" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${selectMode === "text" ? "toolbar-btn-active" : ""}`}
+                        icon={<Type size={15} />}
+                        onClick={() => {
+                          setSelectMode("text");
+                          setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+                          window.getSelection()?.removeAllRanges();
+                        }}
+                        title="文字选择模式"
+                      />
+                      <Button
+                        appearance={selectMode === "box" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${selectMode === "box" ? "toolbar-btn-active" : ""}`}
+                        icon={<Square size={15} />}
+                        onClick={() => {
+                          setSelectMode("box");
+                          setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+                          window.getSelection()?.removeAllRanges();
+                        }}
+                        title="框选模式"
+                      />
+                    </div>
+                    <div className="pdf-toolbar-separator" />
+                    <div className="pdf-toolbar-group">
+                      <Button
                         appearance={annotationMode === "pen" ? "subtle" : "transparent"}
                         size="small"
                         className={`toolbar-btn ${annotationMode === "pen" ? "toolbar-btn-active" : ""}`}
@@ -3092,7 +3286,7 @@ function App() {
                         }}
                       />
 
-                      <div className="overlay-layer" style={{ width: displaySize.width, height: displaySize.height }}>
+                      <div className="overlay-layer" style={{ width: displaySize.width, height: displaySize.height, display: selectMode === "text" ? "none" : undefined }}>
                         {segments.map((seg, idx) => {
                           const left = Math.max(0, seg.xmin * scale.x);
                           const top = Math.max(0, seg.ymin * scale.y);
@@ -3187,6 +3381,15 @@ function App() {
                           );
                         })}
                       </div>
+                      {/* PDF Text Layer — visible in text selection mode */}
+                      {selectMode === "text" && (
+                        <div
+                          ref={textLayerRef}
+                          className="pdf-text-layer"
+                          style={{ width: displaySize.width, height: displaySize.height }}
+                          onMouseUp={handlePdfTextSelection}
+                        />
+                      )}
                       {/* Annotation canvas overlay — sits above bboxes */}
                       <canvas
                         ref={annotationCanvasRef}
@@ -3211,6 +3414,32 @@ function App() {
                           annotationCurrentShapeRef.current = null;
                         }}
                       />
+                      {/* PDF text selection floating AI menu */}
+                      {pdfFloatingMenu.visible && (
+                        <div
+                          className="pdf-floating-ai-menu"
+                          style={{ left: pdfFloatingMenu.x, top: pdfFloatingMenu.y }}
+                        >
+                          <button
+                            className="floating-ai-btn"
+                            onClick={(e) => { e.stopPropagation(); handlePdfFloatingAction("解读"); }}
+                          >
+                            AI 解读
+                          </button>
+                          <button
+                            className="floating-ai-btn"
+                            onClick={(e) => { e.stopPropagation(); handlePdfFloatingAction("翻译"); }}
+                          >
+                            AI 翻译
+                          </button>
+                          <button
+                            className="floating-ai-btn"
+                            onClick={(e) => { e.stopPropagation(); handlePdfFloatingAction("摘要"); }}
+                          >
+                            AI 摘要
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="empty-state">
@@ -3235,6 +3464,8 @@ function App() {
             <div className="resizer-v" onMouseDown={handleMouseDownV} />
 
             <div className="right-pane" ref={rightPaneRef}>
+              {selectMode === "box" && (
+                <>
               <div className="text-pane" onMouseUp={handleTextSelection} style={{
                 height: topPaneHeight,
                 flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none"
@@ -3351,8 +3582,10 @@ function App() {
               </div>
 
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
+                </>
+              )}
 
-              <div className="ai-pane">
+              <div className="ai-pane" style={selectMode === "text" ? { flex: 1 } : {}}>
                 <div className="ai-pane-scroll" ref={aiScrollRef}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                     <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>

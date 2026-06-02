@@ -1618,3 +1618,68 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
+/* ── PDF Text Layer (pdfjs-dist v6) ────────────────────────── */
+.pdf-text-layer {
+  --total-scale-factor: 1;
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+  --user-unit: 1;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  transform-origin: 0 0;
+  z-index: 2;
+  user-select: text;
+  cursor: text;
+}
+
+.pdf-text-layer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+/* Span font-size & transform — driven by pdfjs inline CSS vars */
+.pdf-text-layer > :not(.markedContent),
+.pdf-text-layer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+/* Override pdfjs default transparent ::selection inside textLayer */
+.pdf-text-layer span::selection,
+.pdf-text-layer br::selection {
+  background: rgba(0, 150, 255, 0.3) !important;
+}
+
+/* ── PDF Floating AI Menu (text selection mode) ────────────── */
+.pdf-floating-ai-menu {
+  position: absolute;
+  z-index: 999;
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+  background: rgb(55, 55, 55);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  animation: floatMenuIn 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
