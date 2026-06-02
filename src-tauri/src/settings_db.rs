@@ -8,6 +8,16 @@ use std::path::PathBuf;
 const DB_DIR: &str = "C:\\xDoc";
 const DB_FILE: &str = "settings.db";
 
+/// Resolve the managed papers directory relative to the executable.
+/// Returns `<exe_dir>/papers`.
+pub fn get_papers_dir() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    exe_dir.join("papers")
+}
+
 /// AI vendor configuration returned to / received from the frontend.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct AiConfig {
@@ -22,6 +32,37 @@ pub struct AiConfig {
 pub struct SettingEntry {
     pub key: String,
     pub value: String,
+}
+
+/// A paper record stored in the papers table.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct PaperRecord {
+    pub id: String,
+    pub name: String,
+    pub original_path: String,
+    pub managed_path: Option<String>,
+    pub import_date: String,
+    pub last_read_date: Option<String>,
+    pub file_size: Option<i64>,
+    // Metadata fields
+    pub title: Option<String>,
+    pub title_translation: Option<String>,
+    pub authors: Option<String>,       // JSON array
+    pub abstract_text: Option<String>,
+    pub journal: Option<String>,
+    pub publisher: Option<String>,
+    pub date: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    pub doi: Option<String>,
+    pub url: Option<String>,
+    pub journal_abbrev: Option<String>,
+    pub issn: Option<String>,
+    pub isbn: Option<String>,
+    pub language: Option<String>,
+    pub keywords: Option<String>,      // JSON array
+    pub metadata_extracted: bool,
 }
 
 /// Owns the SQLite connection. Wrapped in a Tauri-managed state.
@@ -59,6 +100,39 @@ impl SettingsDb {
             [],
         )
         .map_err(|e| anyhow::anyhow!("创建 settings 表失败: {e}"))?;
+
+        // Papers table — stores imported paper info + extracted metadata
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS papers (
+                id                  TEXT PRIMARY KEY,
+                name                TEXT NOT NULL,
+                original_path       TEXT NOT NULL,
+                managed_path        TEXT,
+                import_date         TEXT NOT NULL,
+                last_read_date      TEXT,
+                file_size           INTEGER,
+                title               TEXT,
+                title_translation   TEXT,
+                authors             TEXT,
+                abstract_text       TEXT,
+                journal             TEXT,
+                publisher           TEXT,
+                date                TEXT,
+                volume              TEXT,
+                issue               TEXT,
+                pages               TEXT,
+                doi                 TEXT,
+                url                 TEXT,
+                journal_abbrev      TEXT,
+                issn                TEXT,
+                isbn                TEXT,
+                language            TEXT,
+                keywords            TEXT,
+                metadata_extracted  INTEGER DEFAULT 0
+             )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("创建 papers 表失败: {e}"))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -128,5 +202,146 @@ impl SettingsDb {
     ) -> Result<()> {
         let s = serde_json::to_string(keys)?;
         self.set("llm.vendorApiKeys", &s)
+    }
+
+    // ── Paper CRUD ──────────────────────────────────────────────────────────
+
+    /// Insert or update a paper record.
+    pub fn upsert_paper(&self, paper: &PaperRecord) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO papers (
+                id, name, original_path, managed_path, import_date,
+                last_read_date, file_size, title, title_translation,
+                authors, abstract_text, journal, publisher, date,
+                volume, issue, pages, doi, url, journal_abbrev,
+                issn, isbn, language, keywords, metadata_extracted
+             ) VALUES (
+                ?1,  ?2,  ?3,  ?4,  ?5,
+                ?6,  ?7,  ?8,  ?9,
+                ?10, ?11, ?12, ?13, ?14,
+                ?15, ?16, ?17, ?18, ?19, ?20,
+                ?21, ?22, ?23, ?24, ?25
+             )
+             ON CONFLICT(id) DO UPDATE SET
+                name               = excluded.name,
+                original_path      = excluded.original_path,
+                managed_path       = excluded.managed_path,
+                import_date        = excluded.import_date,
+                last_read_date     = excluded.last_read_date,
+                file_size          = excluded.file_size,
+                title              = excluded.title,
+                title_translation  = excluded.title_translation,
+                authors            = excluded.authors,
+                abstract_text      = excluded.abstract_text,
+                journal            = excluded.journal,
+                publisher          = excluded.publisher,
+                date               = excluded.date,
+                volume             = excluded.volume,
+                issue              = excluded.issue,
+                pages              = excluded.pages,
+                doi                = excluded.doi,
+                url                = excluded.url,
+                journal_abbrev     = excluded.journal_abbrev,
+                issn               = excluded.issn,
+                isbn               = excluded.isbn,
+                language           = excluded.language,
+                keywords           = excluded.keywords,
+                metadata_extracted = excluded.metadata_extracted",
+            params![
+                paper.id,
+                paper.name,
+                paper.original_path,
+                paper.managed_path,
+                paper.import_date,
+                paper.last_read_date,
+                paper.file_size,
+                paper.title,
+                paper.title_translation,
+                paper.authors,
+                paper.abstract_text,
+                paper.journal,
+                paper.publisher,
+                paper.date,
+                paper.volume,
+                paper.issue,
+                paper.pages,
+                paper.doi,
+                paper.url,
+                paper.journal_abbrev,
+                paper.issn,
+                paper.isbn,
+                paper.language,
+                paper.keywords,
+                paper.metadata_extracted as i32,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read all paper records.
+    pub fn list_papers(&self) -> Result<Vec<PaperRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, original_path, managed_path, import_date,
+                    last_read_date, file_size, title, title_translation,
+                    authors, abstract_text, journal, publisher, date,
+                    volume, issue, pages, doi, url, journal_abbrev,
+                    issn, isbn, language, keywords, metadata_extracted
+             FROM papers ORDER BY import_date DESC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(PaperRecord {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                original_path: row.get(2)?,
+                managed_path: row.get(3)?,
+                import_date: row.get(4)?,
+                last_read_date: row.get(5)?,
+                file_size: row.get(6)?,
+                title: row.get(7)?,
+                title_translation: row.get(8)?,
+                authors: row.get(9)?,
+                abstract_text: row.get(10)?,
+                journal: row.get(11)?,
+                publisher: row.get(12)?,
+                date: row.get(13)?,
+                volume: row.get(14)?,
+                issue: row.get(15)?,
+                pages: row.get(16)?,
+                doi: row.get(17)?,
+                url: row.get(18)?,
+                journal_abbrev: row.get(19)?,
+                issn: row.get(20)?,
+                isbn: row.get(21)?,
+                language: row.get(22)?,
+                keywords: row.get(23)?,
+                metadata_extracted: row.get::<_, i32>(24)? != 0,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete a paper record (does NOT remove the managed file — caller handles that).
+    pub fn delete_paper(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM papers WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    /// Get the managed_path for a paper (used for file cleanup on delete).
+    pub fn get_paper_managed_path(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT managed_path FROM papers WHERE id = ?1")?;
+        let mut rows = stmt.query(params![id])?;
+        if let Some(row) = rows.next()? {
+            Ok(row.get(0)?)
+        } else {
+            Ok(None)
+        }
     }
 }

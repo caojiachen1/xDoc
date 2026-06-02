@@ -25,6 +25,16 @@ import { marked } from "marked";
 import SettingsDialog, { VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import HomePage, { type PaperInfo } from "./components/HomePage";
+import { extractMetadataEnhanced } from "./utils/pdfMetadata";
+import {
+  copyToManaged,
+  savePaper,
+  listPapers,
+  deletePaper as dbDeletePaper,
+  renamePaper,
+  recordToPaperInfo,
+  paperInfoToRecord,
+} from "./utils/paperDb";
 import "./App.css";
 
 interface LayoutBox {
@@ -224,14 +234,12 @@ function App() {
   // Tab state
   const [tabs, setTabs] = useState<TabInfo[]>([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
   const [activeTabId, setActiveTabId] = useState(HOME_TAB_ID);
-  const [papersList, setPapersList] = useState<PaperInfo[]>(() => {
-    try {
-      const stored = localStorage.getItem("xdoc.papersList");
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
-    }
-  });
+  const [papersList, setPapersList] = useState<PaperInfo[]>([]);
+  const [extractingPaperId, setExtractingPaperId] = useState<string | null>(null);
+  const [dragTabId, setDragTabId] = useState<string | null>(null);
+  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
+  const tabBarRef = useRef<HTMLDivElement>(null);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -252,11 +260,6 @@ function App() {
   const selectedFigurePageRef = useRef(-1);
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
-
-  // Persist papers list to localStorage
-  useEffect(() => {
-    localStorage.setItem("xdoc.papersList", JSON.stringify(papersList));
-  }, [papersList]);
 
   // ── Tab System Handlers ────────────────────────────────────────────────────
   const openPaperTab = useCallback((paper: PaperInfo) => {
@@ -417,17 +420,33 @@ function App() {
       filters: [{ name: "Documents", extensions: ["pdf", "png", "jpg", "jpeg", "bmp", "webp"] }],
     });
     if (selected && Array.isArray(selected)) {
-      const newPapers: PaperInfo[] = selected.map(path => ({
-        id: `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-        name: path.replace(/\\/g, "/").split("/").pop() || path,
-        path,
-        importDate: new Date().toISOString(),
-      }));
-      setPapersList(prev => [...prev, ...newPapers]);
+      const newPapers: PaperInfo[] = [];
+      for (const sourcePath of selected) {
+        const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
+        try {
+          const managedPath = await copyToManaged(sourcePath, id);
+          const paper: PaperInfo = {
+            id,
+            name,
+            path: managedPath,
+            originalPath: sourcePath,
+            managedPath,
+            importDate: new Date().toISOString(),
+          };
+          await savePaper(paperInfoToRecord(paper));
+          newPapers.push(paper);
+        } catch (e) {
+          console.error(`[App] failed to import ${name}:`, e);
+        }
+      }
+      if (newPapers.length > 0) {
+        setPapersList(prev => [...prev, ...newPapers]);
+      }
     }
   }, []);
 
-  const handleDeletePaper = useCallback((id: string) => {
+  const handleDeletePaper = useCallback(async (id: string) => {
     const paper = papersList.find(p => p.id === id);
     if (!paper) return;
     setPapersList(prev => prev.filter(p => p.id !== id));
@@ -436,7 +455,84 @@ function App() {
     if (tab) {
       closeTab(tab.id);
     }
+    // Delete from DB (also removes managed file)
+    try {
+      await dbDeletePaper(id);
+    } catch (e) {
+      console.error("[App] failed to delete paper from DB:", e);
+    }
   }, [papersList, tabs, closeTab]);
+
+  const handleDropImport = useCallback(async (paths: string[]) => {
+    const newPapers: PaperInfo[] = [];
+    for (const sourcePath of paths) {
+      const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
+      try {
+        const managedPath = await copyToManaged(sourcePath, id);
+        const paper: PaperInfo = {
+          id,
+          name,
+          path: managedPath,
+          originalPath: sourcePath,
+          managedPath,
+          importDate: new Date().toISOString(),
+        };
+        await savePaper(paperInfoToRecord(paper));
+        newPapers.push(paper);
+      } catch (e) {
+        console.error(`[App] failed to import dropped file ${name}:`, e);
+      }
+    }
+    if (newPapers.length > 0) {
+      setPapersList(prev => [...prev, ...newPapers]);
+    }
+  }, []);
+
+  const handleExtractMetadata = useCallback(async (paperId: string) => {
+    const paper = papersList.find(p => p.id === paperId);
+    if (!paper || paper.metadataExtracted) return;
+
+    setExtractingPaperId(paperId);
+    const t0 = performance.now();
+    try {
+      console.log("[App] reading file base64...", paper.path);
+      const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
+      console.log(`[App] base64 ready (${(base64Data.length / 1024).toFixed(0)} KB, +${(performance.now() - t0).toFixed(0)}ms)`);
+      console.log("[App] starting extractMetadataEnhanced...");
+      const metadata = await extractMetadataEnhanced(paper.path, base64Data);
+      console.log(`[App] extractMetadataEnhanced done (+${(performance.now() - t0).toFixed(0)}ms), title=${JSON.stringify(metadata.title)}`);
+
+      // Rename managed file to title if available
+      let renamedPaper = { ...paper, metadata, metadataExtracted: true };
+      if (metadata.title && paper.managedPath) {
+        try {
+          const newPath = await renamePaper(paper.managedPath, metadata.title);
+          renamedPaper.path = newPath;
+          renamedPaper.managedPath = newPath;
+          renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
+          console.log(`[App] renamed managed file to: ${renamedPaper.name}`);
+        } catch (e) {
+          console.warn("[App] rename failed:", e);
+        }
+      }
+
+      setPapersList(prev => prev.map(p =>
+        p.id === paperId ? renamedPaper : p
+      ));
+      // Persist metadata to DB
+      try { await savePaper(paperInfoToRecord(renamedPaper)); } catch (e) { console.warn("[App] save metadata failed:", e); }
+    } catch (e) {
+      console.error("Metadata extraction failed:", e);
+      const updatedPaper: PaperInfo = { ...paper, metadataExtracted: true };
+      setPapersList(prev => prev.map(p =>
+        p.id === paperId ? updatedPaper : p
+      ));
+      try { await savePaper(paperInfoToRecord(updatedPaper)); } catch (e2) { console.warn("[App] save metadata flag failed:", e2); }
+    } finally {
+      setExtractingPaperId(null);
+    }
+  }, [papersList]);
 
   const isVisualBox = (clsId: number) => {
     // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
@@ -798,6 +894,16 @@ function App() {
         baseUrl: savedLlmBaseUrl,
         model: savedLlmModel,
       });
+
+      // ── Load papers from database ──
+      try {
+        const records = await listPapers();
+        const papers = records.map(recordToPaperInfo);
+        setPapersList(papers);
+        console.log(`[App] loaded ${papers.length} papers from database`);
+      } catch (e) {
+        console.warn("[App] failed to load papers from DB:", e);
+      }
     })();
   }, [environmentReady]);
 
@@ -1827,8 +1933,12 @@ function App() {
           </Menu>
 
           <div className="menu-spacer" />
-          <Text className="menu-status">{modelPath ? "模型已加载" : "模型未设置"}</Text>
-          <Text className="menu-status">阈值: {scoreThreshold.toFixed(2)}</Text>
+          {activeTabId !== HOME_TAB_ID && (
+            <>
+              <Text className="menu-status">{modelPath ? "模型已加载" : "模型未设置"}</Text>
+              <Text className="menu-status">阈值: {scoreThreshold.toFixed(2)}</Text>
+            </>
+          )}
           {loading && <Spinner size="tiny" />}
           {isPdfSelected && (
             fulltextExtracting ? (
@@ -1856,12 +1966,53 @@ function App() {
         </div>
 
         {/* ── Tab Bar ── */}
-        <div className="tab-bar">
+        <div
+          className="tab-bar"
+          ref={tabBarRef}
+          onPointerMove={(e) => {
+            if (!dragStartRef.current) return;
+            const { x, y, tabId } = dragStartRef.current;
+            if (!dragTabId && (Math.abs(e.clientX - x) > 5 || Math.abs(e.clientY - y) > 5)) {
+              setDragTabId(tabId);
+            }
+            if (dragTabId) {
+              const el = document.elementFromPoint(e.clientX, e.clientY);
+              const tabEl = el?.closest("[data-tab-id]") as HTMLElement | null;
+              const overId = tabEl?.dataset.tabId ?? null;
+              if (overId && overId !== dragTabId) {
+                setDragOverTabId(overId);
+              } else {
+                setDragOverTabId(null);
+              }
+            }
+          }}
+          onPointerUp={() => {
+            if (dragTabId && dragOverTabId && dragTabId !== dragOverTabId) {
+              setTabs(prev => {
+                const fromIdx = prev.findIndex(t => t.id === dragTabId);
+                const toIdx = prev.findIndex(t => t.id === dragOverTabId);
+                if (fromIdx === -1 || toIdx === -1) return prev;
+                const newTabs = [...prev];
+                const [moved] = newTabs.splice(fromIdx, 1);
+                newTabs.splice(toIdx, 0, moved);
+                return newTabs;
+              });
+            }
+            dragStartRef.current = null;
+            setDragTabId(null);
+            setDragOverTabId(null);
+          }}
+        >
           {tabs.map((tab) => (
             <div
               key={tab.id}
-              className={`tab-item ${activeTabId === tab.id ? "active" : ""}`}
-              onClick={() => switchToTab(tab.id)}
+              data-tab-id={tab.id}
+              className={`tab-item ${activeTabId === tab.id ? "active" : ""} ${dragTabId === tab.id ? "dragging" : ""} ${dragOverTabId === tab.id && dragTabId !== tab.id ? "drag-over" : ""}`}
+              onClick={() => { if (!dragTabId) switchToTab(tab.id); }}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                dragStartRef.current = { x: e.clientX, y: e.clientY, tabId: tab.id };
+              }}
             >
               <span className="tab-title">{tab.title}</span>
               {tab.type === "reader" && (
@@ -1871,6 +2022,7 @@ function App() {
                     e.stopPropagation();
                     closeTab(tab.id);
                   }}
+                  onPointerDown={(e) => e.stopPropagation()}
                   title="关闭标签"
                 >
                   <X size={12} />
@@ -1902,6 +2054,9 @@ function App() {
               onOpenPaper={openPaperTab}
               onImportPapers={handleImportPapers}
               onDeletePaper={handleDeletePaper}
+              onDropImport={handleDropImport}
+              onExtractMetadata={handleExtractMetadata}
+              extractingPaperId={extractingPaperId}
             />
           </Card>
         ) : (

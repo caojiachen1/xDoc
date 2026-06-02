@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, State};
 #[allow(dead_code)]
 mod gguf_ocr;
 mod settings_db;
-use settings_db::{AiConfig, SettingEntry, SettingsDb};
+use settings_db::{AiConfig, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -71,6 +71,104 @@ pub struct ExtractContentResponse {
     pub page_index: u32,
     pub page_count: u32,
     pub segments: Vec<TextSegment>,
+}
+
+#[derive(Serialize, Clone)]
+pub struct FontTextSegment {
+    pub text: String,
+    pub xmin: f32,
+    pub ymin: f32,
+    pub xmax: f32,
+    pub ymax: f32,
+    pub font_name: String,
+    pub font_size: f32,
+    pub is_bold: bool,
+    pub is_italic: bool,
+}
+
+#[derive(Serialize)]
+pub struct FirstPageMetadata {
+    pub title_by_layout: Option<String>,
+    pub abstract_by_layout: Option<String>,
+    pub title_by_font: Option<String>,
+    pub doi: Option<String>,
+    pub arxiv_id: Option<String>,
+    pub all_segments: Vec<FontTextSegment>,
+    pub page_width: f32,
+    pub page_height: f32,
+}
+
+fn extract_font_segments_from_page(
+    page: &PdfPage<'_>,
+) -> Result<(Vec<FontTextSegment>, f32, f32), String> {
+    let scale = 1600.0 / page.width().value;
+    let page_height = page.height().value;
+    let mut segments: Vec<FontTextSegment> = Vec::new();
+
+    // Extract page text ONCE before the loop (avoids O(n²) re-parsing)
+    let page_text = page.text().ok();
+
+    for obj in page.objects().iter() {
+        if let Some(text_obj) = obj.as_text_object() {
+            let text = text_obj.text();
+            if text.trim().is_empty() {
+                continue;
+            }
+            if let Ok(bounds) = text_obj.bounds() {
+                let mut xmin = bounds.left().value * scale;
+                let mut xmax = bounds.right().value * scale;
+                let mut ymin = (page_height - bounds.top().value) * scale;
+                let mut ymax = (page_height - bounds.bottom().value) * scale;
+                if ymin > ymax {
+                    std::mem::swap(&mut ymin, &mut ymax);
+                }
+                if xmin > xmax {
+                    std::mem::swap(&mut xmin, &mut xmax);
+                }
+
+                // Get font info from the first character of this text object
+                let (font_name, font_size, is_bold, is_italic) =
+                    if let Some(ref pt) = page_text {
+                        if let Ok(chars) = pt.chars_for_object(text_obj) {
+                            if let Some(ch) = chars.iter().next() {
+                                let weight_bold = matches!(
+                                    ch.font_weight(),
+                                    Some(PdfFontWeight::Weight700Bold)
+                                        | Some(PdfFontWeight::Weight800)
+                                        | Some(PdfFontWeight::Weight900)
+                                );
+                                (
+                                    ch.font_name(),
+                                    ch.scaled_font_size().value,
+                                    ch.font_is_bold_reenforced() || weight_bold,
+                                    ch.font_is_italic(),
+                                )
+                            } else {
+                                ("unknown".to_string(), 0.0, false, false)
+                            }
+                        } else {
+                            ("unknown".to_string(), 0.0, false, false)
+                        }
+                    } else {
+                        ("unknown".to_string(), 0.0, false, false)
+                    };
+
+                segments.push(FontTextSegment {
+                    text,
+                    xmin,
+                    ymin,
+                    xmax,
+                    ymax,
+                    font_name,
+                    font_size,
+                    is_bold,
+                    is_italic,
+                });
+            }
+        }
+    }
+
+    Ok((segments, page.width().value * scale, page_height * scale))
 }
 
 fn extract_raw_text_segments(path: &Path, page_index: u32) -> Result<Vec<TextSegment>, String> {
@@ -1032,17 +1130,35 @@ async fn load_model(model_path: String, state: State<'_, ModelState>) -> Result<
         return Err(format!("Model file not found: {}", resolved.display()));
     }
 
-    let session = Session::builder()
-        .map_err(|e| e.to_string())?
-        .commit_from_file(resolved.to_str().unwrap_or(&model_path))
-        .map_err(|e| e.to_string())?;
+    let resolved_str = resolved.to_string_lossy().to_string();
+    let session_arc = state.session.clone();
+    let inference_cache_arc = state.inference_cache.clone();
+    let prefetch_arc = state.prefetch_tasks.clone();
+    let response_cache_arc = state.response_cache.clone();
 
-    *state.session.lock().unwrap() = Some(session);
-    state.inference_cache.lock().unwrap().clear();
-    state.prefetch_tasks.lock().unwrap().clear();
-    state.response_cache.lock().unwrap().clear();
+    // ONNX session creation is CPU-heavy; run on blocking thread
+    // so we don't block the async runtime.
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let t0 = std::time::Instant::now();
+        eprintln!("[xDoc:model] loading ONNX model from {}...", resolved_str);
 
-    Ok("Model loaded successfully".to_string())
+        let session = Session::builder()
+            .map_err(|e| e.to_string())?
+            .commit_from_file(&resolved_str)
+            .map_err(|e| e.to_string())?;
+
+        eprintln!("[xDoc:model] ONNX session created (+{}ms)", t0.elapsed().as_millis());
+
+        *session_arc.lock().unwrap() = Some(session);
+        inference_cache_arc.lock().unwrap().clear();
+        prefetch_arc.lock().unwrap().clear();
+        response_cache_arc.lock().unwrap().clear();
+
+        eprintln!("[xDoc:model] model loaded successfully (+{}ms)", t0.elapsed().as_millis());
+        Ok("Model loaded successfully".to_string())
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1623,6 +1739,390 @@ fn db_get_path(db: State<'_, SettingsDb>) -> Result<String, String> {
     Ok(db.path.to_string_lossy().to_string())
 }
 
+// ── Paper management commands ───────────────────────────────────────────────
+
+/// Copy a file to xDoc's managed papers directory, returning the managed path.
+/// Uses the original filename.
+#[tauri::command]
+fn paper_copy_to_managed(source_path: String, _paper_id: String) -> Result<String, String> {
+    let src = Path::new(&source_path);
+    if !src.exists() {
+        return Err(format!("Source file not found: {}", source_path));
+    }
+
+    let papers_dir = get_papers_dir();
+    std::fs::create_dir_all(&papers_dir)
+        .map_err(|e| format!("Failed to create papers dir: {e}"))?;
+
+    let filename = src
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let dest = papers_dir.join(&filename);
+
+    // Handle name conflicts: append counter if file exists with different content
+    let dest = if dest.exists() && dest != src {
+        let stem = src.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = src.extension().unwrap_or_default().to_string_lossy();
+        let mut counter = 1u32;
+        loop {
+            let candidate = papers_dir.join(format!("{}_{}.{}", stem, counter, ext));
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+        }
+    } else {
+        dest
+    };
+
+    // Only copy if not already in managed dir
+    if src != dest.as_path() {
+        std::fs::copy(src, &dest)
+            .map_err(|e| format!("Failed to copy file: {e}"))?;
+    }
+
+    Ok(dest.to_string_lossy().to_string())
+}
+
+/// Save (insert or update) a paper record to the database.
+#[tauri::command]
+fn paper_save(paper: PaperRecord, db: State<'_, SettingsDb>) -> Result<(), String> {
+    db.upsert_paper(&paper).map_err(|e| e.to_string())
+}
+
+/// List all paper records from the database.
+#[tauri::command]
+fn paper_list(db: State<'_, SettingsDb>) -> Result<Vec<PaperRecord>, String> {
+    db.list_papers().map_err(|e| e.to_string())
+}
+
+/// Delete a paper record and its managed file.
+#[tauri::command]
+fn paper_delete(id: String, db: State<'_, SettingsDb>) -> Result<(), String> {
+    // Get managed path before deleting the record
+    let managed_path = db
+        .get_paper_managed_path(&id)
+        .map_err(|e| e.to_string())?;
+
+    // Delete the DB record
+    db.delete_paper(&id).map_err(|e| e.to_string())?;
+
+    // Delete the managed file if it exists
+    if let Some(mp) = managed_path {
+        let p = Path::new(&mp);
+        if p.exists() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    Ok(())
+}
+
+/// Get the papers managed directory path.
+#[tauri::command]
+fn paper_get_managed_dir() -> Result<String, String> {
+    Ok(get_papers_dir().to_string_lossy().to_string())
+}
+
+/// Rename a managed paper file (e.g. after title is extracted from metadata).
+#[tauri::command]
+fn paper_rename(old_path: String, new_title: String) -> Result<String, String> {
+    let old = Path::new(&old_path);
+    if !old.exists() {
+        return Err(format!("File not found: {}", old_path));
+    }
+
+    let parent = old.parent().unwrap_or(Path::new("."));
+    let ext = old
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    // Sanitize title for use as filename
+    let sanitized: String = new_title
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => c,
+        })
+        .collect();
+    let sanitized = sanitized.trim().to_string();
+    if sanitized.is_empty() {
+        return Ok(old_path); // Title is empty, keep original name
+    }
+
+    let new_name = if ext.is_empty() {
+        sanitized.clone()
+    } else {
+        format!("{}.{}", sanitized, ext)
+    };
+    let new_path = parent.join(&new_name);
+
+    // Already has the right name
+    if old == new_path {
+        return Ok(new_path.to_string_lossy().to_string());
+    }
+
+    // Handle conflicts: append counter if target exists
+    let final_path = if new_path.exists() && new_path != old {
+        let mut counter = 1u32;
+        loop {
+            let candidate = if ext.is_empty() {
+                parent.join(format!("{}_{}", sanitized, counter))
+            } else {
+                parent.join(format!("{}_{:02}.{}", sanitized, counter, ext))
+            };
+            if !candidate.exists() {
+                break candidate;
+            }
+            counter += 1;
+        }
+    } else {
+        new_path
+    };
+
+    std::fs::rename(old, &final_path)
+        .map_err(|e| format!("Failed to rename: {e}"))?;
+
+    Ok(final_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn extract_first_page_metadata(
+    file_path: String,
+    score_threshold: Option<f32>,
+    state: State<'_, ModelState>,
+) -> Result<FirstPageMetadata, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let threshold = score_threshold.unwrap_or(0.5).clamp(0.0, 1.0);
+
+    // Clone Arc references so we can move them into spawn_blocking
+    let session_arc = state.session.clone();
+    let inference_cache_arc = state.inference_cache.clone();
+    let fp = file_path.clone();
+
+    // Run all heavy CPU-bound work on a blocking thread to avoid
+    // blocking the async runtime (which would freeze other Tauri commands).
+    tauri::async_runtime::spawn_blocking(move || -> Result<FirstPageMetadata, String> {
+        let t0 = std::time::Instant::now();
+        let log = |step: &str| {
+            eprintln!("[xDoc:meta] {} (+{}ms)", step, t0.elapsed().as_millis());
+        };
+
+        // 1. Load PDF and extract font-aware text segments from first page.
+        //    All pdfium objects are scoped so they are dropped BEFORE
+        //    render_pdf_page() opens the same file again (pdfium has a
+        //    process-wide lock — two concurrent opens deadlock).
+        log("binding pdfium...");
+        let (segments, page_width, page_height, full_text) = {
+            let bindings = bind_pdfium_with_candidates()?;
+            let pdfium = Pdfium::new(bindings);
+            log("loading PDF document...");
+            let document = pdfium
+                .load_pdf_from_file(Path::new(&fp), None)
+                .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+            let page = document
+                .pages()
+                .get(0)
+                .map_err(|e| format!("Failed to get first page: {e}"))?;
+
+            log("extracting font segments (O(n) with cached page_text)...");
+            let (segments, pw, ph) = extract_font_segments_from_page(&page)?;
+            log(&format!("font segments done: {} segments", segments.len()));
+
+            // Get full text for DOI and arXiv regex matching
+            let full_text = page.text().map(|t| t.all()).unwrap_or_default();
+
+            (segments, pw, ph, full_text)
+        }; // pdfium, document, page all dropped here — global lock released
+
+        let doi = {
+            let re = regex::Regex::new(r#"10\.\d{4,9}/[^\s,;"'<>\}\]]+"#).ok();
+            re.and_then(|r| {
+                r.find(&full_text).map(|m| {
+                    let mut d = m.as_str().to_string();
+                    // Strip trailing punctuation
+                    while d.ends_with(|c: char| ".);]>}".contains(c)) {
+                        d.pop();
+                    }
+                    d
+                })
+            })
+        };
+
+        let arxiv_id = {
+            let re = regex::Regex::new(r"(?i)arXiv:(\d{4}\.\d{4,5}|[a-z-]+/\d{7})").ok();
+            re.and_then(|r| r.captures(&full_text).map(|c| c[1].to_string()))
+        };
+
+        // 3. Font-based title detection: find the largest font size segments
+        let title_by_font = {
+            if segments.is_empty() {
+                None
+            } else {
+                let max_size = segments
+                    .iter()
+                    .map(|s| s.font_size)
+                    .fold(0.0f32, f32::max);
+                if max_size > 0.0 {
+                    let threshold_size = max_size * 0.9;
+                    let title_segs: Vec<&FontTextSegment> = segments
+                        .iter()
+                        .filter(|s| s.font_size >= threshold_size)
+                        .collect();
+                    if !title_segs.is_empty() {
+                        let title_text = title_segs
+                            .iter()
+                            .map(|s| s.text.trim())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .trim()
+                            .to_string();
+                        if !title_text.is_empty() {
+                            Some(title_text)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        // 4. Run layout detection to find doc_title (class 6) and abstract (class 0)
+        //    pdfium document was dropped in step 1, so it's safe to open the file again.
+        log("pdfium document dropped, rendering page for layout detection...");
+        let (title_by_layout, abstract_by_layout) = {
+            let render_result = render_pdf_page(Path::new(&fp), 0);
+            if let Ok((image, _, _)) = render_result {
+                log(&format!("page rendered: {}x{}", image.width(), image.height()));
+                let cache_key = make_cache_key(&fp, 0, threshold);
+                let cached_boxes = {
+                    let cache = inference_cache_arc.lock().unwrap();
+                    cache.get(&cache_key).map(|e| e.boxes.clone())
+                };
+
+                let layout_boxes = if let Some(boxes) = cached_boxes {
+                    log("using cached layout boxes");
+                    Some(boxes)
+                } else {
+                    log("running ONNX inference...");
+                    let mut session_guard = session_arc.lock().unwrap();
+                    if let Some(ref mut session) = *session_guard {
+                        match infer_layout_boxes(session, &image, threshold) {
+                            Ok(boxes) => {
+                                drop(session_guard);
+                                log(&format!("ONNX inference done: {} boxes", boxes.len()));
+                                let entry = CachedInference {
+                                    boxes: boxes.clone(),
+                                    width: image.width(),
+                                    height: image.height(),
+                                    source_type: "pdf".to_string(),
+                                    page_count: 1,
+                                    preview_data_url: None,
+                                };
+                                inference_cache_arc
+                                    .lock()
+                                    .unwrap()
+                                    .insert(cache_key, entry);
+                                Some(boxes)
+                            }
+                            Err(e) => {
+                                drop(session_guard);
+                                log(&format!("ONNX inference FAILED: {}", e));
+                                None
+                            }
+                        }
+                    } else {
+                        log("no ONNX session loaded, skipping layout detection");
+                        None
+                    }
+                };
+
+                if let Some(ref boxes) = layout_boxes {
+                    let collect_text_in_class = |cls_id: u32| -> Option<String> {
+                        let class_boxes: Vec<&LayoutBox> =
+                            boxes.iter().filter(|b| b.cls_id == cls_id).collect();
+                        if class_boxes.is_empty() {
+                            return None;
+                        }
+                        let mut texts: Vec<String> = Vec::new();
+                        for lb in &class_boxes {
+                            let mut seg_texts: Vec<String> = Vec::new();
+                            for seg in &segments {
+                                let cx = (seg.xmin + seg.xmax) / 2.0;
+                                let cy = (seg.ymin + seg.ymax) / 2.0;
+                                if cx >= lb.xmin && cx <= lb.xmax && cy >= lb.ymin && cy <= lb.ymax
+                                {
+                                    seg_texts.push(seg.text.trim().to_string());
+                                }
+                            }
+                            if !seg_texts.is_empty() {
+                                texts.push(seg_texts.join(" "));
+                            }
+                        }
+                        if texts.is_empty() {
+                            None
+                        } else {
+                            Some(texts.join(" ").trim().to_string())
+                        }
+                    };
+
+                    (collect_text_in_class(6), collect_text_in_class(0))
+                } else {
+                    (None, None)
+                }
+            } else {
+                log("page render failed, skipping layout detection");
+                (None, None)
+            }
+        };
+
+        log(&format!(
+            "done (total {}ms) — title_font={:?}, title_layout={:?}, doi={:?}",
+            t0.elapsed().as_millis(),
+            title_by_font.as_deref(),
+            title_by_layout.as_deref(),
+            doi.as_deref(),
+        ));
+
+        Ok(FirstPageMetadata {
+            title_by_layout,
+            abstract_by_layout,
+            title_by_font,
+            doi,
+            arxiv_id,
+            all_segments: segments,
+            page_width,
+            page_height,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+#[tauri::command]
+async fn read_file_base64(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+    let bytes = std::fs::read(&file_path)
+        .map_err(|e| format!("Failed to read file: {e}"))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -1714,7 +2214,15 @@ pub fn run() {
             db_delete_setting,
             db_get_ai_config,
             db_set_ai_config,
-            db_get_path
+            db_get_path,
+            read_file_base64,
+            extract_first_page_metadata,
+            paper_copy_to_managed,
+            paper_save,
+            paper_list,
+            paper_delete,
+            paper_get_managed_dir,
+            paper_rename,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

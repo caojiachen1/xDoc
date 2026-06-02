@@ -14,6 +14,7 @@
     "katex": "^0.16.45",
     "lucide-react": "^1.8.0",
     "marked": "^18.0.3",
+    "pdfjs-dist": "^6.0.227",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "tailwind-merge": "^3.5.0"
