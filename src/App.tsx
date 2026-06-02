@@ -200,6 +200,8 @@ function App() {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [outlineItems, setOutlineItems] = useState<{ title: string; page_index: number; depth: number }[]>([]);
   const [sidebarLoading, setSidebarLoading] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(220);
+  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(true);
@@ -1214,6 +1216,32 @@ function App() {
     setSidebarMode(mode);
     loadSidebarData(mode);
   }, [loadSidebarData]);
+
+  // Sidebar drag resize handlers
+  const handleSidebarDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    sidebarDragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!sidebarDragRef.current) return;
+      const delta = ev.clientX - sidebarDragRef.current.startX;
+      const newWidth = Math.max(140, Math.min(500, sidebarDragRef.current.startWidth + delta));
+      setSidebarWidth(newWidth);
+    };
+
+    const onMouseUp = () => {
+      sidebarDragRef.current = null;
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  }, [sidebarWidth]);
 
   // Drag-to-pan (move mode) — uses Pointer Events + setPointerCapture for reliability
   useEffect(() => {
@@ -2247,6 +2275,15 @@ function App() {
 
                 {isPdfSelected && previewSrc && (
                   <div className="pdf-toolbar">
+                    <Button
+                      appearance={sidebarOpen ? "subtle" : "transparent"}
+                      size="small"
+                      className={`toolbar-btn ${sidebarOpen ? "toolbar-btn-active" : ""}`}
+                      icon={<LayoutPanelLeft size={15} />}
+                      onClick={toggleSidebar}
+                      title="文献大纲"
+                    />
+                    <div className="pdf-toolbar-separator" />
                     <div className="pdf-toolbar-group">
                       <Button
                         appearance="subtle"
@@ -2311,21 +2348,12 @@ function App() {
                         title="框选模式 - 选择内容"
                       />
                     </div>
-                    <div className="pdf-toolbar-spacer" />
-                    <Button
-                      appearance={sidebarOpen ? "subtle" : "transparent"}
-                      size="small"
-                      className={`toolbar-btn ${sidebarOpen ? "toolbar-btn-active" : ""}`}
-                      icon={<LayoutPanelLeft size={15} />}
-                      onClick={toggleSidebar}
-                      title="文献大纲"
-                    />
                   </div>
                 )}
 
                 <div className="pdf-view-row">
                 {isPdfSelected && previewSrc && sidebarOpen && (
-                  <div className="pdf-sidebar">
+                  <div className="pdf-sidebar" style={{ width: sidebarWidth }}>
                     <div className="pdf-sidebar-tabs">
                       <button
                         className={`pdf-sidebar-tab ${sidebarMode === "thumbnails" ? "active" : ""}`}
@@ -2383,6 +2411,12 @@ function App() {
                       )}
                     </div>
                   </div>
+                )}
+                {isPdfSelected && previewSrc && sidebarOpen && (
+                  <div
+                    className="resizer-v"
+                    onMouseDown={handleSidebarDragStart}
+                  />
                 )}
 
                 {isPdfSelected && previewSrc && (
