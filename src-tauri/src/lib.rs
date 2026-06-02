@@ -2177,6 +2177,21 @@ async fn export_annotated_pdf(
                                 None, // no fill
                             );
                         }
+                        "line" => {
+                            if shape.points.len() < 2 {
+                                continue;
+                            }
+                            let color = PdfColor::new(r, g, b, 255);
+                            let pa = &shape.points[0];
+                            let pb = &shape.points[1];
+                            let x1 = PdfPoints::new((pa.x as f32) * page_w);
+                            let y1 = PdfPoints::new((1.0 - pa.y as f32) * page_h);
+                            let x2 = PdfPoints::new((pb.x as f32) * page_w);
+                            let y2 = PdfPoints::new((1.0 - pb.y as f32) * page_h);
+                            let _ = page.objects_mut().create_path_object_line(
+                                x1, y1, x2, y2, color, stroke_w,
+                            );
+                        }
                         "text" => {
                             if let Some(ref txt) = shape.text {
                                 if txt.is_empty() {

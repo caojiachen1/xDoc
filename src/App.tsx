@@ -18,7 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Undo2, Redo2, Trash2, Download } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
@@ -137,13 +137,13 @@ const COLORS = [
 
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type DragMode = "move" | "select";
-type AnnotationTool = "pen" | "eraser" | "text" | "rect" | "ellipse" | null;
+type AnnotationTool = "pen" | "eraser" | "text" | "rect" | "ellipse" | "line" | null;
 type EraserMode = "free" | "stroke";
 type TopMenuKey = "file" | "settings" | "help" | null;
 
 interface AnnotationShape {
   id: string;
-  type: "freehand" | "eraser" | "rect" | "ellipse" | "text";
+  type: "freehand" | "eraser" | "rect" | "ellipse" | "text" | "line";
   /** Normalized coordinates (0–1) relative to image dimensions */
   points: { x: number; y: number }[];
   color: string;
@@ -1441,7 +1441,7 @@ function App() {
 
     for (let i = annotations.length - 1; i >= 0; i--) {
       const shape = annotations[i];
-      if (shape.type === "text" || shape.type === "rect" || shape.type === "ellipse") continue;
+      if (shape.type === "text" || shape.type === "rect" || shape.type === "ellipse" || shape.type === "line") continue;
 
       let hit = false;
       // Check distance to each point
@@ -1509,6 +1509,11 @@ function App() {
         const ry = Math.abs(s.points[1].y - s.points[0].y) / 2 * ds.height;
         c.beginPath();
         c.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
+        c.stroke();
+      } else if (s.type === "line" && s.points.length >= 2) {
+        c.beginPath();
+        c.moveTo(s.points[0].x * ds.width, s.points[0].y * ds.height);
+        c.lineTo(s.points[1].x * ds.width, s.points[1].y * ds.height);
         c.stroke();
       } else if (s.type === "text" && s.text) {
         c.globalCompositeOperation = "source-over";
@@ -1596,7 +1601,7 @@ function App() {
       return;
     }
 
-    const typeMap = { pen: "freehand" as const, eraser: "eraser" as const, rect: "rect" as const, ellipse: "ellipse" as const };
+    const typeMap = { pen: "freehand" as const, eraser: "eraser" as const, rect: "rect" as const, ellipse: "ellipse" as const, line: "line" as const };
     annotationCurrentShapeRef.current = {
       id: `a-${Date.now()}`,
       type: typeMap[annotationMode],
@@ -1661,6 +1666,11 @@ function App() {
         ctx.beginPath();
         ctx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
         ctx.stroke();
+      } else if (s.type === "line" && s.points.length >= 2) {
+        ctx.beginPath();
+        ctx.moveTo(s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
+        ctx.lineTo(s.points[1].x * displaySize.width, s.points[1].y * displaySize.height);
+        ctx.stroke();
       } else if (s.type === "text" && s.text) {
         ctx.globalCompositeOperation = "source-over";
         ctx.font = `${s.size * 8}px sans-serif`;
@@ -1676,9 +1686,9 @@ function App() {
     annotationDrawingRef.current = false;
     const shape = annotationCurrentShapeRef.current;
     annotationCurrentShapeRef.current = null;
-    // Skip empty shapes: freehand/eraser with <2 points, or rect/ellipse with zero area
+    // Skip empty shapes: freehand/eraser with <2 points, or rect/ellipse/line with zero area
     if ((shape.type === "freehand" || shape.type === "eraser") && shape.points.length < 2) return;
-    if ((shape.type === "rect" || shape.type === "ellipse") && shape.points.length >= 2) {
+    if ((shape.type === "rect" || shape.type === "ellipse" || shape.type === "line") && shape.points.length >= 2) {
       const dx = Math.abs(shape.points[1].x - shape.points[0].x);
       const dy = Math.abs(shape.points[1].y - shape.points[0].y);
       if (dx < 0.001 && dy < 0.001) return;
@@ -2820,6 +2830,14 @@ function App() {
                         title="椭圆"
                       />
                       <Button
+                        appearance={annotationMode === "line" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "line" ? "toolbar-btn-active" : ""}`}
+                        icon={<Minus size={15} />}
+                        onClick={() => handleAnnotationModeChange("line")}
+                        title="直线"
+                      />
+                      <Button
                         appearance={annotationMode === "text" ? "subtle" : "transparent"}
                         size="small"
                         className={`toolbar-btn ${annotationMode === "text" ? "toolbar-btn-active" : ""}`}
@@ -2857,7 +2875,7 @@ function App() {
                           {annotationMode !== "eraser" && (
                             <>
                               <div className="annotation-color-swatches">
-                                {["#FF3838", "#4D96FF", "#48F90A", "#FFB21D", "#C084FC", "#FFFFFF"].map(c => (
+                                {["#FF3838", "#4D96FF", "#48F90A", "#FFB21D", "#C084FC", "#FFFFFF", "#000000"].map(c => (
                                   <div
                                     key={c}
                                     className={`annotation-swatch ${annotationColor === c ? "annotation-swatch-active" : ""}`}
