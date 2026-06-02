@@ -148,3 +148,58 @@ export function paperInfoToRecord(paper: PaperInfo): PaperRecord {
     metadata_extracted: paper.metadataExtracted || false,
   };
 }
+
+// ── Annotation persistence ──────────────────────────────────────────────
+
+export interface AnnotationRecord {
+  file_path: string;
+  page_index: number;
+  shapes_json: string;
+}
+
+export async function annotationSave(
+  filePath: string,
+  pageIndex: number,
+  shapesJson: string
+): Promise<void> {
+  return invoke("annotation_save", {
+    req: { file_path: filePath, page_index: pageIndex, shapes_json: shapesJson },
+  });
+}
+
+export async function annotationLoad(
+  filePath: string
+): Promise<AnnotationRecord[]> {
+  return invoke<AnnotationRecord[]>("annotation_load", { filePath });
+}
+
+export async function annotationDelete(
+  filePath: string
+): Promise<void> {
+  return invoke("annotation_delete", { filePath });
+}
+
+export interface ExportPoint { x: number; y: number }
+export interface ExportShape {
+  type: string;
+  points: ExportPoint[];
+  color: string;
+  size: number;
+  text?: string;
+}
+export interface PageAnnotations {
+  page_index: number;
+  shapes: ExportShape[];
+}
+
+export async function exportAnnotatedPdf(
+  sourcePath: string,
+  outputPath: string,
+  annotations: PageAnnotations[]
+): Promise<string> {
+  return invoke<string>("export_annotated_pdf", {
+    sourcePath,
+    outputPath,
+    annotations,
+  });
+}

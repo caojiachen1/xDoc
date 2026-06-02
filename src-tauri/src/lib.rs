@@ -6,7 +6,7 @@ use models_cat::{OpsError, Repo};
 use ndarray::{Array2, Array4};
 use ort::{session::Session, value::Tensor};
 use pdfium_render::prelude::*;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, State};
 #[allow(dead_code)]
 mod gguf_ocr;
 mod settings_db;
-use settings_db::{AiConfig, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
+use settings_db::{AiConfig, AnnotationRecord, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -1987,6 +1987,227 @@ fn paper_rename(old_path: String, new_title: String) -> Result<String, String> {
     Ok(final_path.to_string_lossy().to_string())
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Annotation persistence
+// ────────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct AnnotationSaveRequest {
+    file_path: String,
+    page_index: i32,
+    shapes_json: String,
+}
+
+#[tauri::command]
+fn annotation_save(req: AnnotationSaveRequest, db: State<'_, SettingsDb>) -> Result<(), String> {
+    db.save_annotations(&req.file_path, req.page_index, &req.shapes_json)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn annotation_load(file_path: String, db: State<'_, SettingsDb>) -> Result<Vec<AnnotationRecord>, String> {
+    db.load_annotations(&file_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn annotation_delete(file_path: String, db: State<'_, SettingsDb>) -> Result<(), String> {
+    db.delete_annotations(&file_path).map_err(|e| e.to_string())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Export annotations to a new PDF file
+// ────────────────────────────────────────────────────────────────────────
+
+/// One annotation shape from the frontend.
+#[derive(Deserialize, Debug, Clone)]
+struct ExportShape {
+    #[serde(rename = "type")]
+    shape_type: String,
+    points: Vec<ExportPoint>,
+    color: String,
+    size: f32,
+    text: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct ExportPoint {
+    x: f64,
+    y: f64,
+}
+
+/// Annotations for one page, received from the frontend.
+#[derive(Deserialize, Debug, Clone)]
+struct PageAnnotations {
+    page_index: i32,
+    shapes: Vec<ExportShape>,
+}
+
+/// Parse a hex color like "#FF3838" into (r, g, b) in 0..255.
+fn parse_hex_color(hex: &str) -> (u8, u8, u8) {
+    let h = hex.trim_start_matches('#');
+    let r = u8::from_str_radix(h.get(0..2).unwrap_or("00"), 16).unwrap_or(0);
+    let g = u8::from_str_radix(h.get(2..4).unwrap_or("00"), 16).unwrap_or(0);
+    let b = u8::from_str_radix(h.get(4..6).unwrap_or("00"), 16).unwrap_or(0);
+    (r, g, b)
+}
+
+#[tauri::command]
+async fn export_annotated_pdf(
+    source_path: String,
+    output_path: String,
+    annotations: Vec<PageAnnotations>,
+) -> Result<String, String> {
+    let src = Path::new(&source_path);
+    if !src.exists() {
+        return Err("Source PDF not found".to_string());
+    }
+
+    let sp = source_path.clone();
+    let op = output_path.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let bindings = bind_pdfium_with_candidates()?;
+        let pdfium = Pdfium::new(bindings);
+
+        // Copy source to output first, then open the copy for editing.
+        std::fs::copy(&sp, &op).map_err(|e| format!("Failed to copy PDF: {e}"))?;
+
+        let mut document = pdfium
+            .load_pdf_from_file(Path::new(&op), None)
+            .map_err(|e| format!("Failed to open PDF copy: {e}"))?;
+
+        let page_count = document.pages().len();
+
+        // Build a lookup: page_index -> shapes
+        let mut page_map: HashMap<i32, &Vec<ExportShape>> = HashMap::new();
+        for pa in &annotations {
+            if !pa.shapes.is_empty() {
+                page_map.insert(pa.page_index, &pa.shapes);
+            }
+        }
+
+        // Create Helvetica font token once (reusable across pages)
+        let helvetica = document
+            .fonts_mut()
+            .helvetica();
+
+        for pi in 0..page_count {
+            let mut page = document
+                .pages()
+                .get(pi as u16)
+                .map_err(|e| format!("Failed to get page {pi}: {e}"))?;
+
+            let page_w = page.width().value;
+            let page_h = page.height().value;
+
+            if let Some(shapes) = page_map.get(&(pi as i32)) {
+                for shape in shapes.iter() {
+                    let (r, g, b) = parse_hex_color(&shape.color);
+                    let stroke_w = PdfPoints::new(shape.size * 0.5);
+
+                    match shape.shape_type.as_str() {
+                        "freehand" | "eraser" => {
+                            if shape.points.len() < 2 {
+                                continue;
+                            }
+                            let color = if shape.shape_type == "eraser" {
+                                PdfColor::new(255, 255, 255, 255)
+                            } else {
+                                PdfColor::new(r, g, b, 255)
+                            };
+
+                            for i in 1..shape.points.len() {
+                                let pa = &shape.points[i - 1];
+                                let pb = &shape.points[i];
+                                let x1 = PdfPoints::new((pa.x as f32) * page_w);
+                                let y1 = PdfPoints::new((1.0 - pa.y as f32) * page_h);
+                                let x2 = PdfPoints::new((pb.x as f32) * page_w);
+                                let y2 = PdfPoints::new((1.0 - pb.y as f32) * page_h);
+                                let _ = page.objects_mut().create_path_object_line(
+                                    x1, y1, x2, y2, color, stroke_w,
+                                );
+                            }
+                        }
+                        "rect" => {
+                            if shape.points.len() < 2 {
+                                continue;
+                            }
+                            let p0 = &shape.points[0];
+                            let p1 = &shape.points[1];
+                            let left = (p0.x.min(p1.x) as f32) * page_w;
+                            let right = (p0.x.max(p1.x) as f32) * page_w;
+                            let top_pdf = (1.0 - p0.y.min(p1.y) as f32) * page_h;
+                            let bottom_pdf = (1.0 - p0.y.max(p1.y) as f32) * page_h;
+
+                            let rect = PdfRect::new(
+                                PdfPoints::new(bottom_pdf),
+                                PdfPoints::new(left),
+                                PdfPoints::new(top_pdf),
+                                PdfPoints::new(right),
+                            );
+                            let color = PdfColor::new(r, g, b, 255);
+                            let _ = page.objects_mut().create_path_object_rect(
+                                rect,
+                                Some(color),
+                                Some(stroke_w),
+                                None, // no fill
+                            );
+                        }
+                        "ellipse" => {
+                            if shape.points.len() < 2 {
+                                continue;
+                            }
+                            let p0 = &shape.points[0];
+                            let p1 = &shape.points[1];
+                            let cx = ((p0.x + p1.x) / 2.0) as f32 * page_w;
+                            let cy_pdf = (1.0 - (p0.y + p1.y) / 2.0) as f32 * page_h;
+                            let rx = ((p1.x - p0.x).abs() / 2.0) as f32 * page_w;
+                            let ry = ((p1.y - p0.y).abs() / 2.0) as f32 * page_h;
+                            if rx < 0.5 || ry < 0.5 {
+                                continue;
+                            }
+                            let color = PdfColor::new(r, g, b, 255);
+                            let _ = page.objects_mut().create_path_object_ellipse_at(
+                                PdfPoints::new(cx),
+                                PdfPoints::new(cy_pdf),
+                                PdfPoints::new(rx),
+                                PdfPoints::new(ry),
+                                Some(color),
+                                Some(stroke_w),
+                                None, // no fill
+                            );
+                        }
+                        "text" => {
+                            if let Some(ref txt) = shape.text {
+                                if txt.is_empty() {
+                                    continue;
+                                }
+                                let p0 = &shape.points[0];
+                                let x = PdfPoints::new((p0.x as f32) * page_w);
+                                let y = PdfPoints::new((1.0 - p0.y as f32) * page_h);
+                                let font_size = PdfPoints::new(shape.size * 4.0);
+
+                                let _ = page.objects_mut().create_text_object(
+                                    x, y, txt, helvetica, font_size,
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        document
+            .save_to_file(&op)
+            .map_err(|e| format!("Failed to save annotated PDF: {e}"))?;
+
+        Ok(op)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking error: {e}"))?
+}
+
 #[tauri::command]
 async fn extract_first_page_metadata(
     file_path: String,
@@ -2322,6 +2543,10 @@ pub fn run() {
             paper_delete,
             paper_get_managed_dir,
             paper_rename,
+            annotation_save,
+            annotation_load,
+            annotation_delete,
+            export_annotated_pdf,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

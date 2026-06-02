@@ -18,7 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Undo2, Redo2, Trash2, Download } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
@@ -34,6 +34,11 @@ import {
   renamePaper,
   recordToPaperInfo,
   paperInfoToRecord,
+  annotationSave,
+  annotationLoad,
+  annotationDelete,
+  exportAnnotatedPdf,
+  type PageAnnotations,
 } from "./utils/paperDb";
 import "./App.css";
 
@@ -132,7 +137,22 @@ const COLORS = [
 
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
 type DragMode = "move" | "select";
+type AnnotationTool = "pen" | "eraser" | "text" | "rect" | "ellipse" | null;
+type EraserMode = "free" | "stroke";
 type TopMenuKey = "file" | "settings" | "help" | null;
+
+interface AnnotationShape {
+  id: string;
+  type: "freehand" | "eraser" | "rect" | "ellipse" | "text";
+  /** Normalized coordinates (0–1) relative to image dimensions */
+  points: { x: number; y: number }[];
+  color: string;
+  size: number;
+  text?: string;
+  /** For text: normalized width/height of the bounding box */
+  width?: number;
+  height?: number;
+}
 
 export const STORAGE_KEYS = {
   modelPath: "xdoc.settings.modelPath",
@@ -155,6 +175,15 @@ interface TabInfo {
 }
 
 const HOME_TAB_ID = "home";
+
+// Custom eraser cursor — SVG of a tilted eraser, hotspot at the contact tip
+const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="30" viewBox="0 0 20 30">'
+  + '<path d="M13,1 L19,7 L9,17 L3,11 Z" fill="%23fce4ec" stroke="%23666" stroke-width="1" stroke-linejoin="round"/>'
+  + '<path d="M3,11 L9,17 L5,21 L1,17 Z" fill="%23ef9a9a" stroke="%23666" stroke-width="1" stroke-linejoin="round"/>'
+  + '<line x1="6" y1="4" x2="16" y2="14" stroke="white" stroke-width="1" opacity="0.35"/>'
+  + '</svg>'
+)}") 6 22, auto`;
 
 function App() {
   const [environmentReady, setEnvironmentReady] = useState(false);
@@ -202,6 +231,23 @@ function App() {
   const [sidebarLoading, setSidebarLoading] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(220);
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
+
+  // ── Annotation State ──────────────────────────────────────────────────────
+  const [annotationMode, setAnnotationMode] = useState<AnnotationTool>(null);
+  const [annotationColor, setAnnotationColor] = useState("#FF3838");
+  const [annotationSize, setAnnotationSize] = useState(2);
+  const [annotations, setAnnotations] = useState<AnnotationShape[]>([]);
+  const [annotationHistory, setAnnotationHistory] = useState<AnnotationShape[][]>([]);
+  const [annotationRedoStack, setAnnotationRedoStack] = useState<AnnotationShape[][]>([]);
+  /** Annotations stored per page, keyed by page index */
+  const pageAnnotationsRef = useRef<Map<number, AnnotationShape[]>>(new Map());
+  const annotationPageRef = useRef(0);
+  const annotationCanvasRef = useRef<HTMLCanvasElement>(null);
+  const annotationDrawingRef = useRef(false);
+  const annotationCurrentShapeRef = useRef<AnnotationShape | null>(null);
+  const [eraserMode, setEraserMode] = useState<EraserMode>("free");
+  /** Debounce timer for auto-saving annotations to DB */
+  const annotationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(true);
@@ -761,6 +807,13 @@ function App() {
     setThumbnails([]);
     setOutlineItems([]);
     setSidebarOpen(false);
+    // Clear annotation state
+    setAnnotationMode(null);
+    setAnnotations([]);
+    setAnnotationHistory([]);
+    setAnnotationRedoStack([]);
+    pageAnnotationsRef.current.clear();
+    annotationPageRef.current = 0;
   };
 
   const applyScoreThreshold = async (nextThreshold: number) => {
@@ -1243,6 +1296,396 @@ function App() {
     document.addEventListener("mouseup", onMouseUp);
   }, [sidebarWidth]);
 
+  // ── Annotation Handlers ────────────────────────────────────────────────────
+  const pushAnnotationState = useCallback((newAnnotations: AnnotationShape[]) => {
+    setAnnotationHistory(prev => [...prev.slice(-100), annotations]);
+    setAnnotationRedoStack([]);
+    setAnnotations(newAnnotations);
+    pageAnnotationsRef.current.set(annotationPageRef.current, newAnnotations);
+  }, [annotations]);
+
+  const handleAnnotationUndo = useCallback(() => {
+    setAnnotationHistory(prev => {
+      if (prev.length === 0) return prev;
+      const newHistory = [...prev];
+      const lastState = newHistory.pop()!;
+      setAnnotationRedoStack(r => [...r, annotations]);
+      setAnnotations(lastState);
+      pageAnnotationsRef.current.set(annotationPageRef.current, lastState);
+      return newHistory;
+    });
+  }, [annotations]);
+
+  const handleAnnotationRedo = useCallback(() => {
+    setAnnotationRedoStack(prev => {
+      if (prev.length === 0) return prev;
+      const newStack = [...prev];
+      const nextState = newStack.pop()!;
+      setAnnotationHistory(h => [...h, annotations]);
+      setAnnotations(nextState);
+      pageAnnotationsRef.current.set(annotationPageRef.current, nextState);
+      return newStack;
+    });
+  }, [annotations]);
+
+  const handleAnnotationModeChange = useCallback((mode: AnnotationTool) => {
+    // Cancel any in-progress drawing before switching tool
+    annotationDrawingRef.current = false;
+    annotationCurrentShapeRef.current = null;
+    setAnnotationMode(prev => prev === mode ? null : mode);
+  }, []);
+
+  // ── Annotation Auto-save (debounced) ──────────────────────────────────────
+  useEffect(() => {
+    if (!documentPath) return;
+    // Cancel previous timer
+    if (annotationSaveTimerRef.current) {
+      clearTimeout(annotationSaveTimerRef.current);
+    }
+    annotationSaveTimerRef.current = setTimeout(() => {
+      if (documentPath) {
+        annotationSave(documentPath, pdfPageIndex, JSON.stringify(annotations)).catch(e =>
+          console.error("Failed to save annotations:", e)
+        );
+      }
+    }, 800);
+    return () => {
+      if (annotationSaveTimerRef.current) clearTimeout(annotationSaveTimerRef.current);
+    };
+  }, [annotations, documentPath, pdfPageIndex]);
+
+  // ── Load annotations when document opens ──────────────────────────────────
+  useEffect(() => {
+    if (!documentPath) return;
+    annotationLoad(documentPath)
+      .then(records => {
+        const map = new Map<number, AnnotationShape[]>();
+        for (const rec of records) {
+          try {
+            map.set(rec.page_index, JSON.parse(rec.shapes_json));
+          } catch { /* skip bad records */ }
+        }
+        pageAnnotationsRef.current = map;
+        annotationPageRef.current = pdfPageIndex;
+        setAnnotations(map.get(pdfPageIndex) ?? []);
+      })
+      .catch(e => console.error("Failed to load annotations:", e));
+  }, [documentPath]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Clear all annotations ─────────────────────────────────────────────────
+  const handleClearAnnotations = useCallback(() => {
+    if (!documentPath) return;
+    setAnnotations([]);
+    setAnnotationHistory([]);
+    setAnnotationRedoStack([]);
+    pageAnnotationsRef.current.clear();
+    annotationDelete(documentPath).catch(e =>
+      console.error("Failed to delete annotations:", e)
+    );
+  }, [documentPath]);
+
+  // ── Export annotations to PDF ─────────────────────────────────────────────
+  const [exporting, setExporting] = useState(false);
+  const handleExportAnnotations = useCallback(async () => {
+    if (!documentPath || exporting) return;
+    setExporting(true);
+    try {
+      // Build PageAnnotations array from the ref map
+      const pageAnns: PageAnnotations[] = [];
+      pageAnnotationsRef.current.forEach((shapes, pageIdx) => {
+        if (shapes.length > 0) {
+          pageAnns.push({
+            page_index: pageIdx,
+            shapes: shapes.map(s => ({
+              type: s.type,
+              points: s.points,
+              color: s.color,
+              size: s.size,
+              text: s.text,
+            })),
+          });
+        }
+      });
+      if (pageAnns.length === 0) {
+        setErrorMessage("没有标注可导出");
+        return;
+      }
+      // Ask user for save location via Tauri dialog
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const dest = await save({
+        defaultPath: documentPath.replace(/\.pdf$/i, "_annotated.pdf"),
+        filters: [{ name: "PDF", extensions: ["pdf"] }],
+      });
+      if (!dest) return;
+      await exportAnnotatedPdf(documentPath, dest, pageAnns);
+      setErrorMessage("");
+    } catch (e) {
+      setErrorMessage(`导出失败: ${e}`);
+    } finally {
+      setExporting(false);
+    }
+  }, [documentPath, exporting]);
+
+  // ── Stroke eraser: click to remove an entire stroke ───────────────────────
+  const handleStrokeErase = useCallback((nx: number, ny: number) => {
+    const threshold = 0.02; // ~2% of image size
+
+    // Minimum distance from point (px,py) to line segment (ax,ay)-(bx,by)
+    const segDist = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
+      const dx = bx - ax, dy = by - ay;
+      const lenSq = dx * dx + dy * dy;
+      if (lenSq === 0) return Math.hypot(px - ax, py - ay);
+      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    };
+
+    for (let i = annotations.length - 1; i >= 0; i--) {
+      const shape = annotations[i];
+      if (shape.type === "text" || shape.type === "rect" || shape.type === "ellipse") continue;
+
+      let hit = false;
+      // Check distance to each point
+      for (const pt of shape.points) {
+        if (Math.hypot(pt.x - nx, pt.y - ny) < threshold) { hit = true; break; }
+      }
+      // Check distance to line segments between consecutive points
+      if (!hit) {
+        for (let j = 1; j < shape.points.length; j++) {
+          const a = shape.points[j - 1], b = shape.points[j];
+          if (segDist(nx, ny, a.x, a.y, b.x, b.y) < threshold) { hit = true; break; }
+        }
+      }
+      if (hit) {
+        const newAnnotations = annotations.filter((_, idx) => idx !== i);
+        pushAnnotationState(newAnnotations);
+        return;
+      }
+    }
+  }, [annotations, pushAnnotationState]);
+
+  // ── Annotation Canvas Setup ────────────────────────────────────────────────
+  const setupAnnotationCanvas = useCallback(() => {
+    const canvas = annotationCanvasRef.current;
+    if (!canvas || displaySize.width === 0 || displaySize.height === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = displaySize.width * dpr;
+    canvas.height = displaySize.height * dpr;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Redraw all annotations (stored in normalized 0–1 coordinates)
+    annotations.forEach(shape => drawAnnotationShape(ctx, shape, displaySize));
+
+    function drawAnnotationShape(c: CanvasRenderingContext2D, s: AnnotationShape, ds: { width: number; height: number }) {
+      c.strokeStyle = s.color;
+      c.fillStyle = s.color;
+      c.lineWidth = s.size;
+      c.lineCap = "round";
+      c.lineJoin = "round";
+      if (s.type === "eraser") {
+        c.globalCompositeOperation = "destination-out";
+        c.strokeStyle = "rgba(0,0,0,1)";
+      } else {
+        c.globalCompositeOperation = "source-over";
+      }
+      if ((s.type === "freehand" || s.type === "eraser") && s.points.length > 0) {
+        c.beginPath();
+        c.moveTo(s.points[0].x * ds.width, s.points[0].y * ds.height);
+        for (let i = 1; i < s.points.length; i++) {
+          c.lineTo(s.points[i].x * ds.width, s.points[i].y * ds.height);
+        }
+        c.stroke();
+      } else if (s.type === "rect" && s.points.length >= 2) {
+        const x = s.points[0].x * ds.width;
+        const y = s.points[0].y * ds.height;
+        const w = (s.points[1].x - s.points[0].x) * ds.width;
+        const h = (s.points[1].y - s.points[0].y) * ds.height;
+        c.strokeRect(x, y, w, h);
+      } else if (s.type === "ellipse" && s.points.length >= 2) {
+        const cx = ((s.points[0].x + s.points[1].x) / 2) * ds.width;
+        const cy = ((s.points[0].y + s.points[1].y) / 2) * ds.height;
+        const rx = Math.abs(s.points[1].x - s.points[0].x) / 2 * ds.width;
+        const ry = Math.abs(s.points[1].y - s.points[0].y) / 2 * ds.height;
+        c.beginPath();
+        c.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
+        c.stroke();
+      } else if (s.type === "text" && s.text) {
+        c.globalCompositeOperation = "source-over";
+        c.font = `${s.size * 8}px sans-serif`;
+        c.textBaseline = "top";
+        c.fillText(s.text, s.points[0].x * ds.width, s.points[0].y * ds.height);
+      }
+      c.globalCompositeOperation = "source-over";
+    }
+  }, [annotations, displaySize]);
+
+  // Redraw canvas whenever displaySize or annotations change
+  useEffect(() => { setupAnnotationCanvas(); }, [setupAnnotationCanvas]);
+
+  // Save annotations when switching away from current page
+  useEffect(() => {
+    pageAnnotationsRef.current.set(annotationPageRef.current, annotations);
+    annotationPageRef.current = pdfPageIndex;
+    setAnnotations(pageAnnotationsRef.current.get(pdfPageIndex) ?? []);
+    setAnnotationHistory([]);
+    setAnnotationRedoStack([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pdfPageIndex]);
+
+  // Canvas pointer handlers for annotation drawing
+  const handleAnnotationPointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!annotationMode) return;
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
+
+    // Stroke eraser: click to remove an entire stroke
+    if (annotationMode === "eraser" && eraserMode === "stroke") {
+      handleStrokeErase(nx, ny);
+      return;
+    }
+
+    annotationDrawingRef.current = true;
+    canvas.setPointerCapture(e.pointerId);
+
+    if (annotationMode === "text") {
+      annotationDrawingRef.current = false;
+      canvas.releasePointerCapture(e.pointerId);
+      // Prevent duplicate textareas
+      if (canvas.parentElement?.querySelector("textarea[data-ann-text]")) return;
+      const textarea = document.createElement("textarea");
+      textarea.setAttribute("data-ann-text", "");
+      Object.assign(textarea.style, {
+        position: "absolute",
+        left: `${nx * 100}%`,
+        top: `${ny * 100}%`,
+        color: annotationColor,
+        fontSize: `${annotationSize * 8}px`,
+        fontFamily: "sans-serif",
+        background: "transparent",
+        border: "1px solid #000",
+        outline: "none",
+        zIndex: "20",
+        minWidth: "120px",
+        minHeight: "28px",
+        resize: "both",
+        overflow: "hidden",
+        padding: "2px",
+      });
+      canvas.parentElement?.appendChild(textarea);
+      // Defer focus to next frame so pointer capture release takes effect
+      requestAnimationFrame(() => textarea.focus());
+      const finish = () => {
+        const text = textarea.value.trim();
+        if (text) {
+          const shape: AnnotationShape = {
+            id: `a-${Date.now()}`,
+            type: "text",
+            points: [{ x: nx, y: ny }],
+            color: annotationColor,
+            size: annotationSize,
+            text,
+          };
+          pushAnnotationState([...annotations, shape]);
+        }
+        textarea.remove();
+      };
+      textarea.addEventListener("blur", finish, { once: true });
+      return;
+    }
+
+    const typeMap = { pen: "freehand" as const, eraser: "eraser" as const, rect: "rect" as const, ellipse: "ellipse" as const };
+    annotationCurrentShapeRef.current = {
+      id: `a-${Date.now()}`,
+      type: typeMap[annotationMode],
+      points: [{ x: nx, y: ny }],
+      color: annotationColor,
+      size: annotationSize,
+    };
+  }, [annotationMode, annotationColor, annotationSize, annotations, pushAnnotationState, eraserMode, handleStrokeErase]);
+
+  const handleAnnotationPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!annotationDrawingRef.current || !annotationCurrentShapeRef.current || !annotationMode) return;
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const nx = (e.clientX - rect.left) / rect.width;
+    const ny = (e.clientY - rect.top) / rect.height;
+    const shape = annotationCurrentShapeRef.current;
+
+    if (shape.type === "freehand" || shape.type === "eraser") {
+      shape.points.push({ x: nx, y: ny });
+    } else {
+      shape.points = [shape.points[0], { x: nx, y: ny }];
+    }
+
+    // Live preview: redraw committed annotations + current stroke
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const all = [...annotations, shape];
+    all.forEach(s => {
+      ctx.strokeStyle = s.color;
+      ctx.fillStyle = s.color;
+      ctx.lineWidth = s.size;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      if (s.type === "eraser") {
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.strokeStyle = "rgba(0,0,0,1)";
+      } else {
+        ctx.globalCompositeOperation = "source-over";
+      }
+      if ((s.type === "freehand" || s.type === "eraser") && s.points.length > 0) {
+        ctx.beginPath();
+        ctx.moveTo(s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
+        for (let i = 1; i < s.points.length; i++) {
+          ctx.lineTo(s.points[i].x * displaySize.width, s.points[i].y * displaySize.height);
+        }
+        ctx.stroke();
+      } else if (s.type === "rect" && s.points.length >= 2) {
+        const x = s.points[0].x * displaySize.width;
+        const y = s.points[0].y * displaySize.height;
+        const w = (s.points[1].x - s.points[0].x) * displaySize.width;
+        const h = (s.points[1].y - s.points[0].y) * displaySize.height;
+        ctx.strokeRect(x, y, w, h);
+      } else if (s.type === "ellipse" && s.points.length >= 2) {
+        const cx = ((s.points[0].x + s.points[1].x) / 2) * displaySize.width;
+        const cy = ((s.points[0].y + s.points[1].y) / 2) * displaySize.height;
+        const rx = Math.abs(s.points[1].x - s.points[0].x) / 2 * displaySize.width;
+        const ry = Math.abs(s.points[1].y - s.points[0].y) / 2 * displaySize.height;
+        ctx.beginPath();
+        ctx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (s.type === "text" && s.text) {
+        ctx.globalCompositeOperation = "source-over";
+        ctx.font = `${s.size * 8}px sans-serif`;
+        ctx.textBaseline = "top";
+        ctx.fillText(s.text, s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
+      }
+      ctx.globalCompositeOperation = "source-over";
+    });
+  }, [annotationMode, annotations, displaySize]);
+
+  const handleAnnotationPointerUp = useCallback(() => {
+    if (!annotationDrawingRef.current || !annotationCurrentShapeRef.current) return;
+    annotationDrawingRef.current = false;
+    const shape = annotationCurrentShapeRef.current;
+    annotationCurrentShapeRef.current = null;
+    // Skip empty shapes: freehand/eraser with <2 points, or rect/ellipse with zero area
+    if ((shape.type === "freehand" || shape.type === "eraser") && shape.points.length < 2) return;
+    if ((shape.type === "rect" || shape.type === "ellipse") && shape.points.length >= 2) {
+      const dx = Math.abs(shape.points[1].x - shape.points[0].x);
+      const dy = Math.abs(shape.points[1].y - shape.points[0].y);
+      if (dx < 0.001 && dy < 0.001) return;
+    }
+    pushAnnotationState([...annotations, shape]);
+  }, [annotations, pushAnnotationState]);
+
   // Drag-to-pan (move mode) — uses Pointer Events + setPointerCapture for reliability
   useEffect(() => {
     const stage = stageRef.current;
@@ -1253,6 +1696,8 @@ function App() {
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest(".pdf-toolbar") || target.closest(".page-arrow")) return;
+      // Don't pan when annotating
+      if (annotationMode) return;
 
       // Prevent browser default image drag behavior from stealing mouseup
       e.preventDefault();
@@ -1305,7 +1750,7 @@ function App() {
         capturedPointerId = null;
       }
     };
-  }, [dragMode, activeTabId]);
+  }, [dragMode, activeTabId, annotationMode]);
 
   const scale = useMemo(() => {
     if (imageSize.width === 0 || imageSize.height === 0) {
@@ -2348,6 +2793,135 @@ function App() {
                         title="框选模式 - 选择内容"
                       />
                     </div>
+                    <div className="pdf-toolbar-separator" />
+                    <div className="pdf-toolbar-group">
+                      <Button
+                        appearance={annotationMode === "pen" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "pen" ? "toolbar-btn-active" : ""}`}
+                        icon={<Pencil size={15} />}
+                        onClick={() => handleAnnotationModeChange("pen")}
+                        title="画笔"
+                      />
+                      <Button
+                        appearance={annotationMode === "rect" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "rect" ? "toolbar-btn-active" : ""}`}
+                        icon={<Square size={15} />}
+                        onClick={() => handleAnnotationModeChange("rect")}
+                        title="矩形"
+                      />
+                      <Button
+                        appearance={annotationMode === "ellipse" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "ellipse" ? "toolbar-btn-active" : ""}`}
+                        icon={<Circle size={15} />}
+                        onClick={() => handleAnnotationModeChange("ellipse")}
+                        title="椭圆"
+                      />
+                      <Button
+                        appearance={annotationMode === "text" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "text" ? "toolbar-btn-active" : ""}`}
+                        icon={<Type size={15} />}
+                        onClick={() => handleAnnotationModeChange("text")}
+                        title="文字标注"
+                      />
+                      <Button
+                        appearance={annotationMode === "eraser" ? "subtle" : "transparent"}
+                        size="small"
+                        className={`toolbar-btn ${annotationMode === "eraser" ? "toolbar-btn-active" : ""}`}
+                        icon={<Eraser size={15} />}
+                        onClick={() => handleAnnotationModeChange("eraser")}
+                        title="橡皮擦"
+                      />
+                      {annotationMode === "eraser" && (
+                        <div className="eraser-mode-toggle">
+                          <button
+                            className={`eraser-mode-btn ${eraserMode === "free" ? "active" : ""}`}
+                            onClick={() => setEraserMode("free")}
+                            title="自由擦除 — 按轨迹擦除"
+                          >自由</button>
+                          <button
+                            className={`eraser-mode-btn ${eraserMode === "stroke" ? "active" : ""}`}
+                            onClick={() => setEraserMode("stroke")}
+                            title="整条擦除 — 点击删除整条笔画"
+                          >整条</button>
+                        </div>
+                      )}
+                    </div>
+                    {annotationMode && (
+                      <>
+                        <div className="pdf-toolbar-separator" />
+                        <div className="pdf-toolbar-group annotation-controls">
+                          {annotationMode !== "eraser" && (
+                            <>
+                              <div className="annotation-color-swatches">
+                                {["#FF3838", "#4D96FF", "#48F90A", "#FFB21D", "#C084FC", "#FFFFFF"].map(c => (
+                                  <div
+                                    key={c}
+                                    className={`annotation-swatch ${annotationColor === c ? "annotation-swatch-active" : ""}`}
+                                    style={{ background: c }}
+                                    onClick={() => setAnnotationColor(c)}
+                                  />
+                                ))}
+                              </div>
+                              <select
+                                className="annotation-size-select"
+                                value={annotationSize}
+                                onChange={e => setAnnotationSize(Number(e.target.value))}
+                              >
+                                <option value={1}>细</option>
+                                <option value={2}>中</option>
+                                <option value={4}>粗</option>
+                                <option value={6}>特粗</option>
+                              </select>
+                            </>
+                          )}
+                        </div>
+                        <div className="pdf-toolbar-separator" />
+                        <div className="pdf-toolbar-group">
+                          <Button
+                            appearance="transparent"
+                            size="small"
+                            className="toolbar-btn"
+                            icon={<Undo2 size={15} />}
+                            onClick={handleAnnotationUndo}
+                            disabled={annotationHistory.length === 0}
+                            title="撤销"
+                          />
+                          <Button
+                            appearance="transparent"
+                            size="small"
+                            className="toolbar-btn"
+                            icon={<Redo2 size={15} />}
+                            onClick={handleAnnotationRedo}
+                            disabled={annotationRedoStack.length === 0}
+                            title="重做"
+                          />
+                        </div>
+                        <div className="pdf-toolbar-separator" />
+                        <div className="pdf-toolbar-group">
+                          <Button
+                            appearance="transparent"
+                            size="small"
+                            className="toolbar-btn"
+                            icon={<Trash2 size={15} />}
+                            onClick={handleClearAnnotations}
+                            title="清空所有标注"
+                          />
+                          <Button
+                            appearance="transparent"
+                            size="small"
+                            className="toolbar-btn"
+                            icon={<Download size={15} />}
+                            onClick={handleExportAnnotations}
+                            disabled={exporting}
+                            title="导出标注到新 PDF"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                 )}
 
@@ -2452,6 +3026,8 @@ function App() {
                   className={`visual-stage ${!previewSrc ? "visual-stage-empty" : ""} ${dragMode === "move" && previewSrc ? "visual-stage-move" : ""}`}
                   onClick={(e) => {
                     if (justDraggedRef.current) return;
+                    // Don't clear selection when annotating
+                    if (annotationMode) return;
                     // Only trigger on clicks directly on the stage or image-wrap (blank area)
                     const target = e.target as HTMLElement;
                     if (target.closest(".bbox")) return;
@@ -2593,6 +3169,30 @@ function App() {
                           );
                         })}
                       </div>
+                      {/* Annotation canvas overlay — sits above bboxes */}
+                      <canvas
+                        ref={annotationCanvasRef}
+                        className="annotation-canvas"
+                        style={{
+                          width: displaySize.width,
+                          height: displaySize.height,
+                          pointerEvents: annotationMode ? "auto" : "none",
+                          cursor: annotationMode
+                            ? annotationMode === "text"
+                              ? "text"
+                              : annotationMode === "eraser"
+                                ? ERASER_CURSOR
+                                : "crosshair"
+                            : undefined,
+                        }}
+                        onPointerDown={handleAnnotationPointerDown}
+                        onPointerMove={handleAnnotationPointerMove}
+                        onPointerUp={handleAnnotationPointerUp}
+                        onPointerCancel={() => {
+                          annotationDrawingRef.current = false;
+                          annotationCurrentShapeRef.current = null;
+                        }}
+                      />
                     </div>
                   ) : (
                     <div className="empty-state">

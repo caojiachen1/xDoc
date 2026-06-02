@@ -34,6 +34,14 @@ pub struct SettingEntry {
     pub value: String,
 }
 
+/// An annotation record stored per page.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AnnotationRecord {
+    pub file_path: String,
+    pub page_index: i32,
+    pub shapes_json: String,
+}
+
 /// A paper record stored in the papers table.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct PaperRecord {
@@ -133,6 +141,20 @@ impl SettingsDb {
             [],
         )
         .map_err(|e| anyhow::anyhow!("创建 papers 表失败: {e}"))?;
+
+        // Annotations table — stores per-page annotation shapes
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS annotations (
+                file_path     TEXT    NOT NULL,
+                page_index    INTEGER NOT NULL,
+                shapes_json   TEXT    NOT NULL,
+                created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                updated_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (file_path, page_index)
+             )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("创建 annotations 表失败: {e}"))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -343,5 +365,49 @@ impl SettingsDb {
         } else {
             Ok(None)
         }
+    }
+
+    // ── Annotation CRUD ─────────────────────────────────────────────────────
+
+    /// Insert or update annotation shapes for a specific page.
+    pub fn save_annotations(&self, file_path: &str, page_index: i32, shapes_json: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO annotations (file_path, page_index, shapes_json, created_at, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'), datetime('now'))
+             ON CONFLICT(file_path, page_index) DO UPDATE SET
+                shapes_json = excluded.shapes_json,
+                updated_at  = datetime('now')",
+            params![file_path, page_index, shapes_json],
+        )?;
+        Ok(())
+    }
+
+    /// Load all annotation records for a document.
+    pub fn load_annotations(&self, file_path: &str) -> Result<Vec<AnnotationRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT file_path, page_index, shapes_json FROM annotations
+             WHERE file_path = ?1 ORDER BY page_index",
+        )?;
+        let rows = stmt.query_map(params![file_path], |row| {
+            Ok(AnnotationRecord {
+                file_path: row.get(0)?,
+                page_index: row.get(1)?,
+                shapes_json: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete all annotation records for a document.
+    pub fn delete_annotations(&self, file_path: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM annotations WHERE file_path = ?1", params![file_path])?;
+        Ok(())
     }
 }
