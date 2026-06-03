@@ -188,6 +188,79 @@ const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
   + '</svg>'
 )}") 6 22, auto`;
 
+// Merge adjacent text spans on the same line within the pdfjs TextLayer
+// to prevent ::selection highlight overlap at word boundaries (visible on titles).
+// Each PDF text item is rendered as a separate absolutely-positioned <span> by pdfjs.
+// When spans have --scale-x transforms, their visual bounds can extend beyond layout
+// bounds, causing semi-transparent selection backgrounds to stack at word gaps.
+// Merging same-line spans into one eliminates these internal boundaries.
+function mergeTextLayerSpans(container: HTMLElement) {
+  const spans = Array.from(
+    container.querySelectorAll(
+      ":scope > span:not(.markedContent), :scope > .markedContent > span:not(.markedContent)"
+    )
+  ) as HTMLElement[];
+  if (spans.length <= 1) return;
+
+  const containerH = container.offsetHeight || 1;
+  const containerW = container.offsetWidth || 1;
+
+  // pdfjs positions spans with percentage left/top — convert to px for comparison
+  const pctToPxTop = (v: string) => (parseFloat(v) || 0) / 100 * containerH;
+  const pctToPxLeft = (v: string) => (parseFloat(v) || 0) / 100 * containerW;
+
+  // Shared canvas for measuring merged text width
+  const measureCanvas = document.createElement("canvas");
+  const measureCtx = measureCanvas.getContext("2d")!;
+
+  let groupFirst: HTMLElement | null = null;
+  let groupTopPx = 0;
+  let groupRightPx = 0;
+  let groupText = "";
+
+  const flushGroup = () => {
+    if (!groupFirst) return;
+    groupFirst.textContent = groupText;
+
+    // Measure merged text at natural size to compute scaleX
+    const cs = getComputedStyle(groupFirst);
+    measureCtx.font = `${cs.fontWeight} ${cs.fontStyle} ${cs.fontSize} ${cs.fontFamily}`;
+    const measured = measureCtx.measureText(groupText).width;
+    const leftPx = pctToPxLeft(groupFirst.style.left);
+    const targetWidth = groupRightPx - leftPx;
+    if (measured > 0 && targetWidth > 0) {
+      groupFirst.style.setProperty("--scale-x", String(targetWidth / measured));
+    } else {
+      groupFirst.style.removeProperty("--scale-x");
+    }
+    groupFirst = null;
+  };
+
+  for (const span of spans) {
+    const topPx = pctToPxTop(span.style.top);
+    const leftPx = pctToPxLeft(span.style.left);
+    const layoutWidth = span.offsetWidth; // layout width (excludes CSS transform)
+    const rightPx = leftPx + layoutWidth;
+
+    if (groupFirst && Math.abs(topPx - groupTopPx) < 2) {
+      // Same line (within 2px) — absorb into merged group
+      const gap = Math.max(0, leftPx - groupRightPx);
+      const cs = getComputedStyle(span);
+      const spaceWidth = parseFloat(cs.fontSize) / 4 || 4;
+      groupText += " ".repeat(Math.max(0, Math.round(gap / spaceWidth))) + (span.textContent || "");
+      groupRightPx = Math.max(groupRightPx, rightPx);
+      span.remove();
+    } else {
+      flushGroup();
+      groupFirst = span;
+      groupTopPx = topPx;
+      groupRightPx = rightPx;
+      groupText = span.textContent || "";
+    }
+  }
+  flushGroup();
+}
+
 // Register pdfjs worker on global scope (fake-worker mode for Tauri webview)
 (globalThis as Record<string, unknown>).pdfjsWorker = pdfjsWorker;
 
@@ -1158,6 +1231,7 @@ function App() {
         });
         textLayerInstanceRef.current = textLayer;
         await textLayer.render();
+        if (!cancelled) mergeTextLayerSpans(container);
       } catch (e) {
         if (!cancelled) console.warn("[TextLayer] render failed:", e);
       }
