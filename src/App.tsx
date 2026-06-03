@@ -24,7 +24,7 @@ import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, Chevr
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
-import SettingsDialog, { VENDOR_PRESETS, type LlmSettings } from "./components/SettingsDialog";
+import SettingsDialog, { VENDOR_PRESETS, FONT_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import HomePage, { type PaperInfo } from "./components/HomePage";
 import { extractMetadataEnhanced } from "./utils/pdfMetadata";
@@ -168,6 +168,8 @@ export const STORAGE_KEYS = {
   llmModel: "xdoc.settings.llm.model",
   textFontSize: "xdoc.settings.textFontSize",
   aiFontSize: "xdoc.settings.aiFontSize",
+  textFontFamily: "xdoc.settings.textFontFamily",
+  aiFontFamily: "xdoc.settings.aiFontFamily",
 } as const;
 
 interface TabInfo {
@@ -376,6 +378,8 @@ function App() {
   // Font size state
   const [textFontSize, setTextFontSize] = useState(15);
   const [aiFontSize, setAiFontSize] = useState(14);
+  const [textFontFamily, setTextFontFamily] = useState(FONT_PRESETS[0].value);
+  const [aiFontFamily, setAiFontFamily] = useState(FONT_PRESETS[0].value);
 
   // Resize state
   const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
@@ -1045,6 +1049,12 @@ function App() {
         setAiFontSize(Math.max(10, Math.min(40, savedAiFontSize)));
       }
 
+      // Font family settings
+      const savedTextFontFamily = readStr("ui.textFontFamily", "");
+      if (savedTextFontFamily) setTextFontFamily(savedTextFontFamily);
+      const savedAiFontFamily = readStr("ui.aiFontFamily", "");
+      if (savedAiFontFamily) setAiFontFamily(savedAiFontFamily);
+
       // LLM settings — bootstrap with the JSON helper, then fall back to presets.
       const savedLlmVendor = readStr("llm.vendor", "deepseek");
       let savedVendorApiKeys: Record<string, string> = {};
@@ -1141,6 +1151,18 @@ function App() {
     void invoke("db_set_setting", { key: "ui.aiFontSize", value: String(aiFontSize) })
       .catch((e) => console.warn("[settings] persist ui.aiFontSize failed:", e));
   }, [aiFontSize, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    void invoke("db_set_setting", { key: "ui.textFontFamily", value: textFontFamily })
+      .catch((e) => console.warn("[settings] persist ui.textFontFamily failed:", e));
+  }, [textFontFamily, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
+    void invoke("db_set_setting", { key: "ui.aiFontFamily", value: aiFontFamily })
+      .catch((e) => console.warn("[settings] persist ui.aiFontFamily failed:", e));
+  }, [aiFontFamily, environmentReady]);
 
   // Initialize OCR backend when enabled and model path is set
   useEffect(() => {
@@ -3542,7 +3564,8 @@ function App() {
                 <>
               <div className="text-pane" onMouseUp={handleTextSelection} style={{
                 height: topPaneHeight,
-                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none"
+                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none",
+                fontFamily: textFontFamily
               }}>
                 {/* ── Header with batch AI action buttons ── */}
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
@@ -3659,7 +3682,7 @@ function App() {
                 </>
               )}
 
-              <div className="ai-pane" style={selectMode === "text" ? { flex: 1 } : {}}>
+              <div className="ai-pane" style={selectMode === "text" ? { flex: 1, fontFamily: aiFontFamily } : { fontFamily: aiFontFamily }}>
                 <div className="ai-pane-scroll" ref={aiScrollRef}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
                     <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
@@ -3767,6 +3790,14 @@ function App() {
         onScoreThresholdChange={applyScoreThreshold}
         onZoomModeChange={setZoomMode}
         onPdfTextExtractionEnabledChange={setPdfTextExtractionEnabled}
+        textFontFamily={textFontFamily}
+        onTextFontFamilyChange={setTextFontFamily}
+        textFontSize={textFontSize}
+        onTextFontSizeChange={setTextFontSize}
+        aiFontFamily={aiFontFamily}
+        onAiFontFamilyChange={setAiFontFamily}
+        aiFontSize={aiFontSize}
+        onAiFontSizeChange={setAiFontSize}
         ocrEnabled={ocrEnabled}
         onOcrEnabledChange={setOcrEnabled}
         ocrModelPath={ocrModelPath}

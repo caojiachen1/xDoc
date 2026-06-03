@@ -716,7 +716,7 @@
   line-height: 1.7;
   color: #ffffff;
   word-break: break-word;
-  font-family: "Times New Roman", SimSun, serif;
+  /* font-family inherited from parent .text-pane via inline style */
 }
 
 .ocr-latex-content .katex-display {
@@ -825,7 +825,7 @@
   word-break: break-word;
   overflow-wrap: break-word;
   color: #ffffff;
-  font-family: "Times New Roman", SimSun, serif;
+  /* font-family inherited from parent .ai-pane via inline style */
 }
 
 .ai-markdown-content p {

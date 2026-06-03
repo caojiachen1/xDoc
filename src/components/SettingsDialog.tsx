@@ -9,7 +9,6 @@ import {
   ProgressBar,
   Spinner,
   Text,
-  Divider,
   Slider,
   Dropdown,
   Option,
@@ -19,12 +18,13 @@ import {
   Scan24Regular,
   Dismiss24Regular,
   BrainCircuit24Regular,
+  TextFont24Regular,
 } from "@fluentui/react-icons";
 import "./SettingsDialog.css";
 
 /* ── types ─────────────────────────────────────────────── */
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
-type SettingsSection = "general" | "ocr" | "llm";
+type SettingsSection = "general" | "appearance" | "ocr" | "llm";
 
 interface DownloadProgress {
   model_type: string;
@@ -50,6 +50,15 @@ export interface LlmSettings {
   model: string;
 }
 
+/* ── font presets ──────────────────────────────────────── */
+export const FONT_PRESETS: { label: string; value: string }[] = [
+  { label: "宋体 (Serif)", value: `"Times New Roman", SimSun, serif` },
+  { label: "黑体 (Sans)", value: `"Microsoft YaHei", "PingFang SC", sans-serif` },
+  { label: "系统默认", value: `system-ui, sans-serif` },
+  { label: "等宽字体", value: `"Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace` },
+  { label: "楷体", value: `KaiTi, "AR PL UKai CN", serif` },
+];
+
 export const VENDOR_PRESETS: Record<string, { label: string; baseUrl: string; models: string[] }> = {
   openai: { label: "OpenAI", baseUrl: "https://api.openai.com/v1", models: ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"] },
   deepseek: { label: "DeepSeek", baseUrl: "https://api.deepseek.com/v1", models: ["deepseek-chat"] },
@@ -74,6 +83,15 @@ interface Props {
   onZoomModeChange: (v: ZoomMode) => void;
   pdfTextExtractionEnabled: boolean;
   onPdfTextExtractionEnabledChange: (v: boolean) => void;
+  /* appearance */
+  textFontFamily: string;
+  onTextFontFamilyChange: (v: string) => void;
+  textFontSize: number;
+  onTextFontSizeChange: (v: number) => void;
+  aiFontFamily: string;
+  onAiFontFamilyChange: (v: string) => void;
+  aiFontSize: number;
+  onAiFontSizeChange: (v: number) => void;
   /* ocr */
   ocrEnabled: boolean;
   onOcrEnabledChange: (v: boolean) => void;
@@ -93,6 +111,14 @@ const STORAGE_KEYS = {
   llmModel: "xdoc.settings.llm.model",
 } as const;
 
+/* ── nav items ─────────────────────────────────────────── */
+const NAV_ITEMS: { key: SettingsSection; label: string; icon: React.ReactNode }[] = [
+  { key: "general", label: "通用", icon: <Settings24Regular /> },
+  { key: "appearance", label: "外观", icon: <TextFont24Regular /> },
+  { key: "ocr", label: "OCR", icon: <Scan24Regular /> },
+  { key: "llm", label: "LLM", icon: <BrainCircuit24Regular /> },
+];
+
 /* ── component ──────────────────────────────────────────── */
 function SettingsDialog(props: Props) {
   const {
@@ -100,6 +126,10 @@ function SettingsDialog(props: Props) {
     modelPath, modelLoaded, scoreThreshold, zoomMode,
     onSelectModel, onScoreThresholdChange, onZoomModeChange,
     pdfTextExtractionEnabled, onPdfTextExtractionEnabledChange,
+    textFontFamily, onTextFontFamilyChange,
+    textFontSize, onTextFontSizeChange,
+    aiFontFamily, onAiFontFamilyChange,
+    aiFontSize, onAiFontSizeChange,
     ocrEnabled, onOcrEnabledChange,
     ocrModelPath, onOcrModelPathChange,
     llmSettings, onLlmSettingsChange,
@@ -196,7 +226,6 @@ function SettingsDialog(props: Props) {
         .map((m: any) => m.id ?? m.model ?? m.name)
         .filter(Boolean)
         .sort();
-      // Volcengine: restrict to the preset model
       const finalIds = llmSettings.vendor === "volcengine"
         ? ids.filter((id) => VENDOR_PRESETS.volcengine.models.includes(id))
         : ids;
@@ -212,6 +241,10 @@ function SettingsDialog(props: Props) {
     }
   }, [llmSettings.baseUrl, currentApiKey]);
 
+  /* ── helpers ──────────────────────────────────────────── */
+  const findFontLabel = (value: string) =>
+    FONT_PRESETS.find((f) => f.value === value)?.label ?? "自定义";
+
   /* ── render ─────────────────────────────────────────── */
   if (!open) return null;
 
@@ -220,337 +253,440 @@ function SettingsDialog(props: Props) {
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div className="settings-window" onClick={(e) => e.stopPropagation()}>
-        {/* ── top header with tabs ───────────────── */}
-        <header className="settings-top-bar">
-          <div className="settings-top-left">
+        {/* ── left sidebar ─────────────────────────── */}
+        <nav className="settings-sidebar">
+          <div className="settings-sidebar-header">
             <Settings24Regular />
-            <Text weight="semibold" className="settings-top-title">设置</Text>
-            <nav className="settings-top-tabs">
-              <button
-                className={`settings-tab ${section === "general" ? "active" : ""}`}
-                onClick={() => setSection("general")}
-              >
-                <Settings24Regular />
-                <span>通用设置</span>
-              </button>
-              <button
-                className={`settings-tab ${section === "ocr" ? "active" : ""}`}
-                onClick={() => setSection("ocr")}
-              >
-                <Scan24Regular />
-                <span>OCR 设置</span>
-              </button>
-              <button
-                className={`settings-tab ${section === "llm" ? "active" : ""}`}
-                onClick={() => setSection("llm")}
-              >
-                <BrainCircuit24Regular />
-                <span>LLM 设置</span>
-              </button>
-            </nav>
+            <Text weight="semibold" size={300}>设置</Text>
           </div>
-          <Button
-            appearance="transparent"
-            icon={<Dismiss24Regular />}
-            onClick={onClose}
-            aria-label="关闭"
-          />
-        </header>
+          <div className="settings-sidebar-nav">
+            {NAV_ITEMS.map((item) => (
+              <button
+                key={item.key}
+                className={`settings-nav-item ${section === item.key ? "active" : ""}`}
+                onClick={() => setSection(item.key)}
+              >
+                {item.icon}
+                <span>{item.label}</span>
+              </button>
+            ))}
+          </div>
+        </nav>
 
-        <div className="settings-content-body">
+        {/* ── right content area ───────────────────── */}
+        <div className="settings-main">
+          <header className="settings-main-header">
+            <Text weight="semibold" size={400}>
+              {NAV_ITEMS.find((n) => n.key === section)?.label ?? "设置"}
+            </Text>
+            <Button
+              appearance="transparent"
+              icon={<Dismiss24Regular />}
+              onClick={onClose}
+              aria-label="关闭"
+              size="small"
+            />
+          </header>
+
+          <div className="settings-content-body">
+            {/* ══════ GENERAL ══════ */}
             {section === "general" && (
               <div className="settings-form">
-                {/* ── ONNX Model ──────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">ONNX 模型</Text>
-                  <div className="settings-field-row">
-                    <Input
-                      value={modelPath || ""}
-                      readOnly
-                      placeholder="未选择模型文件"
-                      className="settings-input-flex"
-                    />
-                    <Button appearance="primary" onClick={() => void onSelectModel()}>
-                      选择模型
-                    </Button>
-                  </div>
-                  <Text size={100} className="settings-hint">
-                    {modelLoaded ? "✅ 模型已加载" : modelPath ? "⚠ 模型加载失败" : "请选择 .onnx 模型文件"}
-                  </Text>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── Score Threshold ────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">置信度阈值</Text>
-                  <div className="settings-field-row">
-                    <Slider
-                      min={0}
-                      max={1}
-                      step={0.05}
-                      value={scoreThreshold}
-                      onChange={(_, d) => onScoreThresholdChange(d.value)}
-                      className="settings-slider"
-                    />
-                    <Text className="settings-value-label">{scoreThreshold.toFixed(2)}</Text>
-                  </div>
-                  <Text size={100} className="settings-hint">
-                    值越低检测框越多，值越高检测框越精准
-                  </Text>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── Zoom Mode ─────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">默认缩放</Text>
-                  <Dropdown
-                    value={zoomModeLabels[zoomMode]}
-                    selectedOptions={[zoomMode]}
-                    onOptionSelect={(_, d) => {
-                      const v = d.optionValue as ZoomMode;
-                      if (v) onZoomModeChange(v);
-                    }}
-                    className="settings-dropdown"
-                  >
-                    {zoomOptions.map((opt) => (
-                      <Option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </Option>
-                    ))}
-                  </Dropdown>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── PDF Text Extraction ────────────── */}
-                <div className="settings-field">
-                  <div className="settings-field-row" style={{ justifyContent: "space-between" }}>
-                    <div>
-                      <Text weight="semibold">PDF 原文提取</Text>
-                      <Text size={100} className="settings-hint" style={{ display: "block", marginTop: 4 }}>
-                        关闭则在段落显示栏中只显示 OCR 结果
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">ONNX 模型</Text>
+                      <Text size={100} className="settings-hint">
+                        {modelLoaded ? "✅ 已加载" : modelPath ? "⚠ 加载失败" : "未选择"}
                       </Text>
                     </div>
-                    <Switch
-                      checked={pdfTextExtractionEnabled}
-                      onChange={(_, d) => onPdfTextExtractionEnabledChange(d.checked)}
-                    />
+                    <div className="sf-control compact">
+                      <Input value={modelPath || ""} readOnly placeholder="未选择模型" className="settings-input-flex" />
+                      <Button appearance="primary" size="small" onClick={() => void onSelectModel()}>选择</Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">置信度阈值</Text>
+                      <Text size={100} className="settings-hint">值越低检测框越多</Text>
+                    </div>
+                    <div className="sf-control compact">
+                      <Slider
+                        min={0} max={1} step={0.05}
+                        value={scoreThreshold}
+                        onChange={(_, d) => onScoreThresholdChange(d.value)}
+                        className="settings-slider"
+                      />
+                      <Text className="settings-value-label">{scoreThreshold.toFixed(2)}</Text>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">默认缩放</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Dropdown
+                        value={zoomModeLabels[zoomMode]}
+                        selectedOptions={[zoomMode]}
+                        onOptionSelect={(_, d) => {
+                          const v = d.optionValue as ZoomMode;
+                          if (v) onZoomModeChange(v);
+                        }}
+                        className="settings-dropdown"
+                        size="small"
+                      >
+                        {zoomOptions.map((opt) => (
+                          <Option key={opt.value} value={opt.value}>{opt.label}</Option>
+                        ))}
+                      </Dropdown>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">PDF 原文提取</Text>
+                      <Text size={100} className="settings-hint">关闭则只显示 OCR 结果</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Switch
+                        checked={pdfTextExtractionEnabled}
+                        onChange={(_, d) => onPdfTextExtractionEnabledChange(d.checked)}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
             )}
 
+            {/* ══════ APPEARANCE ══════ */}
+            {section === "appearance" && (
+              <div className="settings-form">
+                {/* ── Paragraph Section ── */}
+                <div className="sf-section-title">
+                  <Text weight="semibold" size={200}>段落栏</Text>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">字体</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Dropdown
+                        value={findFontLabel(textFontFamily)}
+                        selectedOptions={[textFontFamily]}
+                        onOptionSelect={(_, d) => {
+                          const v = d.optionValue as string;
+                          if (v) onTextFontFamilyChange(v);
+                        }}
+                        className="settings-dropdown"
+                        size="small"
+                      >
+                        {FONT_PRESETS.map((f) => (
+                          <Option key={f.value} value={f.value} text={f.label}>
+                            <span style={{ fontFamily: f.value }}>{f.label}</span>
+                          </Option>
+                        ))}
+                      </Dropdown>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">字号</Text>
+                      <Text size={100} className="settings-hint">{textFontSize}px</Text>
+                    </div>
+                    <div className="sf-control compact">
+                      <Slider
+                        min={10} max={40} step={1}
+                        value={textFontSize}
+                        onChange={(_, d) => onTextFontSizeChange(d.value)}
+                        className="settings-slider"
+                      />
+                      <div className="sf-font-preview" style={{ fontFamily: textFontFamily, fontSize: textFontSize }}>
+                        段落预览 Preview
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-separator" />
+
+                {/* ── AI Section ── */}
+                <div className="sf-section-title">
+                  <Text weight="semibold" size={200}>AI 解读栏</Text>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">字体</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Dropdown
+                        value={findFontLabel(aiFontFamily)}
+                        selectedOptions={[aiFontFamily]}
+                        onOptionSelect={(_, d) => {
+                          const v = d.optionValue as string;
+                          if (v) onAiFontFamilyChange(v);
+                        }}
+                        className="settings-dropdown"
+                        size="small"
+                      >
+                        {FONT_PRESETS.map((f) => (
+                          <Option key={f.value} value={f.value} text={f.label}>
+                            <span style={{ fontFamily: f.value }}>{f.label}</span>
+                          </Option>
+                        ))}
+                      </Dropdown>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">字号</Text>
+                      <Text size={100} className="settings-hint">{aiFontSize}px</Text>
+                    </div>
+                    <div className="sf-control compact">
+                      <Slider
+                        min={10} max={40} step={1}
+                        value={aiFontSize}
+                        onChange={(_, d) => onAiFontSizeChange(d.value)}
+                        className="settings-slider"
+                      />
+                      <div className="sf-font-preview" style={{ fontFamily: aiFontFamily, fontSize: aiFontSize }}>
+                        解读预览 Preview
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-separator" />
+
+                {/* ── Sync button ── */}
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">同步设置</Text>
+                      <Text size={100} className="settings-hint">将段落栏的字体同步到解读栏</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        onClick={() => {
+                          onAiFontFamilyChange(textFontFamily);
+                          onAiFontSizeChange(textFontSize);
+                        }}
+                      >
+                        同步 →
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ══════ OCR ══════ */}
             {section === "ocr" && (
               <div className="settings-form">
-                {/* ── OCR Enable ─────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">启用 OCR</Text>
-                  <div className="settings-field-row">
-                    <Switch
-                      checked={ocrEnabled}
-                      onChange={(_, d) => onOcrEnabledChange(d.checked)}
-                      label={ocrEnabled ? "已开启" : "已关闭"}
-                    />
-                  </div>
-                  <Text size={100} className="settings-hint">
-                    开启后将在文档解析时自动运行 OCR 识别
-                  </Text>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── Local Model Path ───────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">模型路径</Text>
-                  <div className="settings-field-row">
-                    <Input
-                      value={ocrModelPath}
-                      readOnly
-                      placeholder="默认: model/GLM-OCR-GGUF"
-                      className="settings-input-flex"
-                    />
-                    <Button
-                      appearance="primary"
-                      onClick={handleDownload}
-                      disabled={isDownloading}
-                    >
-                      {isDownloading ? "下载中..." : "下载模型"}
-                    </Button>
-                  </div>
-                  <Text size={100} className="settings-hint">
-                    点击"下载模型"从 ModelScope 下载 OCR 模型文件到 model/GLM-OCR-GGUF 目录
-                  </Text>
-                </div>
-
-                {/* ── Download Progress ──────────── */}
-                {download.status !== "idle" && (
-                  <div className="settings-download-progress">
-                    <Divider className="settings-divider" />
-                    <div className="settings-field">
-                      <div className="settings-progress-header">
-                        <Text weight="semibold">
-                          {download.status === "downloading" && "下载中..."}
-                          {download.status === "file_completed" && "处理中..."}
-                          {download.status === "completed" && "下载完成"}
-                          {download.status === "error" && "下载失败"}
-                        </Text>
-                        {isDownloading && <Spinner size="tiny" />}
-                      </div>
-                      <ProgressBar
-                        max={100}
-                        value={download.progress}
-                        color={
-                          download.status === "error"
-                            ? "error"
-                            : download.status === "completed"
-                              ? "success"
-                              : "brand"
-                        }
-                        className="settings-progress-bar"
-                      />
-                      <Text size={100} className="settings-progress-text">
-                        {download.message}
-                      </Text>
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">启用 OCR</Text>
+                      <Text size={100} className="settings-hint">解析时自动识别</Text>
                     </div>
+                    <div className="sf-control">
+                      <Switch
+                        checked={ocrEnabled}
+                        onChange={(_, d) => onOcrEnabledChange(d.checked)}
+                        label={ocrEnabled ? "已开启" : "已关闭"}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">模型路径</Text>
+                      <Text size={100} className="settings-hint">从 ModelScope 下载</Text>
+                    </div>
+                    <div className="sf-control compact">
+                      <Input value={ocrModelPath} readOnly placeholder="model/GLM-OCR-GGUF" className="settings-input-flex" />
+                      <Button appearance="primary" size="small" onClick={handleDownload} disabled={isDownloading}>
+                        {isDownloading ? "下载中..." : "下载"}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+
+                {download.status !== "idle" && (
+                  <div className="sf-group">
+                    <div className="settings-progress-header">
+                      <Text weight="semibold" size={200}>
+                        {download.status === "downloading" && "下载中..."}
+                        {download.status === "file_completed" && "处理中..."}
+                        {download.status === "completed" && "下载完成"}
+                        {download.status === "error" && "下载失败"}
+                      </Text>
+                      {isDownloading && <Spinner size="tiny" />}
+                    </div>
+                    <ProgressBar
+                      max={100}
+                      value={download.progress}
+                      color={download.status === "error" ? "error" : download.status === "completed" ? "success" : "brand"}
+                      className="settings-progress-bar"
+                    />
+                    <Text size={100} className="settings-progress-text">{download.message}</Text>
                   </div>
                 )}
               </div>
             )}
 
+            {/* ══════ LLM ══════ */}
             {section === "llm" && (
               <div className="settings-form">
-                {/* ── Vendor Selection ─────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">模型厂商</Text>
-                  <Dropdown
-                    value={VENDOR_PRESETS[llmSettings.vendor]?.label ?? "自定义"}
-                    selectedOptions={[llmSettings.vendor]}
-                    onOptionSelect={(_, d) => {
-                      const vendor = d.optionValue as string;
-                      const preset = VENDOR_PRESETS[vendor];
-                      onLlmSettingsChange({
-                        ...llmSettings,
-                        vendor,
-                        baseUrl: preset?.baseUrl ?? llmSettings.baseUrl,
-                        model: preset?.models?.[0] ?? llmSettings.model,
-                      });
-                    }}
-                    className="settings-dropdown"
-                    style={{ width: "100%" }}
-                  >
-                    {Object.entries(VENDOR_PRESETS).map(([key, preset]) => (
-                      <Option key={key} value={key}>
-                        {preset.label}
-                      </Option>
-                    ))}
-                  </Dropdown>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── Base URL ─────────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">API Base URL</Text>
-                  <Input
-                    value={llmSettings.baseUrl}
-                    onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, baseUrl: d.value })}
-                    placeholder="https://api.openai.com/v1"
-                    className="settings-input-flex"
-                  />
-                  <Text size={100} className="settings-hint">
-                    选择厂商后自动填入，也可手动修改
-                  </Text>
-                </div>
-
-                <Divider className="settings-divider" />
-
-                {/* ── Model ────────────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">模型名称</Text>
-                  <div className="settings-field-row">
-                    {fetchedModels.length > 0 ? (
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label"><Text weight="semibold">模型厂商</Text></div>
+                    <div className="sf-control">
                       <Dropdown
-                        value={llmSettings.model}
-                        selectedOptions={[llmSettings.model]}
+                        value={VENDOR_PRESETS[llmSettings.vendor]?.label ?? "自定义"}
+                        selectedOptions={[llmSettings.vendor]}
                         onOptionSelect={(_, d) => {
-                          const model = d.optionValue as string;
-                          if (model) onLlmSettingsChange({ ...llmSettings, model });
+                          const vendor = d.optionValue as string;
+                          const preset = VENDOR_PRESETS[vendor];
+                          onLlmSettingsChange({
+                            ...llmSettings,
+                            vendor,
+                            baseUrl: preset?.baseUrl ?? llmSettings.baseUrl,
+                            model: preset?.models?.[0] ?? llmSettings.model,
+                          });
                         }}
-                        className="settings-dropdown"
-                        style={{ flex: 1 }}
+                        className="settings-dropdown-full"
+                        size="small"
                       >
-                        {fetchedModels.map((m) => (
-                          <Option key={m} value={m}>
-                            {m}
-                          </Option>
+                        {Object.entries(VENDOR_PRESETS).map(([key, preset]) => (
+                          <Option key={key} value={key}>{preset.label}</Option>
                         ))}
                       </Dropdown>
-                    ) : llmSettings.vendor !== "custom" && VENDOR_PRESETS[llmSettings.vendor]?.models.length > 0 ? (
-                      <Dropdown
-                        value={llmSettings.model}
-                        selectedOptions={[llmSettings.model]}
-                        onOptionSelect={(_, d) => {
-                          const model = d.optionValue as string;
-                          if (model) onLlmSettingsChange({ ...llmSettings, model });
-                        }}
-                        className="settings-dropdown"
-                        style={{ flex: 1 }}
-                      >
-                        {VENDOR_PRESETS[llmSettings.vendor].models.map((m) => (
-                          <Option key={m} value={m}>
-                            {m}
-                          </Option>
-                        ))}
-                      </Dropdown>
-                    ) : (
+                    </div>
+                  </div>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">API Base URL</Text>
+                      <Text size={100} className="settings-hint">选择厂商后自动填入</Text>
+                    </div>
+                    <div className="sf-control">
                       <Input
-                        value={llmSettings.model}
-                        onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, model: d.value })}
-                        placeholder="输入模型名称，如 gpt-4o"
+                        value={llmSettings.baseUrl}
+                        onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, baseUrl: d.value })}
+                        placeholder="https://api.openai.com/v1"
                         className="settings-input-flex"
+                        size="small"
                       />
-                    )}
-                    <Button
-                      appearance="secondary"
-                      onClick={handleFetchModels}
-                      disabled={fetchingModels || !llmSettings.baseUrl || !currentApiKey}
-                    >
-                      {fetchingModels ? "获取中..." : "获取模型列表"}
-                    </Button>
+                    </div>
                   </div>
-                  {fetchModelsError && (
-                    <Text size={100} style={{ color: "#ff6b6b" }}>{fetchModelsError}</Text>
-                  )}
-                  <Text size={100} className="settings-hint">
-                    点击"获取模型列表"从 API 自动获取可用模型，或从预设/手动输入
-                  </Text>
                 </div>
 
-                <Divider className="settings-divider" />
-
-                {/* ── API Key ──────────────────────── */}
-                <div className="settings-field">
-                  <Text weight="semibold">API Key</Text>
-                  <div className="settings-field-row">
-                    <Input
-                      type="password"
-                      value={currentApiKey}
-                      onChange={(_, d) => onLlmSettingsChange({
-                        ...llmSettings,
-                        vendorApiKeys: { ...llmSettings.vendorApiKeys, [llmSettings.vendor]: d.value },
-                      })}
-                      placeholder="输入您的 API Key"
-                      className="settings-input-flex"
-                    />
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">模型名称</Text>
+                      {fetchModelsError && <Text size={100} style={{ color: "#ff6b6b" }}>{fetchModelsError}</Text>}
+                    </div>
+                    <div className="sf-control compact">
+                      {fetchedModels.length > 0 ? (
+                        <Dropdown
+                          value={llmSettings.model}
+                          selectedOptions={[llmSettings.model]}
+                          onOptionSelect={(_, d) => {
+                            const model = d.optionValue as string;
+                            if (model) onLlmSettingsChange({ ...llmSettings, model });
+                          }}
+                          className="settings-dropdown-full"
+                          size="small"
+                        >
+                          {fetchedModels.map((m) => (
+                            <Option key={m} value={m}>{m}</Option>
+                          ))}
+                        </Dropdown>
+                      ) : llmSettings.vendor !== "custom" && VENDOR_PRESETS[llmSettings.vendor]?.models.length > 0 ? (
+                        <Dropdown
+                          value={llmSettings.model}
+                          selectedOptions={[llmSettings.model]}
+                          onOptionSelect={(_, d) => {
+                            const model = d.optionValue as string;
+                            if (model) onLlmSettingsChange({ ...llmSettings, model });
+                          }}
+                          className="settings-dropdown-full"
+                          size="small"
+                        >
+                          {VENDOR_PRESETS[llmSettings.vendor].models.map((m) => (
+                            <Option key={m} value={m}>{m}</Option>
+                          ))}
+                        </Dropdown>
+                      ) : (
+                        <Input
+                          value={llmSettings.model}
+                          onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, model: d.value })}
+                          placeholder="gpt-4o"
+                          className="settings-input-flex"
+                          size="small"
+                        />
+                      )}
+                      <Button
+                        appearance="subtle"
+                        size="small"
+                        onClick={handleFetchModels}
+                        disabled={fetchingModels || !llmSettings.baseUrl || !currentApiKey}
+                      >
+                        {fetchingModels ? "获取中..." : "获取"}
+                      </Button>
+                    </div>
                   </div>
-                  <Text size={100} className="settings-hint">
-                    每个厂商独立保存 API Key，切换厂商时自动切换
-                  </Text>
+                </div>
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
+                      <Text weight="semibold">API Key</Text>
+                      <Text size={100} className="settings-hint">每个厂商独立保存</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Input
+                        type="password"
+                        value={currentApiKey}
+                        onChange={(_, d) => onLlmSettingsChange({
+                          ...llmSettings,
+                          vendorApiKeys: { ...llmSettings.vendorApiKeys, [llmSettings.vendor]: d.value },
+                        })}
+                        placeholder="输入 API Key"
+                        className="settings-input-flex"
+                        size="small"
+                      />
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
+          </div>
         </div>
       </div>
     </div>
