@@ -593,7 +593,7 @@ function SettingsDialog(props: Props) {
                       <Text weight="semibold">API Base URL</Text>
                       <Text size={100} className="settings-hint">选择厂商后自动填入</Text>
                     </div>
-                    <div className="sf-control">
+                    <div className="sf-control compact">
                       <Input
                         value={llmSettings.baseUrl}
                         onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, baseUrl: d.value })}
@@ -611,7 +611,7 @@ function SettingsDialog(props: Props) {
                       <Text weight="semibold">模型名称</Text>
                       {fetchModelsError && <Text size={100} style={{ color: "#ff6b6b" }}>{fetchModelsError}</Text>}
                     </div>
-                    <div className="sf-control compact">
+                    <div className="sf-control">
                       {fetchedModels.length > 0 ? (
                         <Dropdown
                           value={llmSettings.model}
@@ -620,7 +620,7 @@ function SettingsDialog(props: Props) {
                             const model = d.optionValue as string;
                             if (model) onLlmSettingsChange({ ...llmSettings, model });
                           }}
-                          className="settings-dropdown-full"
+                          className="settings-dropdown"
                           size="small"
                         >
                           {fetchedModels.map((m) => (
@@ -635,7 +635,7 @@ function SettingsDialog(props: Props) {
                             const model = d.optionValue as string;
                             if (model) onLlmSettingsChange({ ...llmSettings, model });
                           }}
-                          className="settings-dropdown-full"
+                          className="settings-dropdown"
                           size="small"
                         >
                           {VENDOR_PRESETS[llmSettings.vendor].models.map((m) => (
@@ -647,7 +647,7 @@ function SettingsDialog(props: Props) {
                           value={llmSettings.model}
                           onChange={(_, d) => onLlmSettingsChange({ ...llmSettings, model: d.value })}
                           placeholder="gpt-4o"
-                          className="settings-input-flex"
+                          className="settings-dropdown"
                           size="small"
                         />
                       )}
@@ -669,7 +669,7 @@ function SettingsDialog(props: Props) {
                       <Text weight="semibold">API Key</Text>
                       <Text size={100} className="settings-hint">每个厂商独立保存</Text>
                     </div>
-                    <div className="sf-control">
+                    <div className="sf-control compact">
                       <Input
                         type="password"
                         value={currentApiKey}
