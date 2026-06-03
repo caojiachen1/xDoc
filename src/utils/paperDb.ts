@@ -203,3 +203,20 @@ export async function exportAnnotatedPdf(
     annotations,
   });
 }
+
+// ── Journal ranking (CAS 分区表) ──────────────────────────────────────
+
+export interface JournalRanking {
+  journal: string;
+  zone: number;       // 1–4
+  is_top: boolean;
+  is_oa: boolean;
+}
+
+export async function lookupJournalRanking(
+  journalName: string
+): Promise<JournalRanking | null> {
+  return invoke<JournalRanking | null>("journal_ranking", {
+    journalName,
+  });
+}

@@ -34,6 +34,15 @@ pub struct SettingEntry {
     pub value: String,
 }
 
+/// A journal ranking record from the CAS ranking table.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct JournalRanking {
+    pub journal: String,
+    pub zone: i32,
+    pub is_top: bool,
+    pub is_oa: bool,
+}
+
 /// An annotation record stored per page.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AnnotationRecord {
@@ -155,6 +164,19 @@ impl SettingsDb {
             [],
         )
         .map_err(|e| anyhow::anyhow!("创建 annotations 表失败: {e}"))?;
+
+        // Journal rankings table — CAS journal ranking data (分区表)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS journal_rankings (
+                journal_norm TEXT PRIMARY KEY,
+                journal      TEXT NOT NULL,
+                zone         INTEGER NOT NULL,
+                is_top       INTEGER NOT NULL DEFAULT 0,
+                is_oa        INTEGER NOT NULL DEFAULT 0
+             )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("创建 journal_rankings 表失败: {e}"))?;
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -409,5 +431,105 @@ impl SettingsDb {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM annotations WHERE file_path = ?1", params![file_path])?;
         Ok(())
+    }
+
+    // ── Journal Rankings ────────────────────────────────────────────────────
+
+    /// Normalize a journal name for case-insensitive lookup.
+    fn normalize_journal(name: &str) -> String {
+        name.to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<&str>>()
+            .join(" ")
+    }
+
+    /// Initialize the journal_rankings table from embedded JSON data.
+    /// Only runs if the table is empty (first launch or data reset).
+    pub fn init_journal_rankings(&self) -> Result<()> {
+        let conn = self.conn.lock();
+
+        // Check if data already loaded
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM journal_rankings",
+            [],
+            |row| row.get(0),
+        )?;
+        if count > 0 {
+            return Ok(());
+        }
+
+        // Parse embedded JSON data
+        let json_data = include_str!("../journal_rankings.json");
+        let entries: Vec<serde_json::Value> = serde_json::from_str(json_data)
+            .map_err(|e| anyhow::anyhow!("解析分区表 JSON 失败: {e}"))?;
+
+        // Batch insert using a transaction for performance
+        let tx = conn.unchecked_transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR IGNORE INTO journal_rankings (journal_norm, journal, zone, is_top, is_oa)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            )?;
+            for entry in &entries {
+                let journal = entry["journal"].as_str().unwrap_or("");
+                let zone = entry["zone"].as_i64().unwrap_or(4) as i32;
+                let is_top = entry["is_top"].as_bool().unwrap_or(false);
+                let is_oa = entry["is_oa"].as_bool().unwrap_or(false);
+                let norm = Self::normalize_journal(journal);
+                if !norm.is_empty() {
+                    stmt.execute(params![norm, journal, zone, is_top as i32, is_oa as i32])?;
+                }
+            }
+        }
+        tx.commit()?;
+
+        eprintln!("[xDoc] journal rankings initialized: {} entries", entries.len());
+        Ok(())
+    }
+
+    /// Look up a journal's CAS ranking by name.
+    /// Tries exact normalized match first, then falls back to substring/prefix matching.
+    pub fn lookup_journal_ranking(&self, journal_name: &str) -> Result<Option<JournalRanking>> {
+        let conn = self.conn.lock();
+        let norm = Self::normalize_journal(journal_name);
+        if norm.is_empty() {
+            return Ok(None);
+        }
+
+        // 1. Exact match
+        let mut stmt = conn.prepare(
+            "SELECT journal, zone, is_top, is_oa FROM journal_rankings WHERE journal_norm = ?1"
+        )?;
+        if let Some(row) = stmt.query_map(params![norm], |row| {
+            Ok(JournalRanking {
+                journal: row.get(0)?,
+                zone: row.get(1)?,
+                is_top: row.get::<_, i32>(2)? != 0,
+                is_oa: row.get::<_, i32>(3)? != 0,
+            })
+        })?.next().transpose()? {
+            return Ok(Some(row));
+        }
+
+        // 2. Reverse match: check if the queried name contains a journal name from DB,
+        //    or if a DB journal name contains the queried name.
+        let pattern = format!("%{}%", norm);
+        let mut stmt2 = conn.prepare(
+            "SELECT journal, zone, is_top, is_oa FROM journal_rankings
+             WHERE ?1 LIKE '%' || journal_norm || '%' OR journal_norm LIKE ?2
+             ORDER BY LENGTH(journal_norm) DESC LIMIT 1"
+        )?;
+        if let Some(row) = stmt2.query_map(params![norm, pattern], |row| {
+            Ok(JournalRanking {
+                journal: row.get(0)?,
+                zone: row.get(1)?,
+                is_top: row.get::<_, i32>(2)? != 0,
+                is_oa: row.get::<_, i32>(3)? != 0,
+            })
+        })?.next().transpose()? {
+            return Ok(Some(row));
+        }
+
+        Ok(None)
     }
 }

@@ -5,6 +5,7 @@ import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
+import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
 
 export interface PaperInfo {
   id: string;
@@ -69,6 +70,7 @@ export default function HomePage({
   const [isDragOver, setIsDragOver] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; paper: PaperInfo } | null>(null);
+  const [journalRanking, setJournalRanking] = useState<JournalRanking | null>(null);
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -103,6 +105,31 @@ export default function HomePage({
     () => papers.find((p) => p.id === selectedPaperId) ?? null,
     [papers, selectedPaperId]
   );
+
+  // Fetch journal ranking when selected paper's journal changes
+  useEffect(() => {
+    const journal = selectedPaper?.metadata?.journal;
+    const journalAbbrev = selectedPaper?.metadata?.journalAbbrev;
+    if (!journal && !journalAbbrev) {
+      setJournalRanking(null);
+      return;
+    }
+    let cancelled = false;
+    const tryLookup = async () => {
+      // Try full name first, then abbreviation
+      if (journal) {
+        const r = await lookupJournalRanking(journal);
+        if (r) { if (!cancelled) setJournalRanking(r); return; }
+      }
+      if (journalAbbrev && journalAbbrev !== journal) {
+        const r = await lookupJournalRanking(journalAbbrev);
+        if (r) { if (!cancelled) setJournalRanking(r); return; }
+      }
+      if (!cancelled) setJournalRanking(null);
+    };
+    tryLookup().catch(() => { if (!cancelled) setJournalRanking(null); });
+    return () => { cancelled = true; };
+  }, [selectedPaper?.metadata?.journal, selectedPaper?.metadata?.journalAbbrev]);
 
   const filteredPapers = useMemo(() => {
     let result = papers;
@@ -221,6 +248,11 @@ export default function HomePage({
   );
 
   // ── Metadata display helpers ───────────────────────────────────────────────
+  const zoneLabel = (zone: number) => {
+    const map: Record<number, string> = { 1: "一区", 2: "二区", 3: "三区", 4: "四区" };
+    return map[zone] || `${zone}区`;
+  };
+
   const renderMetadataValue = (key: keyof PaperMetadata, value: unknown) => {
     if (key === "authors" && Array.isArray(value)) {
       return (
@@ -439,7 +471,7 @@ export default function HomePage({
                     ? `https://doi.org/${value}`
                     : String(value);
 
-                return (
+                const row = (
                   <div key={key} className="home-metadata-row">
                     <div className="home-metadata-label">{label}</div>
                     <div className="home-metadata-value">
@@ -460,6 +492,31 @@ export default function HomePage({
                     </div>
                   </div>
                 );
+
+                // Show CAS ranking badges right after the journal field
+                if (key === "journal" && journalRanking) {
+                  return (
+                    <div key={key}>
+                      {row}
+                      <div className="home-metadata-row journal-ranking-row">
+                        <div className="home-metadata-label">中科院分区</div>
+                        <div className="home-metadata-value journal-ranking-badges">
+                          <span className={`ranking-badge zone-${journalRanking.zone}`}>
+                            {zoneLabel(journalRanking.zone)}
+                          </span>
+                          {journalRanking.is_top && (
+                            <span className="ranking-badge top-badge">Top</span>
+                          )}
+                          {journalRanking.is_oa && (
+                            <span className="ranking-badge oa-badge">OA</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
+                return row;
               })
             ) : (
               <div className="home-metadata-empty">

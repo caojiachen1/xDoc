@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, State};
 #[allow(dead_code)]
 mod gguf_ocr;
 mod settings_db;
-use settings_db::{AiConfig, AnnotationRecord, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
+use settings_db::{AiConfig, AnnotationRecord, JournalRanking, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -1988,6 +1988,16 @@ fn paper_rename(old_path: String, new_title: String) -> Result<String, String> {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Journal ranking lookup (CAS 分区表)
+// ────────────────────────────────────────────────────────────────────────
+
+/// Look up a journal's CAS ranking (分区, Top, OA) by name.
+#[tauri::command]
+fn journal_ranking(journal_name: String, db: State<'_, SettingsDb>) -> Result<Option<JournalRanking>, String> {
+    db.lookup_journal_ranking(&journal_name).map_err(|e| e.to_string())
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Annotation persistence
 // ────────────────────────────────────────────────────────────────────────
 
@@ -2504,12 +2514,28 @@ pub fn run() {
                 [],
             )
             .ok();
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS journal_rankings (
+                    journal_norm TEXT PRIMARY KEY,
+                    journal      TEXT NOT NULL,
+                    zone         INTEGER NOT NULL,
+                    is_top       INTEGER NOT NULL DEFAULT 0,
+                    is_oa        INTEGER NOT NULL DEFAULT 0
+                 )",
+                [],
+            )
+            .ok();
             SettingsDb {
                 conn: parking_lot::Mutex::new(conn),
                 path,
             }
         }
     };
+
+    // Initialize journal rankings table from embedded data (CAS 分区表)
+    if let Err(e) = settings_db.init_journal_rankings() {
+        eprintln!("[xDoc] failed to init journal rankings: {e}");
+    }
 
     tauri::Builder::default()
         .manage(ModelState {
@@ -2558,6 +2584,7 @@ pub fn run() {
             paper_delete,
             paper_get_managed_dir,
             paper_rename,
+            journal_ranking,
             annotation_save,
             annotation_load,
             annotation_delete,

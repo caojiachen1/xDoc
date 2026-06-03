@@ -1571,6 +1571,65 @@
   font-size: 13px;
 }
 
+/* ── Journal Ranking Badges (CAS 分区表) ─────────────────── */
+.journal-ranking-row {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.journal-ranking-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  align-items: center;
+}
+
+.ranking-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  line-height: 1.6;
+}
+
+.ranking-badge.zone-1 {
+  background: rgba(255, 69, 58, 0.15);
+  color: #ff6b6b;
+  border: 1px solid rgba(255, 69, 58, 0.25);
+}
+
+.ranking-badge.zone-2 {
+  background: rgba(255, 159, 10, 0.15);
+  color: #ffb340;
+  border: 1px solid rgba(255, 159, 10, 0.25);
+}
+
+.ranking-badge.zone-3 {
+  background: rgba(52, 199, 89, 0.15);
+  color: #5dd879;
+  border: 1px solid rgba(52, 199, 89, 0.25);
+}
+
+.ranking-badge.zone-4 {
+  background: rgba(142, 142, 147, 0.15);
+  color: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(142, 142, 147, 0.2);
+}
+
+.ranking-badge.top-badge {
+  background: rgba(255, 214, 10, 0.15);
+  color: #ffd60a;
+  border: 1px solid rgba(255, 214, 10, 0.25);
+}
+
+.ranking-badge.oa-badge {
+  background: rgba(0, 212, 187, 0.12);
+  color: #00D4BB;
+  border: 1px solid rgba(0, 212, 187, 0.2);
+}
+
 /* ── Context Menu ────────────────────────────────────────── */
 .context-menu-overlay {
   position: fixed;
