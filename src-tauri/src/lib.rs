@@ -807,6 +807,416 @@ pub struct OcrState {
     ocr_cache: Arc<Mutex<HashMap<String, String>>>,
 }
 
+// ── Grobid helpers ─────────────────────────────────────────────────────────
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+// ── Grobid engine (async, non-blocking) ─────────────────────────────────────
+// Uses grobid-rs from https://github.com/caojiachen1/grobid-rs
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidAuthorOutput {
+    pub first_name: Option<String>,
+    pub middle_name: Option<String>,
+    pub last_name: Option<String>,
+    pub full_name: Option<String>,
+    pub email: Option<String>,
+    pub affiliation: Option<String>,
+    pub identifier: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidDateOutput {
+    pub year: Option<String>,
+    pub month: Option<String>,
+    pub day: Option<String>,
+    pub raw: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidVenueOutput {
+    pub name: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    pub publisher: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidMetadataOutput {
+    pub title: Option<String>,
+    pub authors: Vec<GrobidAuthorOutput>,
+    pub abstract_text: Option<String>,
+    pub date: Option<GrobidDateOutput>,
+    pub doi: Option<String>,
+    pub venue: Option<GrobidVenueOutput>,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidSectionOutput {
+    pub title: Option<String>,
+    pub level: u8,
+    pub content: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidFigureOutput {
+    pub id: Option<String>,
+    pub caption: Option<String>,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidTableOutput {
+    pub id: Option<String>,
+    pub caption: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidEquationOutput {
+    pub id: Option<String>,
+    pub content: String,
+    pub description: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidRefOutput {
+    pub id: Option<String>,
+    pub title: Option<String>,
+    pub authors: Vec<String>,
+    pub year: Option<String>,
+    pub month: Option<String>,
+    pub day: Option<String>,
+    pub date_raw: Option<String>,
+    pub venue: Option<String>,
+    pub volume: Option<String>,
+    pub issue: Option<String>,
+    pub pages: Option<String>,
+    pub publisher: Option<String>,
+    pub doi: Option<String>,
+    pub raw: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidDocumentOutput {
+    pub metadata: GrobidMetadataOutput,
+    pub sections: Vec<GrobidSectionOutput>,
+    pub figures: Vec<GrobidFigureOutput>,
+    pub tables: Vec<GrobidTableOutput>,
+    pub equations: Vec<GrobidEquationOutput>,
+    pub references: Vec<GrobidRefOutput>,
+}
+
+pub struct GrobidEngineState {
+    pub status: Arc<Mutex<String>>,            // "uninitialized" | "initializing" | "ready" | "error"
+    pub error_msg: Arc<Mutex<Option<String>>>,
+    pub cached_result: Arc<Mutex<Option<(String, GrobidDocumentOutput)>>>, // (file_path, result)
+}
+
+#[derive(Serialize, Clone)]
+struct GrobidParseEvent {
+    status: String,
+    message: String,
+    result: Option<GrobidDocumentOutput>,
+    error: Option<String>,
+}
+
+#[tauri::command]
+async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<String, String> {
+    let status = { state.status.lock().unwrap().clone() };
+    if status == "ready" {
+        return Ok("ready".to_string());
+    }
+    if status == "initializing" {
+        return Ok("initializing".to_string());
+    }
+
+    *state.status.lock().unwrap() = "initializing".to_string();
+
+    let base_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
+    let status_arc = state.status.clone();
+    let error_arc = state.error_msg.clone();
+
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let grobid_dir = base_path.join("grobid");
+        let runtime_dir = base_path.join("runtime");
+
+        if !runtime_dir.exists() {
+            return Err(format!(
+                "Grobid runtime directory not found: {}",
+                runtime_dir.display()
+            ));
+        }
+
+        let grobid_home_dst = grobid_dir.join("grobid-home");
+        if !grobid_home_dst.join("models").exists() {
+            let grobid_home_src = base_path.join("grobid-home");
+            if grobid_home_src.exists() {
+                std::fs::create_dir_all(&grobid_dir)
+                    .map_err(|e| format!("Failed to create grobid dir: {e}"))?;
+                copy_dir_recursive(&grobid_home_src, &grobid_home_dst)
+                    .map_err(|e| format!("Failed to copy grobid-home: {e}"))?;
+            }
+        }
+
+        let jar_name = "grobid-core-0.8.2-onejar.jar";
+        let expected_jar = grobid_dir.join("grobid-core/build/libs").join(jar_name);
+        if !expected_jar.exists() {
+            let src_jar = base_path.join(jar_name);
+            if src_jar.exists() {
+                let jar_dir = expected_jar.parent().unwrap();
+                std::fs::create_dir_all(jar_dir)
+                    .map_err(|e| format!("Failed to create JAR directory: {e}"))?;
+                std::fs::copy(&src_jar, &expected_jar)
+                    .map_err(|e| format!("Failed to copy JAR: {e}"))?;
+            }
+        }
+
+        let config = grobid_rs::GrobidConfig::builder()
+            .base_path(&base_path)
+            .build();
+
+        match grobid_rs::init(&config) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(format!("Grobid init failed: {e}")),
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map(|_| {
+        *status_arc.lock().unwrap() = "ready".to_string();
+        "ready".to_string()
+    })
+    .map_err(|e| {
+        *status_arc.lock().unwrap() = "error".to_string();
+        *error_arc.lock().unwrap() = Some(e.clone());
+        e
+    })
+}
+
+#[tauri::command]
+async fn grobid_parse_document(
+    app: AppHandle,
+    file_path: String,
+    state: State<'_, GrobidEngineState>,
+) -> Result<GrobidDocumentOutput, String> {
+    // Check cache
+    if let Some((ref cached_path, ref result)) = *state.cached_result.lock().unwrap() {
+        if cached_path == &file_path {
+            let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                status: "completed".to_string(),
+                message: "使用缓存结果".to_string(),
+                result: Some(result.clone()),
+                error: None,
+            });
+            return Ok(result.clone());
+        }
+    }
+
+    // Ensure engine is ready
+    let status = { state.status.lock().unwrap().clone() };
+    if status != "ready" {
+        let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+            status: "initializing".to_string(),
+            message: "正在初始化 Grobid 引擎…".to_string(),
+            result: None,
+            error: None,
+        });
+
+        // Inline initialization
+        let base_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
+        let status_arc = state.status.clone();
+        let error_arc = state.error_msg.clone();
+
+        let init_result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+            let grobid_dir = base_path.join("grobid");
+            let runtime_dir = base_path.join("runtime");
+            if !runtime_dir.exists() {
+                return Err(format!("Grobid runtime directory not found: {}", runtime_dir.display()));
+            }
+            let grobid_home_dst = grobid_dir.join("grobid-home");
+            if !grobid_home_dst.join("models").exists() {
+                let grobid_home_src = base_path.join("grobid-home");
+                if grobid_home_src.exists() {
+                    std::fs::create_dir_all(&grobid_dir).ok();
+                    copy_dir_recursive(&grobid_home_src, &grobid_home_dst).ok();
+                }
+            }
+            let jar_name = "grobid-core-0.8.2-onejar.jar";
+            let expected_jar = grobid_dir.join("grobid-core/build/libs").join(jar_name);
+            if !expected_jar.exists() {
+                let src_jar = base_path.join(jar_name);
+                if src_jar.exists() {
+                    let jar_dir = expected_jar.parent().unwrap();
+                    std::fs::create_dir_all(jar_dir).ok();
+                    std::fs::copy(&src_jar, &expected_jar).ok();
+                }
+            }
+            let config = grobid_rs::GrobidConfig::builder().base_path(&base_path).build();
+            grobid_rs::init(&config).map_err(|e| format!("Grobid init failed: {e}"))
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"));
+
+        match init_result {
+            Ok(Ok(())) => {
+                *status_arc.lock().unwrap() = "ready".to_string();
+            }
+            Ok(Err(e)) | Err(e) => {
+                *status_arc.lock().unwrap() = "error".to_string();
+                *error_arc.lock().unwrap() = Some(e.clone());
+                let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                    status: "error".to_string(),
+                    message: format!("引擎初始化失败: {e}"),
+                    result: None,
+                    error: Some(e.clone()),
+                });
+                return Err(e);
+            }
+        }
+    }
+
+    // Emit parsing started
+    let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+        status: "parsing".to_string(),
+        message: "正在解析 PDF…".to_string(),
+        result: None,
+        error: None,
+    });
+
+    let path = PathBuf::from(&file_path);
+    let app_clone = app.clone();
+    let cached_result_arc = state.cached_result.clone();
+
+    // Run header + references parsing on blocking thread (fulltext_to_structured is unreliable)
+    let parse_result = tauri::async_runtime::spawn_blocking(move || -> Result<GrobidDocumentOutput, String> {
+        // Parse header metadata
+        let metadata_result = grobid_rs::process_header_structured(&path);
+        // Parse references independently
+        let refs_result = grobid_rs::process_references_structured(&path);
+
+        // Build metadata output (gracefully handle header parse failure)
+        let metadata = match &metadata_result {
+            Ok(meta) => GrobidMetadataOutput {
+                title: meta.title.clone(),
+                authors: meta.authors.iter().map(|a| GrobidAuthorOutput {
+                    first_name: a.first_name.clone(),
+                    middle_name: a.middle_name.clone(),
+                    last_name: a.last_name.clone(),
+                    full_name: a.full_name.clone(),
+                    email: a.email.clone(),
+                    affiliation: a.affiliation.clone(),
+                    identifier: a.identifier.clone(),
+                }).collect(),
+                abstract_text: meta.abstract_text.clone(),
+                date: meta.date.as_ref().map(|d| GrobidDateOutput {
+                    year: d.year.clone(),
+                    month: d.month.clone(),
+                    day: d.day.clone(),
+                    raw: d.raw.clone(),
+                }),
+                doi: meta.doi.clone(),
+                venue: meta.venue.as_ref().map(|v| GrobidVenueOutput {
+                    name: v.name.clone(),
+                    volume: v.volume.clone(),
+                    issue: v.issue.clone(),
+                    pages: v.pages.clone(),
+                    publisher: v.publisher.clone(),
+                }),
+                keywords: meta.keywords.clone(),
+            },
+            Err(e) => {
+                // If both fail, return error
+                if refs_result.is_err() {
+                    return Err(format!("Grobid header parsing failed: {e}"));
+                }
+                // Header failed but references succeeded — return empty metadata
+                GrobidMetadataOutput {
+                    title: None, authors: Vec::new(), abstract_text: None,
+                    date: None, doi: None, venue: None, keywords: Vec::new(),
+                }
+            }
+        };
+
+        // Build references output
+        let references = match &refs_result {
+            Ok(refs) => refs.iter().map(|r| GrobidRefOutput {
+                id: r.id.clone(),
+                title: r.title.clone(),
+                authors: r.authors.clone(),
+                year: r.date.as_ref().and_then(|d| d.year.clone()),
+                month: r.date.as_ref().and_then(|d| d.month.clone()),
+                day: r.date.as_ref().and_then(|d| d.day.clone()),
+                date_raw: r.date.as_ref().and_then(|d| d.raw.clone()),
+                venue: r.venue.clone(),
+                volume: r.volume.clone(),
+                issue: r.issue.clone(),
+                pages: r.pages.clone(),
+                publisher: r.publisher.clone(),
+                doi: r.doi.clone(),
+                raw: r.raw.clone(),
+            }).collect(),
+            Err(e) => {
+                // If both fail, return error
+                if metadata_result.is_err() {
+                    return Err(format!("Grobid references parsing also failed: {e}"));
+                }
+                // Metadata succeeded but references failed — return empty refs
+                Vec::new()
+            }
+        };
+
+        Ok(GrobidDocumentOutput {
+            metadata,
+            sections: Vec::new(),     // fulltext sections unreliable, omitted
+            figures: Vec::new(),
+            tables: Vec::new(),
+            equations: Vec::new(),
+            references,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+    match parse_result {
+        Ok(result) => {
+            // Cache the result
+            *cached_result_arc.lock().unwrap() = Some((file_path, result.clone()));
+
+            let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
+                status: "completed".to_string(),
+                message: format!("解析完成: {} 条参考文献", result.references.len()),
+                result: Some(result.clone()),
+                error: None,
+            });
+            Ok(result)
+        }
+        Err(e) => {
+            let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
+                status: "error".to_string(),
+                message: format!("解析失败: {e}"),
+                result: None,
+                error: Some(e.clone()),
+            });
+            Err(e)
+        }
+    }
+}
+
 fn threshold_cache_key(threshold: f32) -> i32 {
     (threshold * 1000.0).round() as i32
 }
@@ -2549,6 +2959,11 @@ pub fn run() {
             model_root: Arc::new(Mutex::new(None)),
             ocr_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+        .manage(GrobidEngineState {
+            status: Arc::new(Mutex::new("uninitialized".to_string())),
+            error_msg: Arc::new(Mutex::new(None)),
+            cached_result: Arc::new(Mutex::new(None)),
+        })
         .manage(settings_db)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -2589,6 +3004,8 @@ pub fn run() {
             annotation_load,
             annotation_delete,
             export_annotated_pdf,
+            grobid_ensure_ready,
+            grobid_parse_document,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

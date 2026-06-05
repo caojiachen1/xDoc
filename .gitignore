@@ -26,3 +26,5 @@ model/
 .*/
 lib/
 !lib/pdfium.dll
+*.md
+!README.md

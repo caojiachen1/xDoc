@@ -20,13 +20,14 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download, BookOpen } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import { marked } from "marked";
 import SettingsDialog, { VENDOR_PRESETS, FONT_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
 import HomePage, { type PaperInfo } from "./components/HomePage";
+import ReferenceSidebar from "./components/ReferenceSidebar";
 import { extractMetadataEnhanced } from "./utils/pdfMetadata";
 import {
   copyToManaged,
@@ -79,6 +80,82 @@ interface DetectionResponse {
   page_index: number;
   page_count: number;
   boxes: LayoutBox[];
+}
+
+interface GrobidAuthorOutput {
+  first_name: string | null;
+  middle_name: string | null;
+  last_name: string | null;
+  full_name: string | null;
+  email: string | null;
+  affiliation: string | null;
+  identifier: string | null;
+}
+interface GrobidDateOutput {
+  year: string | null;
+  month: string | null;
+  day: string | null;
+  raw: string | null;
+}
+interface GrobidVenueOutput {
+  name: string | null;
+  volume: string | null;
+  issue: string | null;
+  pages: string | null;
+  publisher: string | null;
+}
+interface GrobidMetadataOutput {
+  title: string | null;
+  authors: GrobidAuthorOutput[];
+  abstract_text: string | null;
+  date: GrobidDateOutput | null;
+  doi: string | null;
+  venue: GrobidVenueOutput | null;
+  keywords: string[];
+}
+interface GrobidSectionOutput {
+  title: string | null;
+  level: number;
+  content: string;
+}
+interface GrobidFigureOutput {
+  id: string | null;
+  caption: string | null;
+  description: string | null;
+}
+interface GrobidTableOutput {
+  id: string | null;
+  caption: string | null;
+  content: string | null;
+}
+interface GrobidEquationOutput {
+  id: string | null;
+  content: string;
+  description: string | null;
+}
+interface GrobidRefOutput {
+  id: string | null;
+  title: string | null;
+  authors: string[];
+  year: string | null;
+  month: string | null;
+  day: string | null;
+  date_raw: string | null;
+  venue: string | null;
+  volume: string | null;
+  issue: string | null;
+  pages: string | null;
+  publisher: string | null;
+  doi: string | null;
+  raw: string | null;
+}
+interface GrobidDocumentOutput {
+  metadata: GrobidMetadataOutput;
+  sections: GrobidSectionOutput[];
+  figures: GrobidFigureOutput[];
+  tables: GrobidTableOutput[];
+  equations: GrobidEquationOutput[];
+  references: GrobidRefOutput[];
 }
 
 const CLASSES = [
@@ -314,6 +391,17 @@ function App() {
   const [sidebarWidth, setSidebarWidth] = useState(220);
   const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
 
+  // Reference sidebar state
+  const [refSidebarOpen, setRefSidebarOpen] = useState(false);
+  const [refSidebarWidth, setRefSidebarWidth] = useState(320);
+
+  // Grobid parsing state (async, non-blocking)
+  const [grobidLoading, setGrobidLoading] = useState(false);
+  const [grobidDocument, setGrobidDocument] = useState<GrobidDocumentOutput | null>(null);
+  const [grobidError, setGrobidError] = useState<string>("");
+  const grobidParsedPathRef = useRef<string>("");
+  const grobidCancelledRef = useRef<boolean>(false);
+
   // ── Annotation State ──────────────────────────────────────────────────────
   const [annotationMode, setAnnotationMode] = useState<AnnotationTool>(null);
   const [annotationColor, setAnnotationColor] = useState("#FF3838");
@@ -417,6 +505,31 @@ function App() {
 
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
 
+  // Current paper for reference sidebar
+  const currentPaper = useMemo(() => papersList.find(p => p.path === documentPath) || null, [papersList, documentPath]);
+
+  // ── Grobid: trigger parse when a PDF is opened (async, non-blocking) ──────
+  const triggerGrobidParse = useCallback((path: string) => {
+    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
+    if (grobidParsedPathRef.current === path && grobidDocument) return;
+    grobidParsedPathRef.current = path;
+    grobidCancelledRef.current = false;
+    setGrobidDocument(null);
+    setGrobidError("");
+    setGrobidLoading(true);
+    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path })
+      .then((result) => {
+        if (grobidCancelledRef.current) return;
+        setGrobidDocument(result);
+        setGrobidLoading(false);
+      })
+      .catch((e) => {
+        if (grobidCancelledRef.current) return;
+        setGrobidError(String(e));
+        setGrobidLoading(false);
+      });
+  }, [grobidDocument]);
+
   // ── Tab System Handlers ────────────────────────────────────────────────────
   const openPaperTab = useCallback((paper: PaperInfo) => {
     // Check if tab already exists for this paper
@@ -472,10 +585,12 @@ function App() {
           }).catch(() => {});
         }
       });
+      // Auto-trigger Grobid parse (async, non-blocking)
+      triggerGrobidParse(paper.path);
     } else if (modelLoaded) {
       runModel(0, paper.path);
     }
-  }, [tabs, modelLoaded, scoreThreshold]);
+  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse]);
 
   const closeTab = useCallback((tabId: string) => {
     setTabs(prev => {
@@ -493,6 +608,7 @@ function App() {
         const newActive = newTabs[newActiveIdx];
         setActiveTabId(newActive.id);
         if (newActive.type === "home") {
+          grobidCancelledRef.current = true;
           setDocumentPath("");
           setPreviewSrc("");
           setBoxes([]);
@@ -520,6 +636,7 @@ function App() {
           paragraphAiCacheRef.current.clear();
           if (newPath.toLowerCase().endsWith(".pdf")) {
             loadPageData(newPath, 0);
+            triggerGrobidParse(newPath);
           } else if (modelLoaded) {
             runModel(0, newPath);
           }
@@ -528,7 +645,7 @@ function App() {
 
       return newTabs;
     });
-  }, [activeTabId, modelLoaded]);
+  }, [activeTabId, modelLoaded, triggerGrobidParse]);
 
   const switchToTab = useCallback((tabId: string) => {
     if (tabId === activeTabId) return;
@@ -538,6 +655,7 @@ function App() {
     if (!tab) return;
 
     if (tab.type === "home") {
+      grobidCancelledRef.current = true;
       setDocumentPath("");
       setPreviewSrc("");
       setBoxes([]);
@@ -564,11 +682,12 @@ function App() {
       paragraphAiCacheRef.current.clear();
       if (tab.documentPath.toLowerCase().endsWith(".pdf")) {
         loadPageData(tab.documentPath, 0);
+        triggerGrobidParse(tab.documentPath);
       } else if (modelLoaded) {
         runModel(0, tab.documentPath);
       }
     }
-  }, [activeTabId, tabs, documentPath, modelLoaded]);
+  }, [activeTabId, tabs, documentPath, modelLoaded, triggerGrobidParse]);
 
   const handleImportPapers = useCallback(async () => {
     const selected = await open({
@@ -904,6 +1023,13 @@ function App() {
     setThumbnails([]);
     setOutlineItems([]);
     setSidebarOpen(false);
+    setRefSidebarOpen(false);
+    // Clear grobid state
+    grobidCancelledRef.current = true;
+    setGrobidDocument(null);
+    setGrobidError("");
+    setGrobidLoading(false);
+    grobidParsedPathRef.current = "";
     // Clear annotation state
     setAnnotationMode(null);
     setAnnotations([]);
@@ -916,7 +1042,11 @@ function App() {
     setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
     // Clean up pdfjs document
     if (pdfJsDocRef.current) {
-      pdfJsDocRef.current.destroy().catch(() => {});
+      try {
+        if (typeof pdfJsDocRef.current.destroy === "function") {
+          pdfJsDocRef.current.destroy().catch(() => {});
+        }
+      } catch (_) { /* ignore */ }
       pdfJsDocRef.current = null;
     }
   };
@@ -960,6 +1090,8 @@ function App() {
              scoreThreshold,
            }).catch(() => { /* best-effort */ });
          }
+         // Auto-trigger Grobid parse (async, non-blocking)
+         triggerGrobidParse(selected);
       } else if (modelLoaded) {
          await runModel(0, selected);
       } else {
@@ -1164,6 +1296,38 @@ function App() {
       .catch((e) => console.warn("[settings] persist ui.aiFontFamily failed:", e));
   }, [aiFontFamily, environmentReady]);
 
+  // ── Grobid: event listener for async parse progress ────────────────────────
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
+    listen<{
+      status: string;
+      message: string;
+      result: GrobidDocumentOutput | null;
+      error: string | null;
+    }>("grobid-parse-event", (event) => {
+      if (cancelled) return;
+      const { status, result, error } = event.payload;
+      if (status === "initializing" || status === "parsing") {
+        setGrobidLoading(true);
+        setGrobidError("");
+      } else if (status === "completed") {
+        setGrobidLoading(false);
+        if (result) setGrobidDocument(result);
+      } else if (status === "error") {
+        setGrobidLoading(false);
+        setGrobidError(error || "未知错误");
+      }
+    }).then((fn) => {
+      if (cancelled) { fn(); return; }
+      unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   // Initialize OCR backend when enabled and model path is set
   useEffect(() => {
     if (ocrEnabled && ocrModelPath) {
@@ -1208,7 +1372,11 @@ function App() {
     return () => {
       cancelled = true;
       if (pdfJsDocRef.current) {
-        pdfJsDocRef.current.destroy().catch(() => {});
+        try {
+          if (typeof pdfJsDocRef.current.destroy === "function") {
+            pdfJsDocRef.current.destroy().catch(() => {});
+          }
+        } catch (_) { /* ignore */ }
         pdfJsDocRef.current = null;
       }
     };
@@ -2762,6 +2930,22 @@ function App() {
     document.addEventListener("mouseup", onMouseUp);
   };
 
+  const handleRefSidebarResize = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = refSidebarWidth;
+    const onMouseMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      setRefSidebarWidth(Math.max(260, Math.min(600, startW + delta)));
+    };
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+    };
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  };
+
   const handleMouseDownH = (e: React.MouseEvent) => {
     e.preventDefault();
     const startY = e.clientY;
@@ -2851,12 +3035,6 @@ function App() {
           </Menu>
 
           <div className="menu-spacer" />
-          {activeTabId !== HOME_TAB_ID && (
-            <>
-              <Text className="menu-status">{modelPath ? "模型已加载" : "模型未设置"}</Text>
-              <Text className="menu-status">阈值: {scoreThreshold.toFixed(2)}</Text>
-            </>
-          )}
           {loading && <Spinner size="tiny" />}
           {isPdfSelected && (
             fulltextExtracting ? (
@@ -2963,6 +3141,14 @@ function App() {
           >
             +
           </button>
+          {activeTabId !== HOME_TAB_ID && isPdfSelected && (
+            <button
+              className={`tab-ref-toggle-btn ${refSidebarOpen ? "active" : ""}`}
+              onClick={() => setRefSidebarOpen(v => !v)}
+              title="文献信息 & 参考文献"
+              style={refSidebarOpen ? { color: "#00D4BB", background: "rgba(0,212,187,0.12)" } : {}}
+            ><BookOpen size={14} /></button>
+          )}
         </div>
 
         {activeTabId === HOME_TAB_ID ? (
@@ -3773,6 +3959,20 @@ function App() {
                 </div>
               )}
             </div>
+
+            {refSidebarOpen && (
+              <>
+                <div className="resizer-v" onMouseDown={handleRefSidebarResize} />
+                <ReferenceSidebar
+                  paper={currentPaper}
+                  documentPath={documentPath}
+                  width={refSidebarWidth}
+                  grobidDocument={grobidDocument}
+                  grobidLoading={grobidLoading}
+                  grobidError={grobidError}
+                />
+              </>
+            )}
           </div>
         </Card>
         )}

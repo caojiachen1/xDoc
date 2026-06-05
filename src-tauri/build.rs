@@ -107,5 +107,11 @@ fn main() {
     println!("cargo:rerun-if-changed=../lib/pdfium.dll");
 
     try_copy_pdfium_dll();
+
+    // Pass grobid assets path to the lib crate (set by grobid-rs build script)
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
+    let grobid_assets = manifest_dir.join("target").join("grobid_assets").join("grobid-0.9.1");
+    println!("cargo:rustc-env=GROBID_RS_ASSETS_PATH={}", grobid_assets.display());
+
     tauri_build::build()
 }
