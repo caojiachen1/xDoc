@@ -20,6 +20,7 @@ import {
   Table,
 } from "lucide-react";
 import { resolveDoi, searchByTitle } from "../utils/crossrefResolver";
+import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
 import type { PaperInfo } from "./HomePage";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 
@@ -120,6 +121,8 @@ interface EnrichedReference extends GrobidReference {
   enriching?: boolean;
   enriched?: boolean;
   expanded?: boolean;
+  ranking?: JournalRanking | null;
+  rankingLoading?: boolean;
 }
 
 type SidebarTab = "info" | "references" | "structure";
@@ -245,6 +248,88 @@ export default function ReferenceSidebar({
       next[index] = { ...next[index], expanded: !next[index].expanded };
       return next;
     });
+  };
+
+  // ── Journal ranking lookup ──────────────────────────────────────────────────
+  // Cache for journal ranking lookups (shared across all references)
+  const rankingCacheRef = useRef<Map<string, JournalRanking | null>>(new Map());
+
+  // Lookup rankings when references or their CrossRef journals change
+  useEffect(() => {
+    if (references.length === 0) return;
+    let cancelled = false;
+
+    const lookupAll = async () => {
+      for (let i = 0; i < references.length; i++) {
+        if (cancelled) break;
+        const ref = references[i];
+        // Skip if already has ranking or is loading
+        if (ref.ranking !== undefined || ref.rankingLoading) continue;
+
+        const journal = ref.crossrefJournal || ref.journal;
+        if (!journal) continue;
+
+        // Check cache first
+        if (rankingCacheRef.current.has(journal)) {
+          const cached = rankingCacheRef.current.get(journal);
+          setReferences((prev) => {
+            const next = [...prev];
+            if (next[i]) next[i] = { ...next[i], ranking: cached ?? null };
+            return next;
+          });
+          continue;
+        }
+
+        // Mark as loading
+        setReferences((prev) => {
+          const next = [...prev];
+          if (next[i]) next[i] = { ...next[i], rankingLoading: true };
+          return next;
+        });
+
+        try {
+          const result = await lookupJournalRanking(journal);
+          rankingCacheRef.current.set(journal, result);
+          if (!cancelled) {
+            setReferences((prev) => {
+              const next = [...prev];
+              if (next[i]) next[i] = { ...next[i], ranking: result, rankingLoading: false };
+              return next;
+            });
+          }
+        } catch {
+          rankingCacheRef.current.set(journal, null);
+          if (!cancelled) {
+            setReferences((prev) => {
+              const next = [...prev];
+              if (next[i]) next[i] = { ...next[i], ranking: null, rankingLoading: false };
+              return next;
+            });
+          }
+        }
+      }
+    };
+
+    lookupAll();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [references.map(r => `${r.crossrefJournal || r.journal}|${r.enriched}`).join(",")]);
+
+  const zoneLabel = (zone: number) => {
+    const map: Record<number, string> = { 1: "一区", 2: "二区", 3: "三区", 4: "四区" };
+    return map[zone] || `${zone}区`;
+  };
+
+  const renderRankingBadges = (ref: EnrichedReference) => {
+    if (!ref.ranking) return null;
+    const r = ref.ranking;
+    return (
+      <span className="ref-ranking-badges">
+        <span className={`ranking-badge zone-${r.zone}`}>{zoneLabel(r.zone)}</span>
+        {r.is_top && <span className="ranking-badge top-badge">Top</span>}
+        {r.is_oa && <span className="ranking-badge oa-badge">OA</span>}
+      </span>
+    );
   };
 
   const formatAuthors = (authors: string[], max = 3): string => {
@@ -555,6 +640,7 @@ export default function ReferenceSidebar({
                 {displayJournal(ref) && (
                   <span className="ref-item-journal">{displayJournal(ref)}</span>
                 )}
+                {renderRankingBadges(ref)}
               </div>
 
               {/* Expanded details */}

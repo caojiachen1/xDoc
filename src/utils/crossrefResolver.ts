@@ -3,6 +3,11 @@ import type { PaperMetadata } from "./pdfMetadata";
 
 const TIMEOUT_MS = 8000;
 
+// ── In-memory cache for CrossRef results ────────────────────────────
+const doiCache = new Map<string, Partial<PaperMetadata> | null>();
+const titleCache = new Map<string, Partial<PaperMetadata> | null>();
+const arxivCache = new Map<string, Partial<PaperMetadata> | null>();
+
 function withTimeout(signal?: AbortSignal): AbortSignal {
   const controller = new AbortController();
   setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -21,8 +26,11 @@ function stripMarkup(text: string): string {
 export async function resolveDoi(
   doi: string,
 ): Promise<Partial<PaperMetadata> | null> {
-  const cleanDoi = doi.trim();
+  const cleanDoi = doi.trim().toLowerCase();
   if (!cleanDoi) return null;
+
+  // Check cache
+  if (doiCache.has(cleanDoi)) return doiCache.get(cleanDoi) ?? null;
 
   try {
     const url = `https://api.crossref.org/works/${encodeURIComponent(cleanDoi)}?mailto=xdoc@app.local`;
@@ -30,10 +38,13 @@ export async function resolveDoi(
       headers: { Accept: "application/json" },
       signal: withTimeout(),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) { doiCache.set(cleanDoi, null); return null; }
     const json = await resp.json();
-    return parseCrossRefMessage(json.message);
+    const result = parseCrossRefMessage(json.message);
+    doiCache.set(cleanDoi, result);
+    return result;
   } catch {
+    doiCache.set(cleanDoi, null);
     return null;
   }
 }
@@ -164,13 +175,19 @@ export async function resolveArxiv(
   const cleanId = arxivId.trim();
   if (!cleanId) return null;
 
+  // Check cache
+  if (arxivCache.has(cleanId)) return arxivCache.get(cleanId) ?? null;
+
   try {
     const url = `https://export.arxiv.org/api/query?id_list=${encodeURIComponent(cleanId)}`;
     const resp = await fetch(url, { signal: withTimeout() });
-    if (!resp.ok) return null;
+    if (!resp.ok) { arxivCache.set(cleanId, null); return null; }
     const xmlText = await resp.text();
-    return parseArxivResponse(xmlText);
+    const result = parseArxivResponse(xmlText);
+    arxivCache.set(cleanId, result);
+    return result;
   } catch {
+    arxivCache.set(cleanId, null);
     return null;
   }
 }
@@ -234,26 +251,33 @@ export async function searchByTitle(
   const clean = title.trim();
   if (!clean || clean.length < 5) return null;
 
+  // Cache key: lowercased, first 80 chars
+  const cacheKey = clean.toLowerCase().slice(0, 80);
+  if (titleCache.has(cacheKey)) return titleCache.get(cacheKey) ?? null;
+
   try {
     const url = `https://api.crossref.org/works?query.title=${encodeURIComponent(clean)}&rows=1&mailto=xdoc@app.local`;
     const resp = await fetch(url, {
       headers: { Accept: "application/json" },
       signal: withTimeout(),
     });
-    if (!resp.ok) return null;
+    if (!resp.ok) { titleCache.set(cacheKey, null); return null; }
     const json = await resp.json();
     const items = json.message?.items;
-    if (!items?.length) return null;
+    if (!items?.length) { titleCache.set(cacheKey, null); return null; }
 
     const candidate = items[0];
     const candidateTitle = candidate.title?.[0] || "";
 
     // Simple word-overlap similarity check
     const similarity = wordOverlap(clean.toLowerCase(), candidateTitle.toLowerCase());
-    if (similarity < 0.7) return null;
+    if (similarity < 0.7) { titleCache.set(cacheKey, null); return null; }
 
-    return parseCrossRefMessage(candidate);
+    const result = parseCrossRefMessage(candidate);
+    titleCache.set(cacheKey, result);
+    return result;
   } catch {
+    titleCache.set(cacheKey, null);
     return null;
   }
 }

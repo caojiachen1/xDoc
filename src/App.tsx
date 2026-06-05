@@ -470,7 +470,7 @@ function App() {
   const [aiFontFamily, setAiFontFamily] = useState(FONT_PRESETS[0].value);
 
   // Resize state
-  const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("60%");
+  const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("50%");
   const [topPaneHeight, setTopPaneHeight] = useState<number | string>("50%");
 
   // Tab state
@@ -3753,16 +3753,16 @@ function App() {
                 flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none",
                 fontFamily: textFontFamily
               }}>
-                {/* ── Header with batch AI action buttons ── */}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-                  <h3 style={{ margin: 0, flex: "0 0 auto" }}>选取段落及分词区域</h3>
-                  <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
+                {/* ── Panel header ── */}
+                <div className="pane-header">
+                  <h3 className="pane-title">选取段落及分词区域</h3>
+                  <div className="pane-header-actions">
                     <button
                       className="font-size-btn"
                       onClick={() => setTextFontSize(s => Math.max(10, s - 1))}
                       title="缩小字号"
                     >A-</button>
-                    <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{textFontSize}</span>
+                    <span className="font-size-label">{textFontSize}</span>
                     <button
                       className="font-size-btn"
                       onClick={() => setTextFontSize(s => Math.min(40, s + 1))}
@@ -3788,80 +3788,82 @@ function App() {
                   ) : null}
                 </div>
 
-                {/* ── Figure image display ── */}
-                {selectedFigure ? (
-                  <div style={{ overflow: "hidden" }}>
-                    <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
-                      {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
-                    </Text>
-                    {figureImageDataUrl ? (
-                      <img
-                        src={figureImageDataUrl}
-                        alt="Selected figure"
-                        style={{ display: "block", maxWidth: "100%", height: "auto", borderRadius: 6, border: "1px solid rgba(255,255,255,0.1)" }}
-                      />
-                    ) : (
-                      <Text size={100} style={{ opacity: 0.5 }}>加载图片中...</Text>
-                    )}
-                  </div>
-                ) : selectedParagraph ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "8px", overflow: "auto" }}>
-                    {/* PDF-extracted text with word segmentation */}
-                    {pdfTextExtractionEnabled && (
-                      <div>
-                        <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
-                          PDF 原文
-                        </Text>
-                        <div className="ocr-latex-content" style={{ whiteSpace: "pre-wrap", fontSize: textFontSize }}>
-                          {segmentedParagraph.map((word, idx) => (
-                            <span
-                              key={idx}
-                              className="word-span"
-                              onClick={(e) => {
-                                if (window.getSelection()?.toString() !== "") return;
-                                showFloatingMenu(word, e.clientX, e.clientY);
-                              }}
-                            >
-                              {word}
-                            </span>
-                          ))}
+                {/* ── Content area ── */}
+                <div className="pane-body">
+                  {/* ── Figure image display ── */}
+                  {selectedFigure ? (
+                    <div className="pane-section-card">
+                      <div className="pane-section-label">
+                        {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
+                      </div>
+                      {figureImageDataUrl ? (
+                        <img
+                          src={figureImageDataUrl}
+                          alt="Selected figure"
+                          className="pane-figure-img"
+                        />
+                      ) : (
+                        <div className="pane-placeholder">加载图片中...</div>
+                      )}
+                    </div>
+                  ) : selectedParagraph ? (
+                    <>
+                      {/* PDF-extracted text with word segmentation */}
+                      {pdfTextExtractionEnabled && (
+                        <div className="pane-section-card">
+                          <div className="pane-section-label">PDF 原文</div>
+                          <div className="ocr-latex-content pane-text-content" style={{ fontSize: textFontSize }}>
+                            {segmentedParagraph.map((word, idx) => (
+                              <span
+                                key={idx}
+                                className="word-span"
+                                onClick={(e) => {
+                                  if (window.getSelection()?.toString() !== "") return;
+                                  showFloatingMenu(word, e.clientX, e.clientY);
+                                }}
+                              >
+                                {word}
+                              </span>
+                            ))}
+                          </div>
                         </div>
-                      </div>
-                    )}
+                      )}
 
-                    {/* OCR result with LaTeX rendering */}
-                    {ocrEnabled && (
-                      <div>
-                        <Text size={100} weight="semibold" style={{ color: "#ffffff", marginBottom: 4, display: "block" }}>
-                          OCR 识别结果
-                        </Text>
-                        {ocrLoading ? (
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <Spinner size="tiny" />
-                            <Text size={100} style={{ opacity: 0.6 }}>OCR 识别中...</Text>
-                          </div>
-                        ) : ocrError ? (
-                          <Text size={100} style={{ color: "#ff6b6b" }}>{ocrError}</Text>
-                        ) : ocrText ? (
-                          <div
-                            className="ocr-latex-content"
-                            style={{ whiteSpace: "pre-wrap", fontSize: textFontSize }}
-                          >
-                            {renderOcrNodes(
-                              ocrText
-                                .replace(/[\r\n]+/g, "")
-                                .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
-                            )}
-                          </div>
-                        ) : (
-                          <Text size={100} style={{ opacity: 0.5 }}>点击段落以进行 OCR 识别</Text>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ opacity: 0.5 }}>（请在左侧预览中点击选中需要阅读的段落块或图片区域）</div>
-                )}
+                      {/* OCR result with LaTeX rendering */}
+                      {ocrEnabled && (
+                        <div className="pane-section-card">
+                          <div className="pane-section-label">OCR 识别结果</div>
+                          {ocrLoading ? (
+                            <div className="pane-placeholder">
+                              <Spinner size="tiny" />
+                              <span>OCR 识别中...</span>
+                            </div>
+                          ) : ocrError ? (
+                            <div className="pane-placeholder pane-error">{ocrError}</div>
+                          ) : ocrText ? (
+                            <div
+                              className="ocr-latex-content pane-text-content"
+                              style={{ fontSize: textFontSize }}
+                            >
+                              {renderOcrNodes(
+                                ocrText
+                                  .replace(/[\r\n]+/g, "")
+                                  .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
+                              )}
+                            </div>
+                          ) : (
+                            <div className="pane-placeholder">点击段落以进行 OCR 识别</div>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <div className="pane-empty">
+                      <FileText size={24} style={{ opacity: 0.25 }} />
+                      <span>请在左侧预览中点击选中需要阅读的段落块或图片区域</span>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="resizer-h" onMouseDown={handleMouseDownH} />
@@ -3869,29 +3871,37 @@ function App() {
               )}
 
               <div className="ai-pane" style={selectMode === "text" ? { flex: 1, fontFamily: aiFontFamily } : { fontFamily: aiFontFamily }}>
-                <div className="ai-pane-scroll" ref={aiScrollRef}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
-                    <h3 style={{ margin: 0 }}>{aiAction || "AI 解读"}</h3>
-                    <div style={{ display: "flex", gap: 2, alignItems: "center", marginLeft: "auto" }}>
-                      <button
-                        className="font-size-btn"
-                        onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
-                        title="缩小字号"
-                      >A-</button>
-                      <span style={{ fontSize: 11, color: "#bbb", minWidth: 24, textAlign: "center" }}>{aiFontSize}</span>
-                      <button
-                        className="font-size-btn"
-                        onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
-                        title="放大字号"
-                      >A+</button>
-                    </div>
+                {/* ── Panel header ── */}
+                <div className="pane-header">
+                  <h3 className="pane-title">{aiAction || "AI 解读"}</h3>
+                  <div className="pane-header-actions">
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
+                      title="缩小字号"
+                    >A-</button>
+                    <span className="font-size-label">{aiFontSize}</span>
+                    <button
+                      className="font-size-btn"
+                      onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
+                      title="放大字号"
+                    >A+</button>
                   </div>
-                  <div style={{ color: "#ffffff", fontSize: aiFontSize }}>
+                </div>
+
+                {/* ── Scrollable content ── */}
+                <div className="ai-pane-scroll" ref={aiScrollRef}>
+                  <div className="ai-content" style={{ fontSize: aiFontSize }}>
                     {aiResult
                       ? renderAiContent(aiResult)
                       : fulltextAiResultRef.current
                         ? renderAiContent(fulltextAiResultRef.current)
-                        : "（点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要）"}
+                        : (
+                          <div className="pane-empty">
+                            <Bot size={24} style={{ opacity: 0.25 }} />
+                            <span>点击单词或选中文字，选择 AI 解读 / 翻译 / 摘要</span>
+                          </div>
+                        )}
                   </div>
 
                   {/* Q&A follow-up history */}
