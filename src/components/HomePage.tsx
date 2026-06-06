@@ -1,11 +1,12 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
+import CitationExportDialog from "./CitationExportDialog";
 
 export type GrobidStatus = "pending" | "parsing" | "done" | "error";
 
@@ -77,6 +78,7 @@ export default function HomePage({
   const [journalRanking, setJournalRanking] = useState<JournalRanking | null>(null);
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [infoPanelVisible, setInfoPanelVisible] = useState(true);
+  const [citationDialogPaper, setCitationDialogPaper] = useState<PaperInfo | null>(null);
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -615,6 +617,16 @@ export default function HomePage({
               <RefreshCw size={14} />
               <span>提取元数据</span>
             </div>
+            <div
+              className="context-menu-item"
+              onClick={() => {
+                setCitationDialogPaper(contextMenu.paper);
+                setContextMenu(null);
+              }}
+            >
+              <Quote size={14} />
+              <span>导出参考文献引用</span>
+            </div>
             <div className="context-menu-separator" />
             <div
               className="context-menu-item danger"
@@ -630,6 +642,15 @@ export default function HomePage({
           </div>
         </div>,
         document.body,
+      )}
+
+      {/* ── Citation Export Dialog ── */}
+      {citationDialogPaper && citationDialogPaper.metadata && (
+        <CitationExportDialog
+          paperTitle={citationDialogPaper.metadata.title || citationDialogPaper.name}
+          metadata={citationDialogPaper.metadata}
+          onClose={() => setCitationDialogPaper(null)}
+        />
       )}
     </div>
   );

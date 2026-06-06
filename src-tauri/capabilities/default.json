@@ -25,6 +25,11 @@
     "core:path:default",
     "core:app:default",
     "core:resources:default",
-    "core:menu:default"
+    "core:menu:default",
+    "fs:default",
+    {
+      "identifier": "fs:allow-write-text-file",
+      "allow": [{ "path": "$HOME/**" }, { "path": "$DOCUMENT/**" }, { "path": "$DESKTOP/**" }, { "path": "$DOWNLOAD/**" }]
+    }
   ]
 }
