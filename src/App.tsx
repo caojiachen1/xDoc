@@ -931,8 +931,14 @@ function App() {
       filters: [{ name: "Documents", extensions: ["pdf", "png", "jpg", "jpeg", "bmp", "webp"] }],
     });
     if (selected && Array.isArray(selected)) {
+      const existingPaths = new Set(papersList.map(p => p.originalPath));
       const newPapers: PaperInfo[] = [];
       for (const sourcePath of selected) {
+        // Skip duplicates — same source file already imported
+        if (existingPaths.has(sourcePath)) {
+          console.log(`[App] skipping duplicate import: ${sourcePath}`);
+          continue;
+        }
         const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
         try {
@@ -958,7 +964,7 @@ function App() {
         setPapersList(prev => [...prev, ...newPapers]);
       }
     }
-  }, []);
+  }, [papersList]);
 
   const handleDeletePaper = useCallback(async (id: string) => {
     const paper = papersList.find(p => p.id === id);
@@ -978,8 +984,14 @@ function App() {
   }, [papersList, tabs, closeTab]);
 
   const handleDropImport = useCallback(async (paths: string[]) => {
+    const existingPaths = new Set(papersList.map(p => p.originalPath));
     const newPapers: PaperInfo[] = [];
     for (const sourcePath of paths) {
+      // Skip duplicates — same source file already imported
+      if (existingPaths.has(sourcePath)) {
+        console.log(`[App] skipping duplicate import: ${sourcePath}`);
+        continue;
+      }
       const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
       const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
       try {
@@ -1004,7 +1016,7 @@ function App() {
     if (newPapers.length > 0) {
       setPapersList(prev => [...prev, ...newPapers]);
     }
-  }, []);
+  }, [papersList]);
 
   const handleExtractMetadata = useCallback(async (paperId: string) => {
     const paper = papersList.find(p => p.id === paperId);
