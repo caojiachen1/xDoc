@@ -746,6 +746,27 @@ function App() {
     const existingTab = tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
     if (existingTab) {
       setActiveTabId(existingTab.id);
+      // If document is not currently loaded (e.g. user is on home tab), reload it
+      if (documentPath !== paper.path || !previewSrc) {
+        setDocumentPath(paper.path);
+        setPreviewSrc("");
+        setBoxes([]);
+        setSegments([]);
+        setSelectedParagraph(null);
+        setSelectedFigure(null);
+        setFigureImageDataUrl("");
+        setAiResult("");
+        setAiAction("");
+        setPdfPageIndex(0);
+        setPdfPageCount(0);
+        paragraphAiCacheRef.current.clear();
+        if (paper.path.toLowerCase().endsWith(".pdf")) {
+          loadPageData(paper.path, 0);
+          triggerGrobidParse(paper.path);
+        } else if (modelLoaded) {
+          runModel(0, paper.path);
+        }
+      }
       return;
     }
 
@@ -801,7 +822,7 @@ function App() {
     } else if (modelLoaded) {
       runModel(0, paper.path);
     }
-  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse]);
+  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse, documentPath, previewSrc]);
 
   const closeTab = useCallback((tabId: string) => {
     setTabs(prev => {
