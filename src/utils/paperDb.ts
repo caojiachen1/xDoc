@@ -17,6 +17,7 @@ export interface PaperRecord {
   title_translation: string | null;
   authors: string | null; // JSON array
   abstract_text: string | null;
+  abstract_translation: string | null;
   journal: string | null;
   publisher: string | null;
   date: string | null;
@@ -89,6 +90,7 @@ export function recordToPaperInfo(record: PaperRecord): PaperInfo {
         titleTranslation: record.title_translation ?? undefined,
         authors: safeJsonParse<string[]>(record.authors),
         abstract: record.abstract_text ?? undefined,
+        abstractTranslation: record.abstract_translation ?? undefined,
         journal: record.journal ?? undefined,
         publisher: record.publisher ?? undefined,
         date: record.date ?? undefined,
@@ -132,6 +134,7 @@ export function paperInfoToRecord(paper: PaperInfo): PaperRecord {
     title_translation: paper.metadata?.titleTranslation || null,
     authors: toJsonOrNull(paper.metadata?.authors),
     abstract_text: paper.metadata?.abstract || null,
+    abstract_translation: paper.metadata?.abstractTranslation || null,
     journal: paper.metadata?.journal || null,
     publisher: paper.metadata?.publisher || null,
     date: paper.metadata?.date || null,

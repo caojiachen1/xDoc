@@ -15,6 +15,7 @@ export interface PaperMetadata {
   titleTranslation?: string;
   authors?: string[];
   abstract?: string;
+  abstractTranslation?: string;
   journal?: string;
   publisher?: string;
   date?: string;

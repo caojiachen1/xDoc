@@ -66,6 +66,7 @@ pub struct PaperRecord {
     pub title_translation: Option<String>,
     pub authors: Option<String>,       // JSON array
     pub abstract_text: Option<String>,
+    pub abstract_translation: Option<String>,
     pub journal: Option<String>,
     pub publisher: Option<String>,
     pub date: Option<String>,
@@ -132,6 +133,7 @@ impl SettingsDb {
                 title_translation   TEXT,
                 authors             TEXT,
                 abstract_text       TEXT,
+                abstract_translation TEXT,
                 journal             TEXT,
                 publisher           TEXT,
                 date                TEXT,
@@ -150,6 +152,23 @@ impl SettingsDb {
             [],
         )
         .map_err(|e| anyhow::anyhow!("创建 papers 表失败: {e}"))?;
+
+        // Migration: add abstract_translation column if missing (for existing DBs)
+        {
+            let has_col: bool = conn
+                .prepare("PRAGMA table_info(papers)")
+                .and_then(|mut stmt| {
+                    let rows = stmt.query_map([], |row| {
+                        Ok(row.get::<_, String>(1)?)
+                    })?;
+                    Ok(rows.filter_map(|r| r.ok()).any(|name| name == "abstract_translation"))
+                })
+                .unwrap_or(false);
+            if !has_col {
+                conn.execute("ALTER TABLE papers ADD COLUMN abstract_translation TEXT", [])
+                    .map_err(|e| anyhow::anyhow!("迁移 abstract_translation 列失败: {e}"))?;
+            }
+        }
 
         // Annotations table — stores per-page annotation shapes
         conn.execute(
@@ -257,41 +276,42 @@ impl SettingsDb {
             "INSERT INTO papers (
                 id, name, original_path, managed_path, import_date,
                 last_read_date, file_size, title, title_translation,
-                authors, abstract_text, journal, publisher, date,
+                authors, abstract_text, abstract_translation, journal, publisher, date,
                 volume, issue, pages, doi, url, journal_abbrev,
                 issn, isbn, language, keywords, metadata_extracted
              ) VALUES (
                 ?1,  ?2,  ?3,  ?4,  ?5,
                 ?6,  ?7,  ?8,  ?9,
-                ?10, ?11, ?12, ?13, ?14,
-                ?15, ?16, ?17, ?18, ?19, ?20,
-                ?21, ?22, ?23, ?24, ?25
+                ?10, ?11, ?12, ?13, ?14, ?15,
+                ?16, ?17, ?18, ?19, ?20, ?21,
+                ?22, ?23, ?24, ?25, ?26
              )
              ON CONFLICT(id) DO UPDATE SET
-                name               = excluded.name,
-                original_path      = excluded.original_path,
-                managed_path       = excluded.managed_path,
-                import_date        = excluded.import_date,
-                last_read_date     = excluded.last_read_date,
-                file_size          = excluded.file_size,
-                title              = excluded.title,
-                title_translation  = excluded.title_translation,
-                authors            = excluded.authors,
-                abstract_text      = excluded.abstract_text,
-                journal            = excluded.journal,
-                publisher          = excluded.publisher,
-                date               = excluded.date,
-                volume             = excluded.volume,
-                issue              = excluded.issue,
-                pages              = excluded.pages,
-                doi                = excluded.doi,
-                url                = excluded.url,
-                journal_abbrev     = excluded.journal_abbrev,
-                issn               = excluded.issn,
-                isbn               = excluded.isbn,
-                language           = excluded.language,
-                keywords           = excluded.keywords,
-                metadata_extracted = excluded.metadata_extracted",
+                name                 = excluded.name,
+                original_path        = excluded.original_path,
+                managed_path         = excluded.managed_path,
+                import_date          = excluded.import_date,
+                last_read_date       = excluded.last_read_date,
+                file_size            = excluded.file_size,
+                title                = excluded.title,
+                title_translation    = excluded.title_translation,
+                authors              = excluded.authors,
+                abstract_text        = excluded.abstract_text,
+                abstract_translation = excluded.abstract_translation,
+                journal              = excluded.journal,
+                publisher            = excluded.publisher,
+                date                 = excluded.date,
+                volume               = excluded.volume,
+                issue                = excluded.issue,
+                pages                = excluded.pages,
+                doi                  = excluded.doi,
+                url                  = excluded.url,
+                journal_abbrev       = excluded.journal_abbrev,
+                issn                 = excluded.issn,
+                isbn                 = excluded.isbn,
+                language             = excluded.language,
+                keywords             = excluded.keywords,
+                metadata_extracted   = excluded.metadata_extracted",
             params![
                 paper.id,
                 paper.name,
@@ -304,6 +324,7 @@ impl SettingsDb {
                 paper.title_translation,
                 paper.authors,
                 paper.abstract_text,
+                paper.abstract_translation,
                 paper.journal,
                 paper.publisher,
                 paper.date,
@@ -329,7 +350,7 @@ impl SettingsDb {
         let mut stmt = conn.prepare(
             "SELECT id, name, original_path, managed_path, import_date,
                     last_read_date, file_size, title, title_translation,
-                    authors, abstract_text, journal, publisher, date,
+                    authors, abstract_text, abstract_translation, journal, publisher, date,
                     volume, issue, pages, doi, url, journal_abbrev,
                     issn, isbn, language, keywords, metadata_extracted
              FROM papers ORDER BY import_date DESC",
@@ -347,20 +368,21 @@ impl SettingsDb {
                 title_translation: row.get(8)?,
                 authors: row.get(9)?,
                 abstract_text: row.get(10)?,
-                journal: row.get(11)?,
-                publisher: row.get(12)?,
-                date: row.get(13)?,
-                volume: row.get(14)?,
-                issue: row.get(15)?,
-                pages: row.get(16)?,
-                doi: row.get(17)?,
-                url: row.get(18)?,
-                journal_abbrev: row.get(19)?,
-                issn: row.get(20)?,
-                isbn: row.get(21)?,
-                language: row.get(22)?,
-                keywords: row.get(23)?,
-                metadata_extracted: row.get::<_, i32>(24)? != 0,
+                abstract_translation: row.get(11)?,
+                journal: row.get(12)?,
+                publisher: row.get(13)?,
+                date: row.get(14)?,
+                volume: row.get(15)?,
+                issue: row.get(16)?,
+                pages: row.get(17)?,
+                doi: row.get(18)?,
+                url: row.get(19)?,
+                journal_abbrev: row.get(20)?,
+                issn: row.get(21)?,
+                isbn: row.get(22)?,
+                language: row.get(23)?,
+                keywords: row.get(24)?,
+                metadata_extracted: row.get::<_, i32>(25)? != 0,
             })
         })?;
         let mut out = Vec::new();

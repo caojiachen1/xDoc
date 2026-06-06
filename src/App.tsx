@@ -1051,6 +1051,33 @@ function App() {
     }
   }, [papersList]);
 
+  // Update a paper's titleTranslation in the list and persist to DB
+  const handleUpdateTitleTranslation = useCallback(async (paperId: string, translation: string) => {
+    setPapersList(prev => prev.map(p => {
+      if (p.id !== paperId) return p;
+      const updated: PaperInfo = {
+        ...p,
+        metadata: { ...p.metadata, titleTranslation: translation },
+      };
+      // Persist async (fire-and-forget)
+      savePaper(paperInfoToRecord(updated)).catch(e => console.warn("[App] persist titleTranslation failed:", e));
+      return updated;
+    }));
+  }, []);
+
+  // Update a paper's abstractTranslation in the list and persist to DB
+  const handleUpdateAbstractTranslation = useCallback(async (paperId: string, translation: string) => {
+    setPapersList(prev => prev.map(p => {
+      if (p.id !== paperId) return p;
+      const updated: PaperInfo = {
+        ...p,
+        metadata: { ...p.metadata, abstractTranslation: translation },
+      };
+      savePaper(paperInfoToRecord(updated)).catch(e => console.warn("[App] persist abstractTranslation failed:", e));
+      return updated;
+    }));
+  }, []);
+
   const isVisualBox = (clsId: number) => {
     // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
     const visual = new Set([3, 5, 9, 13, 14, 15, 20, 21]);
@@ -3459,6 +3486,9 @@ function App() {
               onExtractMetadata={handleExtractMetadata}
               extractingPaperId={extractingPaperId}
               grobidStatusMap={grobidStatusMap}
+              llmSettings={llmSettings}
+              onUpdateTitleTranslation={handleUpdateTitleTranslation}
+              onUpdateAbstractTranslation={handleUpdateAbstractTranslation}
             />
           </Card>
         ) : (

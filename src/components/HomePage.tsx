@@ -1,11 +1,13 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { fetch } from "@tauri-apps/plugin-http";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
+import type { LlmSettings } from "./SettingsDialog";
 import CitationExportDialog from "./CitationExportDialog";
 
 export type GrobidStatus = "pending" | "parsing" | "done" | "error";
@@ -34,6 +36,9 @@ interface HomePageProps {
   onExtractMetadata: (paperId: string) => void;
   extractingPaperId?: string | null;
   grobidStatusMap?: Record<string, GrobidStatus>;
+  llmSettings?: LlmSettings;
+  onUpdateTitleTranslation?: (paperId: string, translation: string) => void;
+  onUpdateAbstractTranslation?: (paperId: string, translation: string) => void;
 }
 
 const METADATA_FIELDS: { key: keyof PaperMetadata; label: string }[] = [
@@ -41,6 +46,7 @@ const METADATA_FIELDS: { key: keyof PaperMetadata; label: string }[] = [
   { key: "titleTranslation", label: "标题翻译" },
   { key: "authors", label: "作者" },
   { key: "abstract", label: "摘要" },
+  { key: "abstractTranslation", label: "摘要翻译" },
   { key: "journal", label: "出版物" },
   { key: "publisher", label: "出版社" },
   { key: "date", label: "日期" },
@@ -67,6 +73,9 @@ export default function HomePage({
   onExtractMetadata,
   extractingPaperId,
   grobidStatusMap,
+  llmSettings,
+  onUpdateTitleTranslation,
+  onUpdateAbstractTranslation,
 }: HomePageProps) {
   const [selectedCollection, setSelectedCollection] =
     useState<CollectionType>("all");
@@ -82,6 +91,10 @@ export default function HomePage({
   const [rankingMap, setRankingMap] = useState<Map<string, JournalRanking | null>>(new Map());
   const rankingMapRef = useRef(rankingMap);
   rankingMapRef.current = rankingMap;
+  const [showChinese, setShowChinese] = useState(false);
+  const [translatingIds, setTranslatingIds] = useState<Set<string>>(new Set());
+  const [translatingAbstractId, setTranslatingAbstractId] = useState<string | null>(null);
+  const [showTranslatedAbstract, setShowTranslatedAbstract] = useState(false);
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -102,6 +115,11 @@ export default function HomePage({
     document.addEventListener("click", reset);
     return () => document.removeEventListener("click", reset);
   }, [copiedField]);
+
+  // Reset abstract translation view when selecting a different paper
+  useEffect(() => {
+    setShowTranslatedAbstract(false);
+  }, [selectedPaperId]);
 
   // Auto-trigger metadata extraction when selecting a paper without metadata
   useEffect(() => {
@@ -142,6 +160,99 @@ export default function HomePage({
     return () => { cancelled = true; };
   }, [selectedPaper?.metadata?.journal, selectedPaper?.metadata?.journalAbbrev]);
 
+  // Translate a single paper's title via LLM
+  const translatePaperTitle = useCallback(async (paper: PaperInfo) => {
+    if (!llmSettings || !onUpdateTitleTranslation) return;
+    const title = paper.metadata?.title;
+    if (!title || paper.metadata?.titleTranslation) return;
+
+    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+    if (!apiKey || !llmSettings.baseUrl) return;
+
+    setTranslatingIds(prev => new Set(prev).add(paper.id));
+    try {
+      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+      const body: Record<string, unknown> = {
+        model: llmSettings.model,
+        messages: [
+          { role: "system", content: "你是一位专业的学术论文标题翻译专家。请将以下英文论文标题翻译成准确、流畅的中文。只输出翻译结果，不要任何额外内容。" },
+          { role: "user", content: title },
+        ],
+        temperature: 0.3,
+        max_tokens: 256,
+        stream: false,
+      };
+      if (llmSettings.vendor === "volcengine") {
+        body.thinking = { type: "disabled" };
+      }
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error(`LLM error ${resp.status}`);
+      const json = await resp.json();
+      const translated = (json as { choices: { message: { content: string } }[] }).choices?.[0]?.message?.content?.trim();
+      if (translated) {
+        onUpdateTitleTranslation(paper.id, translated);
+      }
+    } catch (e) {
+      console.warn(`[HomePage] translate title failed for "${title}":`, e);
+    } finally {
+      setTranslatingIds(prev => {
+        const next = new Set(prev);
+        next.delete(paper.id);
+        return next;
+      });
+    }
+  }, [llmSettings, onUpdateTitleTranslation]);
+
+  // Translate a paper's abstract via LLM
+  const translatePaperAbstract = useCallback(async (paper: PaperInfo) => {
+    if (!llmSettings || !onUpdateAbstractTranslation) return;
+    const abstract = paper.metadata?.abstract;
+    if (!abstract || paper.metadata?.abstractTranslation) return;
+
+    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+    if (!apiKey || !llmSettings.baseUrl) return;
+
+    // Strip leading "Abstract" label before sending to LLM
+    const cleanedAbstract = cleanAbstract(abstract);
+
+    setTranslatingAbstractId(paper.id);
+    try {
+      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+      const body: Record<string, unknown> = {
+        model: llmSettings.model,
+        messages: [
+          { role: "system", content: "你是一位专业的学术论文摘要翻译专家。请将以下英文论文摘要翻译成准确、流畅的中文。保留原文的段落结构。只输出纯文本翻译结果，不要使用任何 Markdown 格式（如加粗、斜体、标题、列表符号等）。不要添加任何额外说明或注释。" },
+          { role: "user", content: cleanedAbstract },
+        ],
+        temperature: 0.3,
+        max_tokens: 4096,
+        stream: false,
+      };
+      if (llmSettings.vendor === "volcengine") {
+        body.thinking = { type: "disabled" };
+      }
+      const resp = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok) throw new Error(`LLM error ${resp.status}`);
+      const json = await resp.json();
+      const translated = (json as { choices: { message: { content: string } }[] }).choices?.[0]?.message?.content?.trim();
+      if (translated) {
+        onUpdateAbstractTranslation(paper.id, translated);
+      }
+    } catch (e) {
+      console.warn(`[HomePage] translate abstract failed for "${paper.name}":`, e);
+    } finally {
+      setTranslatingAbstractId(null);
+    }
+  }, [llmSettings, onUpdateAbstractTranslation]);
+
   const filteredPapers = useMemo(() => {
     let result = papers;
     if (selectedCollection === "recent") {
@@ -161,6 +272,17 @@ export default function HomePage({
     }
     return result;
   }, [papers, selectedCollection, searchQuery]);
+
+  // Auto-translate all visible papers when Chinese mode is enabled
+  useEffect(() => {
+    if (!showChinese || !llmSettings) return;
+    for (const paper of filteredPapers) {
+      if (paper.metadata?.title && !paper.metadata?.titleTranslation && !translatingIds.has(paper.id)) {
+        translatePaperTitle(paper);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showChinese, filteredPapers, llmSettings]);
 
   // Batch-fetch journal rankings for all filtered papers
   useEffect(() => {
@@ -319,7 +441,7 @@ export default function HomePage({
 
   // Strip leading "Abstract" label from abstract text
   const cleanAbstract = (text: string): string => {
-    return text.replace(/^(?:Abstract|ABSTRACT|abstract)[\s:：\-—]+/, "").trim();
+    return text.replace(/^(?:Abstract|ABSTRACT|abstract|摘要)[\s:：\-—]+/, "").trim();
   };
 
   // Get ranking for a paper from the batch-fetched map
@@ -425,6 +547,14 @@ export default function HomePage({
             <Trash2 size={14} />
             删除
           </button>
+          <button
+            className={`home-toolbar-btn title-lang-toggle ${showChinese ? "active" : ""}`}
+            onClick={() => setShowChinese(v => !v)}
+            title={showChinese ? "显示原标题 (English)" : "显示中文翻译标题"}
+          >
+            <Languages size={14} />
+            {showChinese ? "中文" : "EN"}
+          </button>
           <div style={{ flex: 1 }} />
           <div className="home-search-box">
             <Search size={14} style={{ opacity: 0.5, flexShrink: 0 }} />
@@ -495,7 +625,12 @@ export default function HomePage({
                       <div className="home-paper-title">
                         <FileText size={15} style={{ flexShrink: 0 }} />
                         <span>
-                          {paper.metadata?.title || paper.name}
+                          {showChinese
+                            ? (paper.metadata?.titleTranslation
+                                || (translatingIds.has(paper.id)
+                                    ? "翻译中…"
+                                    : (paper.metadata?.title || paper.name)))
+                            : (paper.metadata?.title || paper.name)}
                         </span>
                       </div>
                     </td>
@@ -602,9 +737,31 @@ export default function HomePage({
 
                 const row = (
                   <div key={key} className="home-metadata-row">
-                    <div className="home-metadata-label">{label}</div>
+                    <div className="home-metadata-label">
+                      {label}
+                      {key === "abstract" && selectedPaper.metadata?.abstract && (
+                        <button
+                          className={`abstract-translate-btn ${showTranslatedAbstract && selectedPaper.metadata?.abstractTranslation ? "active" : ""}`}
+                          title={showTranslatedAbstract ? "显示原文" : "翻译摘要为中文"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (selectedPaper.metadata?.abstractTranslation) {
+                              setShowTranslatedAbstract(v => !v);
+                            } else {
+                              translatePaperAbstract(selectedPaper);
+                            }
+                          }}
+                        >
+                          {translatingAbstractId === selectedPaper.id
+                            ? <Loader2 size={11} className="grobid-status-spinning" />
+                            : <Languages size={11} />}
+                        </button>
+                      )}
+                    </div>
                     <div className="home-metadata-value">
-                      {renderMetadataValue(key, value)}
+                      {key === "abstract" && showTranslatedAbstract && selectedPaper.metadata?.abstractTranslation
+                        ? <div className="home-metadata-abstract">{cleanAbstract(selectedPaper.metadata.abstractTranslation)}</div>
+                        : renderMetadataValue(key, value)}
                       <button
                         className={`home-metadata-copy ${copiedField === key ? "copied" : ""}`}
                         title="复制"
