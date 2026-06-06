@@ -28,6 +28,7 @@ export interface PaperMetadata {
   isbn?: string;
   language?: string;
   keywords?: string[];
+  category?: string; // e.g. "journal-article", "book-chapter", "proceedings-article"
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {

@@ -937,6 +937,8 @@ function App() {
         const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
         try {
           const managedPath = await copyToManaged(sourcePath, id);
+          let fileSize: number | undefined;
+          try { fileSize = await invoke<number>("paper_file_size", { filePath: managedPath }); } catch {}
           const paper: PaperInfo = {
             id,
             name,
@@ -944,6 +946,7 @@ function App() {
             originalPath: sourcePath,
             managedPath,
             importDate: new Date().toISOString(),
+            fileSize,
           };
           await savePaper(paperInfoToRecord(paper));
           newPapers.push(paper);
@@ -981,6 +984,8 @@ function App() {
       const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
       try {
         const managedPath = await copyToManaged(sourcePath, id);
+        let fileSize: number | undefined;
+        try { fileSize = await invoke<number>("paper_file_size", { filePath: managedPath }); } catch {}
         const paper: PaperInfo = {
           id,
           name,
@@ -988,6 +993,7 @@ function App() {
           originalPath: sourcePath,
           managedPath,
           importDate: new Date().toISOString(),
+          fileSize,
         };
         await savePaper(paperInfoToRecord(paper));
         newPapers.push(paper);
@@ -1447,6 +1453,32 @@ function App() {
       try {
         const records = await listPapers();
         const papers = records.map(recordToPaperInfo);
+        // Backfill fileSize for papers that don't have it
+        const needsBackfill = papers.filter(p => !p.fileSize);
+        console.log(`[App] backfill: ${needsBackfill.length} papers need fileSize`);
+        if (needsBackfill.length > 0) {
+          for (const p of needsBackfill) {
+            const target = p.managedPath || p.path;
+            try {
+              const size = await invoke<number>("paper_file_size", { filePath: target });
+              p.fileSize = size;
+              console.log(`[App] backfill: ${p.name} -> ${size} bytes (path=${target})`);
+            } catch (err) {
+              console.warn(`[App] backfill: FAILED for ${p.name} path=${target}`, err);
+            }
+          }
+          // Persist backfilled sizes
+          for (const p of needsBackfill) {
+            if (p.fileSize) {
+              try {
+                await savePaper(paperInfoToRecord(p));
+                console.log(`[App] backfill: saved ${p.name} fileSize=${p.fileSize}`);
+              } catch (err) {
+                console.warn(`[App] backfill: save FAILED for ${p.name}`, err);
+              }
+            }
+          }
+        }
         setPapersList(papers);
         console.log(`[App] loaded ${papers.length} papers from database`);
       } catch (e) {

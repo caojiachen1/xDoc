@@ -2931,6 +2931,18 @@ fn paper_get_managed_dir() -> Result<String, String> {
     Ok(get_papers_dir().to_string_lossy().to_string())
 }
 
+/// Get file size in bytes for a given path.
+#[tauri::command]
+fn paper_file_size(file_path: String) -> Result<i64, String> {
+    let p = Path::new(&file_path);
+    if !p.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+    p.metadata()
+        .map(|m| m.len() as i64)
+        .map_err(|e| format!("Failed to get file size: {e}"))
+}
+
 /// Rename a managed paper file (e.g. after title is extracted from metadata).
 #[tauri::command]
 fn paper_rename(old_path: String, new_title: String) -> Result<String, String> {
@@ -3602,6 +3614,7 @@ pub fn run() {
             paper_list,
             paper_delete,
             paper_get_managed_dir,
+            paper_file_size,
             paper_rename,
             journal_ranking,
             annotation_save,

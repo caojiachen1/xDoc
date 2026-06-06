@@ -144,6 +144,11 @@ function parseCrossRefMessage(msg: Record<string, unknown>): Partial<PaperMetada
     result.keywords = subjects.map((s) => s.trim()).filter(Boolean);
   }
 
+  // Document type/category
+  if (typeof msg.type === "string" && msg.type) {
+    result.category = msg.type;
+  }
+
   return result;
 }
 

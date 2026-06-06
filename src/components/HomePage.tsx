@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from "react";
+import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
@@ -79,6 +79,9 @@ export default function HomePage({
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [infoPanelVisible, setInfoPanelVisible] = useState(true);
   const [citationDialogPaper, setCitationDialogPaper] = useState<PaperInfo | null>(null);
+  const [rankingMap, setRankingMap] = useState<Map<string, JournalRanking | null>>(new Map());
+  const rankingMapRef = useRef(rankingMap);
+  rankingMapRef.current = rankingMap;
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -158,6 +161,40 @@ export default function HomePage({
     }
     return result;
   }, [papers, selectedCollection, searchQuery]);
+
+  // Batch-fetch journal rankings for all filtered papers
+  useEffect(() => {
+    let cancelled = false;
+    const currentMap = rankingMapRef.current;
+    const journalsToFetch = new Set<string>();
+    for (const p of filteredPapers) {
+      const j = p.metadata?.journal;
+      const ja = p.metadata?.journalAbbrev;
+      if (j && !currentMap.has(j)) journalsToFetch.add(j);
+      if (ja && ja !== j && !currentMap.has(ja)) journalsToFetch.add(ja);
+    }
+    if (journalsToFetch.size === 0) return;
+    const fetchAll = async () => {
+      const updates = new Map<string, JournalRanking | null>();
+      for (const journal of journalsToFetch) {
+        try {
+          const r = await lookupJournalRanking(journal);
+          updates.set(journal, r);
+        } catch {
+          updates.set(journal, null);
+        }
+      }
+      if (!cancelled) {
+        setRankingMap(prev => {
+          const merged = new Map(prev);
+          for (const [k, v] of updates) merged.set(k, v);
+          return merged;
+        });
+      }
+    };
+    fetchAll();
+    return () => { cancelled = true; };
+  }, [filteredPapers]);
 
   const collections: {
     key: CollectionType;
@@ -261,6 +298,39 @@ export default function HomePage({
     return map[zone] || `${zone}区`;
   };
 
+  // Derive document category from metadata
+  const deriveCategory = (metadata?: PaperMetadata): string => {
+    if (!metadata) return "-";
+    if (metadata.category) {
+      const cat = metadata.category.toLowerCase();
+      if (cat.includes("journal")) return "期刊文章";
+      if (cat.includes("proceedings") || cat.includes("conference")) return "会议论文";
+      if (cat.includes("book")) return "书籍/章节";
+      if (cat.includes("report")) return "报告";
+      if (cat.includes("thesis") || cat.includes("dissertation")) return "学位论文";
+      if (cat.includes("preprint") || cat.includes("posted-content")) return "预印本";
+      return "文献";
+    }
+    if (metadata.journal) return "期刊文章";
+    if (metadata.isbn) return "书籍/章节";
+    if (metadata.url?.includes("arxiv")) return "预印本";
+    return "文献";
+  };
+
+  // Strip leading "Abstract" label from abstract text
+  const cleanAbstract = (text: string): string => {
+    return text.replace(/^(?:Abstract|ABSTRACT|abstract)[\s:：\-—]+/, "").trim();
+  };
+
+  // Get ranking for a paper from the batch-fetched map
+  const getPaperRanking = (paper: PaperInfo): JournalRanking | null => {
+    const j = paper.metadata?.journal;
+    const ja = paper.metadata?.journalAbbrev;
+    if (j && rankingMap.has(j)) return rankingMap.get(j) ?? null;
+    if (ja && rankingMap.has(ja)) return rankingMap.get(ja) ?? null;
+    return null;
+  };
+
   const renderMetadataValue = (key: keyof PaperMetadata, value: unknown) => {
     if (key === "authors" && Array.isArray(value)) {
       return (
@@ -298,7 +368,7 @@ export default function HomePage({
       );
     }
     if (key === "abstract") {
-      return <div className="home-metadata-abstract">{String(value)}</div>;
+      return <div className="home-metadata-abstract">{cleanAbstract(String(value))}</div>;
     }
     return <span>{String(value)}</span>;
   };
@@ -387,12 +457,15 @@ export default function HomePage({
             <table className="home-table">
               <thead>
                 <tr>
-                  <th style={{ width: "5%" }}></th>
-                  <th style={{ width: "49%" }}>标题</th>
-                  <th style={{ width: "8%" }}>类型</th>
-                  <th style={{ width: "13%" }}>导入日期</th>
-                  <th style={{ width: "10%" }}>大小</th>
-                  <th style={{ width: "15%" }}>最近阅读</th>
+                  <th style={{ width: "3%" }}></th>
+                  <th style={{ width: "28%" }}>标题</th>
+                  <th style={{ width: "18%" }}>作者</th>
+                  <th style={{ width: "12%" }}>期刊</th>
+                  <th style={{ width: "7%" }}>分区</th>
+                  <th style={{ width: "6%" }}>类目</th>
+                  <th style={{ width: "8%" }}>发表时间</th>
+                  <th style={{ width: "6%" }}>大小</th>
+                  <th style={{ width: "12%" }}>最近阅读</th>
                 </tr>
               </thead>
               <tbody>
@@ -427,11 +500,32 @@ export default function HomePage({
                       </div>
                     </td>
                     <td>
-                      <span className="home-paper-type">
-                        {paper.path.toLowerCase().endsWith(".pdf") ? "PDF" : "图片"}
+                      <span className="home-paper-authors" title={paper.metadata?.authors?.join(", ") || ""}>
+                        {paper.metadata?.authors?.length
+                          ? paper.metadata.authors.join(", ")
+                          : "-"}
                       </span>
                     </td>
-                    <td>{formatDate(paper.importDate)}</td>
+                    <td>
+                      <span className="home-paper-journal">
+                        {paper.metadata?.journal || paper.metadata?.journalAbbrev || "-"}
+                      </span>
+                    </td>
+                    <td>
+                      {(() => {
+                        const r = getPaperRanking(paper);
+                        if (!r) return <span style={{ opacity: 0.4 }}>-</span>;
+                        return (
+                          <span className={`ranking-badge zone-${r.zone}`}>
+                            {zoneLabel(r.zone)}
+                          </span>
+                        );
+                      })()}
+                    </td>
+                    <td>
+                      <span className="home-paper-category">{deriveCategory(paper.metadata)}</span>
+                    </td>
+                    <td>{paper.metadata?.date || "-"}</td>
                     <td>{formatFileSize(paper.fileSize)}</td>
                     <td>
                       {paper.lastReadDate
