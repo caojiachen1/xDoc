@@ -3474,6 +3474,11 @@ async fn read_file_base64(file_path: String) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
 
+#[tauri::command]
+fn split_sentences(text: String, language: String) -> Vec<String> {
+    sentencex::segment(&language, &text).into_iter().map(|s| s.to_string()).collect()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -3606,6 +3611,7 @@ pub fn run() {
             grobid_parse_document,
             grobid_batch_parse,
             grobid_save_ref_enrichment,
+            split_sentences,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

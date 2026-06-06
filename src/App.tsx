@@ -434,6 +434,10 @@ function App() {
   const [ocrInitialized, setOcrInitialized] = useState(false);
   const [ocrError, setOcrError] = useState("");
 
+  // Sentence-split text states (populated asynchronously via Rust sentencex)
+  const [splitParagraphWords, setSplitParagraphWords] = useState<string[]>([]);
+  const [splitOcrText, setSplitOcrText] = useState("");
+
   // Fulltext extraction state
   const [fulltextExtracting, setFulltextExtracting] = useState(false);
   const [fulltextProgress, setFulltextProgress] = useState({ current: 0, total: 0 });
@@ -2692,17 +2696,11 @@ function App() {
   // Gather all visible text in the text-pane for batch AI actions
   const getPaneFullText = (): string => {
     let parts: string[] = [];
-    if (selectedParagraph?.text) {
-      parts.push(selectedParagraph.text
-        .replace(/[\r\n]+/g, "")
-        .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
-      );
+    if (selectedParagraph?.text && splitParagraphWords.length > 0) {
+      parts.push(splitParagraphWords.join(""));
     }
-    if (ocrText) {
-      parts.push(ocrText
-        .replace(/[\r\n]+/g, "")
-        .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
-      );
+    if (ocrText && splitOcrText) {
+      parts.push(splitOcrText);
     }
     return parts.join("\n---\n");
   };
@@ -2981,23 +2979,58 @@ function App() {
     };
   }, [pdfFloatingMenu.visible]);
 
-  const segmentedParagraph = useMemo(() => {
-    if (!selectedParagraph?.text) return [];
-    
-    // Remove original physical newlines, then add newlines after Chinese and English sentence punctuations (excluding decimal points and common abbreviations)
-    const formattedText = selectedParagraph.text
-      .replace(/[\r\n]+/g, "") // Remove existing physical line breaks
-      .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n"); // Add explicit line break after punctuation
-
-    try {
-      // @ts-ignore
-      const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-      // @ts-ignore
-      return Array.from(segmenter.segment(formattedText)).map((s: any) => s.segment);
-    } catch {
-      return formattedText.split(/(?=[\u4e00-\u9fa5])/); // simple fallback
+  // Async sentence splitting for PDF paragraph text using Rust sentencex crate
+  useEffect(() => {
+    let cancelled = false;
+    if (!selectedParagraph?.text) {
+      setSplitParagraphWords([]);
+      return;
     }
+    const rawText = selectedParagraph.text.replace(/[\r\n]+/g, "");
+    invoke<string[]>("split_sentences", { text: rawText, language: "en" })
+      .then((sentences) => {
+        if (cancelled) return;
+        const formattedText = sentences.join("\n");
+        try {
+          // @ts-ignore
+          const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+          // @ts-ignore
+          setSplitParagraphWords(Array.from(segmenter.segment(formattedText)).map((s: any) => s.segment));
+        } catch {
+          setSplitParagraphWords(formattedText.split(/(?=[\u4e00-\u9fa5])/));
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        try {
+          // @ts-ignore
+          const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+          // @ts-ignore
+          setSplitParagraphWords(Array.from(segmenter.segment(rawText)).map((s: any) => s.segment));
+        } catch {
+          setSplitParagraphWords(rawText.split(/(?=[\u4e00-\u9fa5])/));
+        }
+      });
+    return () => { cancelled = true; };
   }, [selectedParagraph?.text]);
+
+  // Async sentence splitting for OCR text using Rust sentencex crate
+  useEffect(() => {
+    let cancelled = false;
+    if (!ocrText) {
+      setSplitOcrText("");
+      return;
+    }
+    const rawText = ocrText.replace(/[\r\n]+/g, "");
+    invoke<string[]>("split_sentences", { text: rawText, language: "en" })
+      .then((sentences) => {
+        if (!cancelled) setSplitOcrText(sentences.join("\n"));
+      })
+      .catch(() => {
+        if (!cancelled) setSplitOcrText(rawText);
+      });
+    return () => { cancelled = true; };
+  }, [ocrText]);
 
   // LaTeX renderer: converts text to clickable words and $...$, $$...$$ math to HTML nodes
   const renderOcrNodes = useCallback((text: string): React.ReactNode[] => {
@@ -4046,7 +4079,7 @@ function App() {
                         <div className="pane-section-card">
                           <div className="pane-section-label">PDF 原文</div>
                           <div className="ocr-latex-content pane-text-content" style={{ fontSize: textFontSize }}>
-                            {segmentedParagraph.map((word, idx) => (
+                            {splitParagraphWords.map((word, idx) => (
                               <span
                                 key={idx}
                                 className="word-span"
@@ -4078,11 +4111,7 @@ function App() {
                               className="ocr-latex-content pane-text-content"
                               style={{ fontSize: textFontSize }}
                             >
-                              {renderOcrNodes(
-                                ocrText
-                                  .replace(/[\r\n]+/g, "")
-                                  .replace(/(?<!\b(?:al|etc|fig|eq|vs|ref|sec|[a-zA-Z]))(?<!\.)([。！？.!?])(?!\d|\.)(?:\s*)/gi, "$1\n")
-                              )}
+                              {renderOcrNodes(splitOcrText)}
                             </div>
                           ) : (
                             <div className="pane-placeholder">点击段落以进行 OCR 识别</div>

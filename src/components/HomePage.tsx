@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -75,6 +75,8 @@ export default function HomePage({
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; paper: PaperInfo } | null>(null);
   const [journalRanking, setJournalRanking] = useState<JournalRanking | null>(null);
+  const [sidebarVisible, setSidebarVisible] = useState(true);
+  const [infoPanelVisible, setInfoPanelVisible] = useState(true);
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -301,6 +303,7 @@ export default function HomePage({
 
   return (
     <div className="home-page">
+      {sidebarVisible && (
       <div className="home-sidebar">
         <div className="home-sidebar-header">我的文库</div>
         {collections.map((col) => (
@@ -321,6 +324,7 @@ export default function HomePage({
           </div>
         ))}
       </div>
+      )}
 
       <div
         className="home-content"
@@ -360,6 +364,20 @@ export default function HomePage({
               className="home-search-input"
             />
           </div>
+          <button
+            className={`home-toolbar-btn ${!sidebarVisible ? "primary" : ""}`}
+            onClick={() => setSidebarVisible(v => !v)}
+            title={sidebarVisible ? "隐藏文库栏" : "显示文库栏"}
+          >
+            {sidebarVisible ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+          </button>
+          <button
+            className={`home-toolbar-btn ${!infoPanelVisible ? "primary" : ""}`}
+            onClick={() => setInfoPanelVisible(v => !v)}
+            title={infoPanelVisible ? "隐藏信息栏" : "显示信息栏"}
+          >
+            {infoPanelVisible ? <PanelRightClose size={14} /> : <PanelRightOpen size={14} />}
+          </button>
         </div>
 
         <div className="home-paper-list" onClick={() => setSelectedPaperId(null)}>
@@ -454,6 +472,7 @@ export default function HomePage({
       </div>
 
       {/* ── Metadata Sidebar Panel ── */}
+      {infoPanelVisible && (
       <div className="home-metadata-panel">
         <div className="home-metadata-header">
           <Info size={15} />
@@ -541,6 +560,7 @@ export default function HomePage({
             )}
           </div>
         </div>
+      )}
 
       {/* ── Context Menu (rendered via Portal to avoid containing-block issues) ── */}
       {contextMenu && createPortal(
