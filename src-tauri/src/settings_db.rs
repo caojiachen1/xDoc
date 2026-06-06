@@ -459,10 +459,10 @@ impl SettingsDb {
                 "tech" => "technology",
                 "res" => "research",
                 "lett" => "letters",
-                "proc" => "proceedings",
+                "proc" | "proceed" => "proceedings",
                 "trans" => "transactions",
                 "rev" => "review",
-                "adv" => "advanced",
+                "adv" | "advan" => "advanced",
                 "appl" => "applied",
                 "comput" => "computer",
                 "inf" => "information",
@@ -476,15 +476,96 @@ impl SettingsDb {
                 "electron" => "electronics",
                 "mech" => "mechanical",
                 "civ" => "civil",
-                "environ" => "environmental",
+                "environ" | "env" => "environmental",
                 "nat" => "natural",
                 "bull" => "bulletin",
                 "mag" => "magazine",
                 "rept" | "rep" => "report",
+                "ann" => "annals",
+                "arch" => "archives",
+                "comm" | "commun" => "communications",
+                "conf" => "conference",
+                "dev" | "develop" => "development",
+                "educ" => "education",
+                "exp" => "experimental",
+                "ind" | "industr" => "industrial",
+                "inst" => "institute",
+                "math" => "mathematics",
+                "micro" => "microscopy",
+                "mol" => "molecular",
+                "nano" => "nanotechnology",
+                "neurol" => "neurology",
+                "num" => "numerical",
+                "pharm" => "pharmaceutical",
+                "polym" => "polymers",
+                "pract" => "practice",
+                "prog" => "progress",
+                "quant" => "quantum",
+                "soc" => "society",
+                "stat" => "statistics",
+                "struct" => "structural",
+                "surv" => "survey",
+                "theor" => "theoretical",
                 _ => *w,
             }
         }).collect();
         expanded.join(" ")
+    }
+
+    /// Contract full journal name words to their abbreviated forms (reverse of expand).
+    fn contract_journal_abbrevs(norm: &str) -> String {
+        let words: Vec<&str> = norm.split_whitespace().collect();
+        let contracted: Vec<&str> = words.iter().map(|w| {
+            match *w {
+                "journal" => "j",
+                "international" => "int",
+                "science" => "sci",
+                "engineering" => "eng",
+                "technology" => "tech",
+                "research" => "res",
+                "letters" => "lett",
+                "proceedings" => "proc",
+                "transactions" => "trans",
+                "review" => "rev",
+                "advanced" => "adv",
+                "applied" => "appl",
+                "computer" => "comput",
+                "information" => "inf",
+                "systems" => "syst",
+                "materials" => "mater",
+                "chemistry" => "chem",
+                "physics" => "phys",
+                "biology" => "biol",
+                "medicine" => "med",
+                "electrical" => "elec",
+                "electronics" => "electron",
+                "mechanical" => "mech",
+                "civil" => "civ",
+                "environmental" => "environ",
+                "natural" => "nat",
+                "bulletin" => "bull",
+                "magazine" => "mag",
+                "annals" => "ann",
+                "archives" => "arch",
+                "communications" => "commun",
+                "conference" => "conf",
+                "development" => "dev",
+                "education" => "educ",
+                "experimental" => "exp",
+                "industrial" => "ind",
+                "institute" => "inst",
+                "mathematics" => "math",
+                "molecular" => "mol",
+                "pharmaceutical" => "pharm",
+                "polymers" => "polym",
+                "progress" => "prog",
+                "society" => "soc",
+                "statistics" => "stat",
+                "theoretical" => "theor",
+                _ => *w,
+            }
+        }).collect();
+        contracted.join(" ")
     }
 
     /// Common English stop words to filter for token-overlap matching.
@@ -566,7 +647,7 @@ impl SettingsDb {
             return Ok(Some(row));
         }
 
-        // 2. Abbreviation-expanded match
+        // 2. Abbreviation-expanded match (query has abbreviations, DB has full names)
         let expanded = Self::expand_journal_abbrevs(&norm);
         if expanded != norm {
             let mut stmt2 = conn.prepare(
@@ -576,6 +657,17 @@ impl SettingsDb {
             if let Some(row) = row {
                 return Ok(Some(row));
             };
+        }
+
+        // 2b. Abbreviation-contracted match (query has full names, DB has abbreviations)
+        let contracted = Self::contract_journal_abbrevs(&norm);
+        if contracted != norm && contracted != expanded {
+            let mut stmt2b = conn.prepare(
+                "SELECT journal, zone, is_top, is_oa FROM journal_rankings WHERE journal_norm = ?1"
+            )?;
+            if let Ok(row) = stmt2b.query_row(params![&contracted], make_ranking) {
+                return Ok(Some(row));
+            }
         }
 
         // 3. Substring / containment match

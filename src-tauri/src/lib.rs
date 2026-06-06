@@ -894,6 +894,14 @@ pub struct GrobidEquationOutput {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GrobidRefRankingCache {
+    pub journal: String,
+    pub zone: i32,
+    pub is_top: bool,
+    pub is_oa: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct GrobidRefOutput {
     pub id: Option<String>,
     pub title: Option<String>,
@@ -909,6 +917,21 @@ pub struct GrobidRefOutput {
     pub publisher: Option<String>,
     pub doi: Option<String>,
     pub raw: Option<String>,
+    // Cached enrichment fields (saved by frontend after CrossRef + ranking lookup)
+    #[serde(default)]
+    pub crossref_journal: Option<String>,
+    #[serde(default)]
+    pub crossref_abstract: Option<String>,
+    #[serde(default)]
+    pub crossref_doi: Option<String>,
+    #[serde(default)]
+    pub crossref_url: Option<String>,
+    #[serde(default)]
+    pub crossref_authors: Option<Vec<String>>,
+    #[serde(default)]
+    pub crossref_date: Option<String>,
+    #[serde(default)]
+    pub ranking: Option<GrobidRefRankingCache>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -931,6 +954,7 @@ pub struct GrobidEngineState {
 struct GrobidParseEvent {
     status: String,
     message: String,
+    file_path: Option<String>,
     result: Option<GrobidDocumentOutput>,
     error: Option<String>,
 }
@@ -1356,6 +1380,7 @@ async fn grobid_parse_document(
                 let _ = app.emit("grobid-parse-event", GrobidParseEvent {
                     status: "parsing".to_string(),
                     message: "正在重新解析文档结构…".to_string(),
+                    file_path: Some(file_path.clone()),
                     result: None,
                     error: None,
                 });
@@ -1388,6 +1413,7 @@ async fn grobid_parse_document(
                             status: "completed".to_string(),
                             message: format!("结构重解析完成: {} 章节, {} 图片, {} 表格",
                                 result.sections.len(), result.figures.len(), result.tables.len()),
+                            file_path: Some(file_path.clone()),
                             result: Some(result.clone()),
                             error: None,
                         });
@@ -1397,6 +1423,7 @@ async fn grobid_parse_document(
                         let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
                             status: "error".to_string(),
                             message: format!("结构重解析失败: {e}"),
+                            file_path: Some(file_path.clone()),
                             result: None,
                             error: Some(e.clone()),
                         });
@@ -1448,6 +1475,7 @@ async fn grobid_parse_document(
                 let _ = app.emit("grobid-parse-event", GrobidParseEvent {
                     status: "completed".to_string(),
                     message: "使用缓存结果".to_string(),
+                    file_path: Some(file_path.clone()),
                     result: Some(doc.clone()),
                     error: None,
                 });
@@ -1480,6 +1508,7 @@ async fn grobid_parse_document(
         let _ = app.emit("grobid-parse-event", GrobidParseEvent {
             status: "initializing".to_string(),
             message: "正在初始化 Grobid 引擎…".to_string(),
+            file_path: Some(file_path.clone()),
             result: None,
             error: None,
         });
@@ -1529,6 +1558,7 @@ async fn grobid_parse_document(
                 let _ = app.emit("grobid-parse-event", GrobidParseEvent {
                     status: "error".to_string(),
                     message: format!("引擎初始化失败: {e}"),
+                    file_path: Some(file_path.clone()),
                     result: None,
                     error: Some(e.clone()),
                 });
@@ -1550,6 +1580,7 @@ async fn grobid_parse_document(
     let _ = app.emit("grobid-parse-event", GrobidParseEvent {
         status: "parsing".to_string(),
         message: parse_desc,
+        file_path: Some(file_path.clone()),
         result: None,
         error: None,
     });
@@ -1640,6 +1671,13 @@ async fn grobid_parse_document(
                     publisher: r.publisher.clone(),
                     doi: r.doi.clone(),
                     raw: r.raw.clone(),
+                    crossref_journal: None,
+                    crossref_abstract: None,
+                    crossref_doi: None,
+                    crossref_url: None,
+                    crossref_authors: None,
+                    crossref_date: None,
+                    ranking: None,
                 }).collect(),
                 Err(e) => {
                     eprintln!("[xDoc:grobid] references parsing failed: {e}");
@@ -1673,6 +1711,7 @@ async fn grobid_parse_document(
                 status: "completed".to_string(),
                 message: format!("解析完成: {} 条参考文献, {} 章节",
                     result.references.len(), result.sections.len()),
+                file_path: Some(file_path.clone()),
                 result: Some(result.clone()),
                 error: None,
             });
@@ -1682,12 +1721,98 @@ async fn grobid_parse_document(
             let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
                 status: "error".to_string(),
                 message: format!("解析失败: {e}"),
+                file_path: Some(file_path.clone()),
                 result: None,
                 error: Some(e.clone()),
             });
             Err(e)
         }
     }
+}
+
+/// Batch-parse multiple PDFs sequentially.
+/// The frontend should call `grobid_ensure_ready` first, then invoke this command.
+/// Each completed parse emits a `grobid-parse-event` with the file_path field set.
+#[tauri::command]
+async fn grobid_batch_parse(
+    app: AppHandle,
+    paths: Vec<String>,
+    state: State<'_, GrobidEngineState>,
+) -> Result<Vec<String>, String> {
+    eprintln!("[xDoc:grobid] batch parse: {} files", paths.len());
+
+    let mut parsed_paths = Vec::new();
+
+    for file_path in &paths {
+        match grobid_parse_document(app.clone(), file_path.clone(), Some(false), Some(false), state.clone()).await {
+            Ok(_) => {
+                parsed_paths.push(file_path.clone());
+            }
+            Err(e) => {
+                eprintln!("[xDoc:grobid] batch: failed to parse {}: {}", file_path, e);
+                let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                    status: "error".to_string(),
+                    message: format!("解析失败: {}", e),
+                    file_path: Some(file_path.clone()),
+                    result: None,
+                    error: Some(e),
+                });
+            }
+        }
+    }
+
+    eprintln!("[xDoc:grobid] batch parse done: {}/{} succeeded", parsed_paths.len(), paths.len());
+    Ok(parsed_paths)
+}
+
+/// Save enrichment data (CrossRef + ranking) for a specific reference into the JSON cache.
+#[tauri::command]
+async fn grobid_save_ref_enrichment(
+    file_path: String,
+    ref_index: usize,
+    crossref_journal: Option<String>,
+    crossref_abstract: Option<String>,
+    crossref_doi: Option<String>,
+    crossref_url: Option<String>,
+    crossref_authors: Option<Vec<String>>,
+    crossref_date: Option<String>,
+    ranking_journal: Option<String>,
+    ranking_zone: Option<i32>,
+    ranking_is_top: Option<bool>,
+    ranking_is_oa: Option<bool>,
+) -> Result<(), String> {
+    let pdf_path = std::path::PathBuf::from(&file_path);
+    let cache_path = grobid_cache_path(&pdf_path);
+
+    // Load existing cache
+    let mut doc = load_grobid_json_cache(&pdf_path).ok_or_else(|| "No cache file found".to_string())?;
+
+    // Update the specific reference
+    if ref_index < doc.references.len() {
+        let r = &mut doc.references[ref_index];
+        if let Some(v) = crossref_journal { r.crossref_journal = Some(v); }
+        if let Some(v) = crossref_abstract { r.crossref_abstract = Some(v); }
+        if let Some(v) = crossref_doi { r.crossref_doi = Some(v); }
+        if let Some(v) = crossref_url { r.crossref_url = Some(v); }
+        if let Some(v) = crossref_authors { r.crossref_authors = Some(v); }
+        if let Some(v) = crossref_date { r.crossref_date = Some(v); }
+        // Save ranking if provided
+        if let (Some(journal), Some(zone)) = (ranking_journal, ranking_zone) {
+            r.ranking = Some(GrobidRefRankingCache {
+                journal,
+                zone,
+                is_top: ranking_is_top.unwrap_or(false),
+                is_oa: ranking_is_oa.unwrap_or(false),
+            });
+        }
+    } else {
+        return Err(format!("ref_index {} out of range (refs: {})", ref_index, doc.references.len()));
+    }
+
+    // Save back to JSON
+    save_grobid_json_cache(&pdf_path, &doc);
+    eprintln!("[xDoc:grobid] saved enrichment for ref {} in {}", ref_index, cache_path.display());
+    Ok(())
 }
 
 fn threshold_cache_key(threshold: f32) -> i32 {
@@ -3479,6 +3604,8 @@ pub fn run() {
             export_annotated_pdf,
             grobid_ensure_ready,
             grobid_parse_document,
+            grobid_batch_parse,
+            grobid_save_ref_enrichment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

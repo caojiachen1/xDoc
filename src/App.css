@@ -1459,6 +1459,26 @@
   display: inline-block;
 }
 
+/* GROBID parse status indicators */
+.grobid-status-spinning {
+  color: #6cb4ee;
+  animation: grobid-spin 1s linear infinite;
+}
+.grobid-status-done {
+  color: #5cb85c;
+}
+.grobid-status-error {
+  color: #d9534f;
+}
+.grobid-status-pending {
+  color: rgba(255, 255, 255, 0.2);
+  font-size: 12px;
+}
+@keyframes grobid-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 .home-empty {
   display: flex;
   flex-direction: column;
@@ -2353,6 +2373,27 @@
 .ref-reparse-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── Re-query ranking button ── */
+.ref-requery-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  cursor: pointer;
+  margin-left: 4px;
+  transition: all 0.15s;
+}
+.ref-requery-btn:hover {
+  color: #6cb4ee;
+  background: rgba(108, 180, 238, 0.1);
+  border-color: rgba(108, 180, 238, 0.3);
 }
 
 /* ── Structure Tree ── */

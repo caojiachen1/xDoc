@@ -1,11 +1,13 @@
 import { useState, useMemo, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
+
+export type GrobidStatus = "pending" | "parsing" | "done" | "error";
 
 export interface PaperInfo {
   id: string;
@@ -30,6 +32,7 @@ interface HomePageProps {
   onDropImport: (paths: string[]) => void;
   onExtractMetadata: (paperId: string) => void;
   extractingPaperId?: string | null;
+  grobidStatusMap?: Record<string, GrobidStatus>;
 }
 
 const METADATA_FIELDS: { key: keyof PaperMetadata; label: string }[] = [
@@ -62,6 +65,7 @@ export default function HomePage({
   onDropImport,
   onExtractMetadata,
   extractingPaperId,
+  grobidStatusMap,
 }: HomePageProps) {
   const [selectedCollection, setSelectedCollection] =
     useState<CollectionType>("all");
@@ -363,8 +367,9 @@ export default function HomePage({
             <table className="home-table">
               <thead>
                 <tr>
-                  <th style={{ width: "50%" }}>标题</th>
-                  <th style={{ width: "12%" }}>类型</th>
+                  <th style={{ width: "5%" }}></th>
+                  <th style={{ width: "49%" }}>标题</th>
+                  <th style={{ width: "8%" }}>类型</th>
                   <th style={{ width: "13%" }}>导入日期</th>
                   <th style={{ width: "10%" }}>大小</th>
                   <th style={{ width: "15%" }}>最近阅读</th>
@@ -384,6 +389,15 @@ export default function HomePage({
                       setContextMenu({ x: e.clientX, y: e.clientY, paper });
                     }}
                   >
+                    <td style={{ textAlign: "center" }}>
+                      {(() => {
+                        const st = grobidStatusMap?.[paper.path];
+                        if (st === "parsing") return <span title="正在解析…"><Loader2 size={14} className="grobid-status-spinning" /></span>;
+                        if (st === "done") return <span title="已解析"><CheckCircle size={14} className="grobid-status-done" /></span>;
+                        if (st === "error") return <span title="解析失败"><XCircle size={14} className="grobid-status-error" /></span>;
+                        return <span className="grobid-status-pending" title="待解析">—</span>;
+                      })()}
+                    </td>
                     <td>
                       <div className="home-paper-title">
                         <FileText size={15} style={{ flexShrink: 0 }} />

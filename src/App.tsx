@@ -26,9 +26,9 @@ import "katex/dist/katex.min.css";
 import { marked } from "marked";
 import SettingsDialog, { VENDOR_PRESETS, FONT_PRESETS, type LlmSettings } from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
-import HomePage, { type PaperInfo } from "./components/HomePage";
+import HomePage, { type PaperInfo, type GrobidStatus } from "./components/HomePage";
 import ReferenceSidebar from "./components/ReferenceSidebar";
-import { extractMetadataEnhanced } from "./utils/pdfMetadata";
+import { extractMetadataEnhanced, type PaperMetadata } from "./utils/pdfMetadata";
 import {
   copyToManaged,
   savePaper,
@@ -402,6 +402,11 @@ function App() {
   const grobidParsedPathRef = useRef<string>("");
   const grobidCancelledRef = useRef<boolean>(false);
 
+  // Grobid batch parsing state — tracks parse status per paper path
+  const [grobidStatusMap, setGrobidStatusMap] = useState<Record<string, GrobidStatus>>({});
+  const grobidBatchRunningRef = useRef<boolean>(false);
+  const grobidBatchQueueRef = useRef<string[]>([]);
+
   // ── Annotation State ──────────────────────────────────────────────────────
   const [annotationMode, setAnnotationMode] = useState<AnnotationTool>(null);
   const [annotationColor, setAnnotationColor] = useState("#FF3838");
@@ -549,6 +554,192 @@ function App() {
       });
   }, [documentPath]);
 
+  // ── Grobid batch parsing: queue management ─────────────────────────────
+  // Process the batch queue: parse one PDF at a time, update status map
+  const processGrobidBatch = useCallback(async () => {
+    if (grobidBatchRunningRef.current) return;
+    grobidBatchRunningRef.current = true;
+
+    while (grobidBatchQueueRef.current.length > 0) {
+      const path = grobidBatchQueueRef.current.shift()!;
+      // Skip if already done
+      setGrobidStatusMap(prev => {
+        if (prev[path] === "done") return prev;
+        return { ...prev, [path]: "parsing" };
+      });
+
+      try {
+        const result = await invoke<GrobidDocumentOutput>("grobid_parse_document", {
+          filePath: path, force: false, structureOnly: false
+        });
+        setGrobidStatusMap(prev => ({ ...prev, [path]: "done" }));
+
+        // If this is the currently-viewed PDF, update the sidebar document
+        if (grobidParsedPathRef.current === path) {
+          setGrobidDocument(result);
+          setGrobidLoading(false);
+        }
+
+        // Cross-validate: merge GROBID metadata into paper metadata
+        crossValidateGrobidMeta(path, result);
+      } catch (e) {
+        console.error(`[Grobid batch] failed for ${path}:`, e);
+        setGrobidStatusMap(prev => ({ ...prev, [path]: "error" }));
+      }
+    }
+
+    grobidBatchRunningRef.current = false;
+  }, []);
+
+  // Cross-validate GROBID metadata with existing paper metadata
+  const crossValidateGrobidMeta = useCallback((path: string, doc: GrobidDocumentOutput) => {
+    const paper = papersList.find(p => p.path === path);
+    if (!paper?.metadata || !doc.metadata) return;
+
+    const existing = paper.metadata;
+    const grobid = doc.metadata;
+    const merged: PaperMetadata = { ...existing };
+
+    // Title: prefer GROBID if it looks more complete (longer, has real words)
+    if (grobid.title && existing.title) {
+      const grobidClean = grobid.title.replace(/\s+/g, " ").trim();
+      const existingClean = (existing.title || "").replace(/\s+/g, " ").trim();
+      // Keep the longer/cleaner title
+      if (grobidClean.length > existingClean.length && grobidClean.length > 10) {
+        merged.title = grobidClean;
+      }
+    } else if (grobid.title && !existing.title) {
+      merged.title = grobid.title;
+    }
+
+    // DOI: prefer existing (from CrossRef/XMP), fallback to GROBID
+    if (!merged.doi && grobid.doi) {
+      merged.doi = grobid.doi;
+    }
+
+    // Authors: merge — prefer CrossRef authors if available, supplement with GROBID
+    if (grobid.authors && grobid.authors.length > 0) {
+      if (!merged.authors || merged.authors.length === 0) {
+        merged.authors = grobid.authors.map(a => a.full_name || `${a.first_name || ""} ${a.last_name || ""}`.trim());
+      }
+    }
+
+    // Date: prefer existing, fallback to GROBID
+    if (!merged.date && grobid.date?.raw) {
+      merged.date = grobid.date.raw;
+    }
+
+    // Journal/venue
+    if (!merged.journal && grobid.venue?.name) {
+      merged.journal = grobid.venue.name;
+    }
+
+    // Keywords
+    if (grobid.keywords && grobid.keywords.length > 0) {
+      if (!merged.keywords || merged.keywords.length === 0) {
+        merged.keywords = grobid.keywords;
+      } else {
+        // Merge unique keywords
+        const existingLower = new Set(merged.keywords.map(k => k.toLowerCase()));
+        for (const kw of grobid.keywords) {
+          if (!existingLower.has(kw.toLowerCase())) {
+            merged.keywords.push(kw);
+          }
+        }
+      }
+    }
+
+    // Abstract
+    if (!merged.abstract && grobid.abstract_text) {
+      merged.abstract = grobid.abstract_text;
+    }
+
+    // Update paper metadata in the list
+    setPapersList(prev => prev.map(p =>
+      p.path === path ? { ...p, metadata: merged } : p
+    ));
+
+    // Persist to database
+    invoke("paper_save", {
+      id: paper.id,
+      updates: {
+        title: merged.title || null,
+        authors: merged.authors ? JSON.stringify(merged.authors) : null,
+        doi: merged.doi || null,
+        date: merged.date || null,
+        journal: merged.journal || null,
+        keywords: merged.keywords ? JSON.stringify(merged.keywords) : null,
+        abstract_text: merged.abstract || null,
+        metadata_extracted: true,
+      }
+    }).catch(e => console.warn("[Grobid] failed to save merged metadata:", e));
+  }, [papersList]);
+
+  // Start batch parsing all PDFs that haven't been parsed yet
+  const startGrobidBatch = useCallback((papers: PaperInfo[]) => {
+    const pdfPaths = papers
+      .filter(p => p.path.toLowerCase().endsWith(".pdf"))
+      .map(p => p.path);
+
+    // Add paths not yet in the status map to the queue
+    const newPaths = pdfPaths.filter(p =>
+      !grobidStatusMap[p] || grobidStatusMap[p] === "pending"
+    );
+
+    if (newPaths.length === 0) return;
+
+    // Initialize status for new paths
+    setGrobidStatusMap(prev => {
+      const updated = { ...prev };
+      for (const p of newPaths) {
+        if (!updated[p]) updated[p] = "pending";
+      }
+      return updated;
+    });
+
+    // Add to queue (avoid duplicates)
+    for (const p of newPaths) {
+      if (!grobidBatchQueueRef.current.includes(p)) {
+        grobidBatchQueueRef.current.push(p);
+      }
+    }
+
+    // Ensure engine is ready first, then process
+    invoke("grobid_ensure_ready").then(() => {
+      processGrobidBatch();
+    }).catch(e => {
+      console.error("[Grobid] engine init failed:", e);
+    });
+  }, [grobidStatusMap, processGrobidBatch]);
+
+  // Priority parse: insert at the front of the queue and process immediately
+  const priorityGrobidParse = useCallback((path: string) => {
+    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
+
+    // Remove from queue if already there
+    grobidBatchQueueRef.current = grobidBatchQueueRef.current.filter(p => p !== path);
+    // Insert at front
+    grobidBatchQueueRef.current.unshift(path);
+
+    setGrobidStatusMap(prev => ({ ...prev, [path]: "parsing" }));
+
+    // Ensure engine + process
+    invoke("grobid_ensure_ready").then(() => {
+      processGrobidBatch();
+    }).catch(e => {
+      console.error("[Grobid] engine init failed:", e);
+    });
+  }, [processGrobidBatch]);
+
+  // Auto-start batch parsing when papers list changes (new imports, app startup)
+  useEffect(() => {
+    if (papersList.length > 0) {
+      // Delay slightly to avoid blocking initial render
+      const timer = setTimeout(() => startGrobidBatch(papersList), 2000);
+      return () => clearTimeout(timer);
+    }
+  }, [papersList.length]); // Only trigger on count change, not full list
+
   // ── Tab System Handlers ────────────────────────────────────────────────────
   const openPaperTab = useCallback((paper: PaperInfo) => {
     // Check if tab already exists for this paper
@@ -604,12 +795,13 @@ function App() {
           }).catch(() => {});
         }
       });
-      // Auto-trigger Grobid parse (async, non-blocking)
+      // Auto-trigger Grobid parse (async, non-blocking) — also prioritize in batch queue
       triggerGrobidParse(paper.path);
+      priorityGrobidParse(paper.path);
     } else if (modelLoaded) {
       runModel(0, paper.path);
     }
-  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse]);
+  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse]);
 
   const closeTab = useCallback((tabId: string) => {
     setTabs(prev => {
@@ -3180,6 +3372,7 @@ function App() {
               onDropImport={handleDropImport}
               onExtractMetadata={handleExtractMetadata}
               extractingPaperId={extractingPaperId}
+              grobidStatusMap={grobidStatusMap}
             />
           </Card>
         ) : (
