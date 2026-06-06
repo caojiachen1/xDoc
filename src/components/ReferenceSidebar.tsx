@@ -87,11 +87,17 @@ interface GrobidRefOutput {
   doi: string | null;
   raw: string | null;
 }
+interface GrobidEquationOutput {
+  id: string | null;
+  content: string;
+  description: string | null;
+}
 interface GrobidDocumentOutput {
   metadata: GrobidMetadataOutput;
   sections: GrobidSectionOutput[];
   figures: GrobidFigureOutput[];
   tables: GrobidTableOutput[];
+  equations: GrobidEquationOutput[];
   references: GrobidRefOutput[];
 }
 
@@ -134,6 +140,8 @@ interface ReferenceSidebarProps {
   grobidDocument: GrobidDocumentOutput | null;
   grobidLoading: boolean;
   grobidError: string;
+  onReparse?: () => void;
+  onReparseStructure?: () => void;
 }
 
 export default function ReferenceSidebar({
@@ -143,6 +151,8 @@ export default function ReferenceSidebar({
   grobidDocument,
   grobidLoading,
   grobidError,
+  onReparse,
+  onReparseStructure,
 }: ReferenceSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>("info");
   const [references, setReferences] = useState<EnrichedReference[]>([]);
@@ -253,8 +263,13 @@ export default function ReferenceSidebar({
   // ── Journal ranking lookup ──────────────────────────────────────────────────
   // Cache for journal ranking lookups (shared across all references)
   const rankingCacheRef = useRef<Map<string, JournalRanking | null>>(new Map());
+  // Track which (journal_name) combos have been looked up to avoid redundant calls
+  const rankingLookedUpRef = useRef<Set<string>>(new Set());
+  // Track which ref indices have been auto-enriched via CrossRef for ranking
+  const autoEnrichedForRankingRef = useRef<Set<number>>(new Set());
 
-  // Lookup rankings when references or their CrossRef journals change
+  // Lookup rankings when references or their CrossRef journals change.
+  // For refs without a ranking, auto-call CrossRef to get journal info, then re-query.
   useEffect(() => {
     if (references.length === 0) return;
     let cancelled = false;
@@ -263,48 +278,144 @@ export default function ReferenceSidebar({
       for (let i = 0; i < references.length; i++) {
         if (cancelled) break;
         const ref = references[i];
-        // Skip if already has ranking or is loading
-        if (ref.ranking !== undefined || ref.rankingLoading) continue;
 
         const journal = ref.crossrefJournal || ref.journal;
-        if (!journal) continue;
 
-        // Check cache first
-        if (rankingCacheRef.current.has(journal)) {
-          const cached = rankingCacheRef.current.get(journal);
-          setReferences((prev) => {
-            const next = [...prev];
-            if (next[i]) next[i] = { ...next[i], ranking: cached ?? null };
-            return next;
-          });
-          continue;
+        // ── Step 1: If we have a journal, try direct ranking lookup ──
+        if (journal) {
+          const lookupKey = journal.toLowerCase().trim();
+          if (!rankingLookedUpRef.current.has(lookupKey)) {
+            // Check in-memory cache first
+            if (rankingCacheRef.current.has(journal)) {
+              const cached = rankingCacheRef.current.get(journal);
+              rankingLookedUpRef.current.add(lookupKey);
+              setReferences((prev) => {
+                const next = [...prev];
+                if (next[i]) next[i] = { ...next[i], ranking: cached ?? null };
+                return next;
+              });
+            } else {
+              // Query ranking
+              setReferences((prev) => {
+                const next = [...prev];
+                if (next[i]) next[i] = { ...next[i], rankingLoading: true };
+                return next;
+              });
+              try {
+                const result = await lookupJournalRanking(journal);
+                rankingCacheRef.current.set(journal, result);
+                rankingLookedUpRef.current.add(lookupKey);
+                if (!cancelled) {
+                  setReferences((prev) => {
+                    const next = [...prev];
+                    if (next[i]) next[i] = { ...next[i], ranking: result, rankingLoading: false };
+                    return next;
+                  });
+                }
+              } catch {
+                rankingCacheRef.current.set(journal, null);
+                rankingLookedUpRef.current.add(lookupKey);
+                if (!cancelled) {
+                  setReferences((prev) => {
+                    const next = [...prev];
+                    if (next[i]) next[i] = { ...next[i], ranking: null, rankingLoading: false };
+                    return next;
+                  });
+                }
+              }
+            }
+          }
         }
 
-        // Mark as loading
-        setReferences((prev) => {
-          const next = [...prev];
-          if (next[i]) next[i] = { ...next[i], rankingLoading: true };
-          return next;
-        });
+        // ── Step 2: If still no ranking, auto-enrich via CrossRef title search ──
+        if (cancelled) break;
+        // Re-read current ref from state snapshot
+        const currentRef = references[i];
+        const hasRanking = currentRef.ranking !== undefined && currentRef.ranking !== null;
+        const alreadyAutoEnriched = autoEnrichedForRankingRef.current.has(i);
+        const hasTitle = currentRef.title && currentRef.title.length > 5;
 
-        try {
-          const result = await lookupJournalRanking(journal);
-          rankingCacheRef.current.set(journal, result);
-          if (!cancelled) {
-            setReferences((prev) => {
-              const next = [...prev];
-              if (next[i]) next[i] = { ...next[i], ranking: result, rankingLoading: false };
-              return next;
-            });
-          }
-        } catch {
-          rankingCacheRef.current.set(journal, null);
-          if (!cancelled) {
-            setReferences((prev) => {
-              const next = [...prev];
-              if (next[i]) next[i] = { ...next[i], ranking: null, rankingLoading: false };
-              return next;
-            });
+        if (!hasRanking && !alreadyAutoEnriched && hasTitle && !currentRef.enriching) {
+          autoEnrichedForRankingRef.current.add(i);
+
+          // Mark as enriching
+          setReferences((prev) => {
+            const next = [...prev];
+            if (next[i]) next[i] = { ...next[i], enriching: true };
+            return next;
+          });
+          setEnrichingCount((c) => c + 1);
+
+          try {
+            // Try DOI first, then title search
+            let crossrefData: Partial<PaperMetadata> | null = null;
+            if (currentRef.doi) {
+              crossrefData = await resolveDoi(currentRef.doi);
+            }
+            if (!crossrefData && currentRef.title) {
+              crossrefData = await searchByTitle(currentRef.title);
+            }
+
+            if (crossrefData && !cancelled) {
+              // Update ref with CrossRef data
+              setReferences((prev) => {
+                const next = [...prev];
+                if (next[i]) {
+                  next[i] = {
+                    ...next[i],
+                    enriching: false,
+                    enriched: true,
+                    crossrefTitle: crossrefData?.title || next[i].crossrefTitle,
+                    crossrefAbstract: crossrefData?.abstract || next[i].crossrefAbstract,
+                    crossrefDoi: crossrefData?.doi || next[i].crossrefDoi,
+                    crossrefUrl: crossrefData?.url || next[i].crossrefUrl,
+                    crossrefAuthors: crossrefData?.authors || next[i].crossrefAuthors,
+                    crossrefJournal: crossrefData?.journal || next[i].crossrefJournal,
+                    crossrefDate: crossrefData?.date || next[i].crossrefDate,
+                  };
+                }
+                return next;
+              });
+
+              // If CrossRef gave us a journal, look up ranking
+              const newJournal = crossrefData.journal;
+              if (newJournal) {
+                const newLookupKey = newJournal.toLowerCase().trim();
+                if (!rankingLookedUpRef.current.has(newLookupKey)) {
+                  try {
+                    const ranking = await lookupJournalRanking(newJournal);
+                    rankingCacheRef.current.set(newJournal, ranking);
+                    rankingLookedUpRef.current.add(newLookupKey);
+                    if (!cancelled) {
+                      setReferences((prev) => {
+                        const next = [...prev];
+                        if (next[i]) next[i] = { ...next[i], ranking };
+                        return next;
+                      });
+                    }
+                  } catch {
+                    // ranking lookup failure is non-fatal
+                  }
+                }
+              }
+            } else if (!cancelled) {
+              // CrossRef returned nothing — just clear enriching state
+              setReferences((prev) => {
+                const next = [...prev];
+                if (next[i]) next[i] = { ...next[i], enriching: false, enriched: true };
+                return next;
+              });
+            }
+          } catch {
+            if (!cancelled) {
+              setReferences((prev) => {
+                const next = [...prev];
+                if (next[i]) next[i] = { ...next[i], enriching: false, enriched: true };
+                return next;
+              });
+            }
+          } finally {
+            setEnrichingCount((c) => c - 1);
           }
         }
       }
@@ -313,7 +424,7 @@ export default function ReferenceSidebar({
     lookupAll();
     return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [references.map(r => `${r.crossrefJournal || r.journal}|${r.enriched}`).join(",")]);
+  }, [references.map(r => `${r.crossrefJournal || r.journal}|${r.enriched}|${r.ranking !== undefined && r.ranking !== null}`).join(",")]);
 
   const zoneLabel = (zone: number) => {
     const map: Record<number, string> = { 1: "一区", 2: "二区", 3: "三区", 4: "四区" };
@@ -366,9 +477,23 @@ export default function ReferenceSidebar({
     // Prefer grobid metadata, fall back to paper.metadata
     const hasGrobidMeta = grobidMeta && (grobidMeta.title || grobidMeta.authors.length > 0 || grobidMeta.abstract_text);
 
+    // Re-parse button component
+    const reparseButton = onReparse ? (
+      <button
+        className="ref-reparse-btn"
+        onClick={onReparse}
+        disabled={grobidLoading}
+        title="重新用 Grobid 解析当前文档"
+      >
+        <RefreshCw size={12} className={grobidLoading ? "spin" : ""} />
+        {grobidLoading ? "解析中…" : "重新解析"}
+      </button>
+    ) : null;
+
     if (hasGrobidMeta) {
       return (
         <div className="ref-info-section">
+          {reparseButton}
           {grobidMeta.title && (
             <div className="ref-info-title">{grobidMeta.title}</div>
           )}
@@ -559,6 +684,7 @@ export default function ReferenceSidebar({
         <BookOpen size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
         <div>等待 Grobid 解析…</div>
         <div className="ref-empty-hint">打开 PDF 后自动提取文献信息</div>
+        {reparseButton}
       </div>
     );
   };
@@ -730,107 +856,184 @@ export default function ReferenceSidebar({
   };
 
   const renderStructureTab = () => {
+    // Structure-only re-parse button (does not re-parse references)
+    const reparseStructBtn = onReparseStructure ? (
+      <button
+        className="ref-reparse-btn"
+        onClick={onReparseStructure}
+        disabled={grobidLoading}
+        title="仅重新解析文档结构（章节/图片/表格），不重新解析参考文献"
+      >
+        <RefreshCw size={12} className={grobidLoading ? "spin" : ""} />
+        {grobidLoading ? "解析中…" : "重新解析结构"}
+      </button>
+    ) : null;
+
     if (!grobidDocument) {
       return (
         <div className="ref-empty">
           <ListTree size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
           <div>等待解析…</div>
+          {reparseStructBtn}
         </div>
       );
     }
 
-    const { sections, figures, tables } = grobidDocument;
-    const hasStructure = sections.length > 0 || figures.length > 0 || tables.length > 0;
+    const { sections, figures, tables, equations } = grobidDocument;
+    const hasStructure = sections.length > 0 || figures.length > 0 || tables.length > 0 || (equations && equations.length > 0);
 
     if (!hasStructure) {
       return (
         <div className="ref-empty">
           <ListTree size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
           <div>未检测到文档结构</div>
+          <div className="ref-empty-hint">部分 PDF 可能无法提取完整结构</div>
+          {reparseStructBtn}
         </div>
       );
     }
 
+    // Color palette for section depth levels
+    const levelColors = ["#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336", "#00BCD4"];
+    const getLevelColor = (level: number) => levelColors[(level - 1) % levelColors.length];
+
     return (
       <div className="ref-refs-section">
+        {/* Toolbar */}
         <div className="ref-refs-toolbar">
           <span className="ref-refs-count">
-            {sections.length > 0 && `${sections.length} 个章节`}
-            {figures.length > 0 && ` · ${figures.length} 个图片`}
-            {tables.length > 0 && ` · ${tables.length} 个表格`}
+            {sections.length > 0 && `${sections.length} 章节`}
+            {figures.length > 0 && ` · ${figures.length} 图片`}
+            {tables.length > 0 && ` · ${tables.length} 表格`}
+            {equations && equations.length > 0 && ` · ${equations.length} 公式`}
           </span>
+          {reparseStructBtn}
         </div>
 
+        {/* Loading overlay */}
+        {grobidLoading && (
+          <div className="ref-loading">
+            <Loader2 size={20} className="spin" />
+            <span>正在重新解析文档结构…</span>
+          </div>
+        )}
+
         <div className="ref-list">
-          {/* Sections */}
-          {sections.map((sec, idx) => (
-            <div
-              key={`sec-${idx}`}
-              className={`ref-item ${expandedSection === idx ? "expanded" : ""}`}
-            >
-              <div
-                className="ref-item-header"
-                onClick={() => setExpandedSection(expandedSection === idx ? null : idx)}
-              >
-                <span className="ref-item-index" style={{ background: "#e8f4fd" }}>
-                  {sec.level > 1 ? `${" ".repeat(sec.level - 1)}` : ""}H{sec.level}
-                </span>
-                <div className="ref-item-title">{sec.title || "未命名章节"}</div>
-                {expandedSection === idx ? (
-                  <ChevronDown size={14} className="ref-item-chevron" />
-                ) : (
-                  <ChevronRight size={14} className="ref-item-chevron" />
-                )}
+          {/* ── Document Structure Tree ── */}
+          {sections.length > 0 && (
+            <>
+              <div className="structure-section-header">
+                <ListTree size={13} />
+                <span>章节结构</span>
               </div>
-              {expandedSection === idx && sec.content && (
-                <div className="ref-item-details">
-                  <div className="ref-detail-text" style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.5 }}>
-                    {sec.content.length > 500 ? sec.content.slice(0, 500) + "…" : sec.content}
+              {sections.map((sec, idx) => {
+                const depth = Math.max(0, sec.level - 1);
+                const color = getLevelColor(sec.level);
+                return (
+                  <div
+                    key={`sec-${idx}`}
+                    className={`structure-item ${expandedSection === idx ? "expanded" : ""}`}
+                    style={{ paddingLeft: 8 + depth * 16 }}
+                  >
+                    <div
+                      className="structure-item-header"
+                      onClick={() => setExpandedSection(expandedSection === idx ? null : idx)}
+                    >
+                      {/* Depth indicator bar */}
+                      <span
+                        className="structure-level-bar"
+                        style={{ backgroundColor: color }}
+                      />
+                      {/* Level badge */}
+                      <span
+                        className="structure-level-badge"
+                        style={{ backgroundColor: color + "18", color, borderColor: color + "40" }}
+                      >
+                        H{sec.level}
+                      </span>
+                      {/* Section title */}
+                      <div className="structure-item-title">
+                        {sec.title || "未命名章节"}
+                      </div>
+                      {/* Expand chevron */}
+                      {sec.content ? (
+                        expandedSection === idx ? (
+                          <ChevronDown size={14} className="ref-item-chevron" />
+                        ) : (
+                          <ChevronRight size={14} className="ref-item-chevron" />
+                        )
+                      ) : null}
+                    </div>
+                    {/* Expanded content preview */}
+                    {expandedSection === idx && sec.content && (
+                      <div className="structure-item-content" style={{ borderLeftColor: color + "40" }}>
+                        <div className="structure-content-text">
+                          {sec.content.length > 600 ? sec.content.slice(0, 600) + "…" : sec.content}
+                        </div>
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
-            </div>
-          ))}
+                );
+              })}
+            </>
+          )}
 
-          {/* Figures */}
+          {/* ── Figures ── */}
           {figures.length > 0 && (
-            <div style={{ marginTop: 12, padding: "8px 12px", background: "#f8f9fa", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#555" }}>
-              <Image size={13} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-              图片 ({figures.length})
-            </div>
-          )}
-          {figures.map((fig, idx) => (
-            <div key={`fig-${idx}`} className="ref-item">
-              <div className="ref-item-meta" style={{ padding: "6px 12px" }}>
-                <span className="ref-item-index" style={{ background: "#fff3e0", minWidth: 20, textAlign: "center" }}>
-                  {fig.id || `F${idx + 1}`}
-                </span>
-                <span style={{ flex: 1, fontSize: 12 }}>
-                  {fig.caption || fig.description || "无标题"}
-                </span>
+            <>
+              <div className="structure-section-header" style={{ marginTop: 12 }}>
+                <Image size={13} />
+                <span>图片 ({figures.length})</span>
               </div>
-            </div>
-          ))}
+              {figures.map((fig, idx) => (
+                <div key={`fig-${idx}`} className="structure-asset-item">
+                  <span className="structure-asset-icon" style={{ backgroundColor: "#fff3e0", color: "#e65100" }}>
+                    F
+                  </span>
+                  <span className="structure-asset-id">{fig.id || `图 ${idx + 1}`}</span>
+                  <span className="structure-asset-caption">{fig.caption || fig.description || "无标题"}</span>
+                </div>
+              ))}
+            </>
+          )}
 
-          {/* Tables */}
+          {/* ── Tables ── */}
           {tables.length > 0 && (
-            <div style={{ marginTop: 12, padding: "8px 12px", background: "#f8f9fa", borderRadius: 6, fontSize: 12, fontWeight: 600, color: "#555" }}>
-              <Table size={13} style={{ display: "inline", verticalAlign: "middle", marginRight: 4 }} />
-              表格 ({tables.length})
-            </div>
-          )}
-          {tables.map((tbl, idx) => (
-            <div key={`tbl-${idx}`} className="ref-item">
-              <div className="ref-item-meta" style={{ padding: "6px 12px" }}>
-                <span className="ref-item-index" style={{ background: "#e8f5e9", minWidth: 20, textAlign: "center" }}>
-                  {tbl.id || `T${idx + 1}`}
-                </span>
-                <span style={{ flex: 1, fontSize: 12 }}>
-                  {tbl.caption || "无标题"}
-                </span>
+            <>
+              <div className="structure-section-header" style={{ marginTop: 12 }}>
+                <Table size={13} />
+                <span>表格 ({tables.length})</span>
               </div>
-            </div>
-          ))}
+              {tables.map((tbl, idx) => (
+                <div key={`tbl-${idx}`} className="structure-asset-item">
+                  <span className="structure-asset-icon" style={{ backgroundColor: "#e8f5e9", color: "#2e7d32" }}>
+                    T
+                  </span>
+                  <span className="structure-asset-id">{tbl.id || `表 ${idx + 1}`}</span>
+                  <span className="structure-asset-caption">{tbl.caption || "无标题"}</span>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* ── Equations ── */}
+          {equations && equations.length > 0 && (
+            <>
+              <div className="structure-section-header" style={{ marginTop: 12 }}>
+                <Hash size={13} />
+                <span>公式 ({equations.length})</span>
+              </div>
+              {equations.map((eq, idx) => (
+                <div key={`eq-${idx}`} className="structure-asset-item">
+                  <span className="structure-asset-icon" style={{ backgroundColor: "#ede7f6", color: "#4527a0" }}>
+                    E
+                  </span>
+                  <span className="structure-asset-id">{eq.id || `式 ${idx + 1}`}</span>
+                  <span className="structure-asset-caption">{eq.description || eq.content?.slice(0, 60) || "无描述"}</span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       </div>
     );

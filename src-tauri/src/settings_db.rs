@@ -435,12 +435,61 @@ impl SettingsDb {
 
     // ── Journal Rankings ────────────────────────────────────────────────────
 
-    /// Normalize a journal name for case-insensitive lookup.
+    /// Normalize a journal name for case-insensitive, punctuation-insensitive lookup.
+    /// Strips all punctuation, lowercases, and collapses whitespace.
     fn normalize_journal(name: &str) -> String {
         name.to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c.is_whitespace() { c } else { ' ' })
+            .collect::<String>()
             .split_whitespace()
             .collect::<Vec<&str>>()
             .join(" ")
+    }
+
+    /// Expand common journal abbrev for fuzzy matching.
+    fn expand_journal_abbrevs(norm: &str) -> String {
+        let words: Vec<&str> = norm.split_whitespace().collect();
+        let expanded: Vec<&str> = words.iter().map(|w| {
+            match *w {
+                "j" | "jour" => "journal",
+                "int" | "intl" => "international",
+                "sci" => "science",
+                "eng" => "engineering",
+                "tech" => "technology",
+                "res" => "research",
+                "lett" => "letters",
+                "proc" => "proceedings",
+                "trans" => "transactions",
+                "rev" => "review",
+                "adv" => "advanced",
+                "appl" => "applied",
+                "comput" => "computer",
+                "inf" => "information",
+                "syst" => "systems",
+                "mater" => "materials",
+                "chem" => "chemistry",
+                "phys" => "physics",
+                "biol" => "biology",
+                "med" => "medicine",
+                "elec" => "electrical",
+                "electron" => "electronics",
+                "mech" => "mechanical",
+                "civ" => "civil",
+                "environ" => "environmental",
+                "nat" => "natural",
+                "bull" => "bulletin",
+                "mag" => "magazine",
+                "rept" | "rep" => "report",
+                _ => *w,
+            }
+        }).collect();
+        expanded.join(" ")
+    }
+
+    /// Common English stop words to filter for token-overlap matching.
+    fn is_stop_word(w: &str) -> bool {
+        matches!(w, "the" | "of" | "and" | "in" | "on" | "at" | "for" | "to" | "a" | "an" | "is" | "by" | "with" | "from" | "its")
     }
 
     /// Initialize the journal_rankings table from embedded JSON data.
@@ -488,7 +537,11 @@ impl SettingsDb {
     }
 
     /// Look up a journal's CAS ranking by name.
-    /// Tries exact normalized match first, then falls back to substring/prefix matching.
+    /// Tries multiple strategies in order:
+    ///   1. Exact normalized match (case/punctuation insensitive)
+    ///   2. Abbreviation-expanded match
+    ///   3. Substring / containment match
+    ///   4. Significant-token overlap (≥60% match)
     pub fn lookup_journal_ranking(&self, journal_name: &str) -> Result<Option<JournalRanking>> {
         let conn = self.conn.lock();
         let norm = Self::normalize_journal(journal_name);
@@ -496,38 +549,102 @@ impl SettingsDb {
             return Ok(None);
         }
 
-        // 1. Exact match
-        let mut stmt = conn.prepare(
-            "SELECT journal, zone, is_top, is_oa FROM journal_rankings WHERE journal_norm = ?1"
-        )?;
-        if let Some(row) = stmt.query_map(params![norm], |row| {
+        let make_ranking = |row: &rusqlite::Row| -> rusqlite::Result<JournalRanking> {
             Ok(JournalRanking {
                 journal: row.get(0)?,
                 zone: row.get(1)?,
                 is_top: row.get::<_, i32>(2)? != 0,
                 is_oa: row.get::<_, i32>(3)? != 0,
             })
-        })?.next().transpose()? {
+        };
+
+        // 1. Exact normalized match
+        let mut stmt = conn.prepare(
+            "SELECT journal, zone, is_top, is_oa FROM journal_rankings WHERE journal_norm = ?1"
+        )?;
+        if let Ok(row) = stmt.query_row(params![&norm], make_ranking) {
             return Ok(Some(row));
         }
 
-        // 2. Reverse match: check if the queried name contains a journal name from DB,
-        //    or if a DB journal name contains the queried name.
+        // 2. Abbreviation-expanded match
+        let expanded = Self::expand_journal_abbrevs(&norm);
+        if expanded != norm {
+            let mut stmt2 = conn.prepare(
+                "SELECT journal, zone, is_top, is_oa FROM journal_rankings WHERE journal_norm = ?1"
+            )?;
+            let row = stmt2.query_row(params![&expanded], make_ranking).ok();
+            if let Some(row) = row {
+                return Ok(Some(row));
+            };
+        }
+
+        // 3. Substring / containment match
         let pattern = format!("%{}%", norm);
-        let mut stmt2 = conn.prepare(
+        let mut stmt3 = conn.prepare(
             "SELECT journal, zone, is_top, is_oa FROM journal_rankings
              WHERE ?1 LIKE '%' || journal_norm || '%' OR journal_norm LIKE ?2
              ORDER BY LENGTH(journal_norm) DESC LIMIT 1"
         )?;
-        if let Some(row) = stmt2.query_map(params![norm, pattern], |row| {
-            Ok(JournalRanking {
-                journal: row.get(0)?,
-                zone: row.get(1)?,
-                is_top: row.get::<_, i32>(2)? != 0,
-                is_oa: row.get::<_, i32>(3)? != 0,
-            })
-        })?.next().transpose()? {
+        if let Ok(row) = stmt3.query_row(params![&norm, &pattern], make_ranking) {
             return Ok(Some(row));
+        }
+
+        // 4. Token-overlap fuzzy match: gather all DB entries and compare significant tokens
+        let query_tokens: std::collections::HashSet<&str> = expanded
+            .split_whitespace()
+            .filter(|w| !Self::is_stop_word(w) && w.len() > 2)
+            .collect();
+
+        if query_tokens.len() >= 2 {
+            let mut stmt4 = conn.prepare(
+                "SELECT journal, zone, is_top, is_oa, journal_norm FROM journal_rankings
+                 WHERE LENGTH(journal_norm) > 5"
+            )?;
+            let rows = stmt4.query_map([], make_ranking)?;
+
+            let mut best_match: Option<(JournalRanking, f64)> = None;
+            // We need journal_norm for comparison, so use a separate query
+            drop(rows);
+            drop(stmt4);
+
+            let mut stmt5 = conn.prepare(
+                "SELECT journal, zone, is_top, is_oa, journal_norm FROM journal_rankings
+                 WHERE LENGTH(journal_norm) > 5"
+            )?;
+            let mut rows5 = stmt5.query([])?;
+            while let Some(row) = rows5.next()? {
+                let db_norm: String = row.get(4)?;
+                let db_tokens: std::collections::HashSet<&str> = db_norm
+                    .split_whitespace()
+                    .filter(|w| !Self::is_stop_word(w) && w.len() > 2)
+                    .collect();
+
+                if db_tokens.is_empty() {
+                    continue;
+                }
+
+                let common = query_tokens.intersection(&db_tokens).count();
+                let overlap = common as f64 / std::cmp::max(query_tokens.len(), db_tokens.len()) as f64;
+
+                if overlap >= 0.6 {
+                    let is_better = match &best_match {
+                        Some((_, prev_overlap)) => overlap > *prev_overlap,
+                        None => true,
+                    };
+                    if is_better {
+                        best_match = Some((JournalRanking {
+                            journal: row.get(0)?,
+                            zone: row.get(1)?,
+                            is_top: row.get::<_, i32>(2)? != 0,
+                            is_oa: row.get::<_, i32>(3)? != 0,
+                        }, overlap));
+                    }
+                }
+            }
+
+            if let Some((ranking, _)) = best_match {
+                return Ok(Some(ranking));
+            }
         }
 
         Ok(None)

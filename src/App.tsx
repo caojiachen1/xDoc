@@ -509,15 +509,15 @@ function App() {
   const currentPaper = useMemo(() => papersList.find(p => p.path === documentPath) || null, [papersList, documentPath]);
 
   // ── Grobid: trigger parse when a PDF is opened (async, non-blocking) ──────
-  const triggerGrobidParse = useCallback((path: string) => {
+  const triggerGrobidParse = useCallback((path: string, force: boolean = false) => {
     if (!path || !path.toLowerCase().endsWith(".pdf")) return;
-    if (grobidParsedPathRef.current === path && grobidDocument) return;
+    if (!force && grobidParsedPathRef.current === path && grobidDocument) return;
     grobidParsedPathRef.current = path;
     grobidCancelledRef.current = false;
     setGrobidDocument(null);
     setGrobidError("");
     setGrobidLoading(true);
-    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path })
+    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path, force, structureOnly: false })
       .then((result) => {
         if (grobidCancelledRef.current) return;
         setGrobidDocument(result);
@@ -529,6 +529,25 @@ function App() {
         setGrobidLoading(false);
       });
   }, [grobidDocument]);
+
+  // ── Grobid: re-parse structure only (keeps cached metadata/refs) ──────
+  const triggerGrobidStructureOnly = useCallback(() => {
+    const path = documentPath;
+    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
+    grobidCancelledRef.current = false;
+    setGrobidLoading(true);
+    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path, force: true, structureOnly: true })
+      .then((result) => {
+        if (grobidCancelledRef.current) return;
+        setGrobidDocument(result);
+        setGrobidLoading(false);
+      })
+      .catch((e) => {
+        if (grobidCancelledRef.current) return;
+        setGrobidError(String(e));
+        setGrobidLoading(false);
+      });
+  }, [documentPath]);
 
   // ── Tab System Handlers ────────────────────────────────────────────────────
   const openPaperTab = useCallback((paper: PaperInfo) => {
@@ -3980,6 +3999,8 @@ function App() {
                   grobidDocument={grobidDocument}
                   grobidLoading={grobidLoading}
                   grobidError={grobidError}
+                  onReparse={() => triggerGrobidParse(documentPath, true)}
+                  onReparseStructure={triggerGrobidStructureOnly}
                 />
               </>
             )}

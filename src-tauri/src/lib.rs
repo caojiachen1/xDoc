@@ -1008,22 +1008,469 @@ async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<Stri
     })
 }
 
+/// Recursively flatten nested sections into a flat list with depth levels.
+// ── Grobid JSON file cache helpers ─────────────────────────────────────────
+
+/// Returns the path for the grobid JSON cache file alongside the given PDF.
+fn grobid_cache_path(pdf_path: &std::path::Path) -> std::path::PathBuf {
+    let stem = pdf_path.file_stem().unwrap_or_default().to_string_lossy();
+    pdf_path.with_file_name(format!("{}.grobid.json", stem))
+}
+
+/// Load GrobidDocumentOutput from a JSON file next to the PDF.
+fn load_grobid_json_cache(pdf_path: &std::path::Path) -> Option<GrobidDocumentOutput> {
+    let cache_path = grobid_cache_path(pdf_path);
+    if !cache_path.exists() {
+        eprintln!("[xDoc:grobid] JSON cache miss: {} (not found)", cache_path.display());
+        return None;
+    }
+    match std::fs::read_to_string(&cache_path) {
+        Ok(content) => match serde_json::from_str::<GrobidDocumentOutput>(&content) {
+            Ok(doc) => {
+                eprintln!("[xDoc:grobid] JSON cache HIT: {} ({} sections, {} refs)",
+                    cache_path.display(), doc.sections.len(), doc.references.len());
+                Some(doc)
+            }
+            Err(e) => {
+                eprintln!("[xDoc:grobid] JSON cache parse error: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("[xDoc:grobid] JSON cache read error: {e}");
+            None
+        }
+    }
+}
+
+/// Save GrobidDocumentOutput to a JSON file next to the PDF.
+fn save_grobid_json_cache(pdf_path: &std::path::Path, result: &GrobidDocumentOutput) {
+    let cache_path = grobid_cache_path(pdf_path);
+    match serde_json::to_string_pretty(result) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&cache_path, json) {
+                eprintln!("[xDoc:grobid] Failed to write JSON cache to {}: {e}", cache_path.display());
+            } else {
+                eprintln!("[xDoc:grobid] JSON cache saved to: {}", cache_path.display());
+            }
+        }
+        Err(e) => {
+            eprintln!("[xDoc:grobid] JSON cache serialize error: {e}");
+        }
+    }
+}
+
+/// Extract structure (sections, figures, tables) from a fulltext parsing result.
+/// If `fulltext_to_structured` fails, falls back to manual TEI XML parsing.
+fn extract_structure(path: &std::path::Path) -> (Vec<GrobidSectionOutput>, Vec<GrobidFigureOutput>, Vec<GrobidTableOutput>) {
+    // ── Strategy 1: fulltext_to_structured ──
+    eprintln!("[xDoc:grobid] Strategy 1: calling fulltext_to_structured for {}", path.display());
+    match grobid_rs::fulltext_to_structured(path) {
+        Ok(doc) => {
+            let sections_count = doc.full_text.as_ref().map(|ft| ft.sections.len()).unwrap_or(0);
+            eprintln!("[xDoc:grobid] Strategy 1 OK: full_text={}, sections={}, figures={}, tables={}",
+                doc.full_text.is_some(),
+                sections_count,
+                doc.full_text.as_ref().map(|ft| ft.figures.len()).unwrap_or(0),
+                doc.full_text.as_ref().map(|ft| ft.tables.len()).unwrap_or(0),
+            );
+            if let Some(ft) = &doc.full_text {
+                for (i, sec) in ft.sections.iter().enumerate() {
+                    eprintln!("[xDoc:grobid]   section[{}]: level={}, title={:?}, content_len={}, subsections={}",
+                        i, sec.level, sec.title.as_deref().unwrap_or("(none)"),
+                        sec.content.len(), sec.subsections.len());
+                }
+                let sections = flatten_sections(&ft.sections);
+                let figures: Vec<GrobidFigureOutput> = ft.figures.iter().map(|f| GrobidFigureOutput {
+                    id: f.id.clone(), caption: f.caption.clone(), description: f.description.clone(),
+                }).collect();
+                let tables: Vec<GrobidTableOutput> = ft.tables.iter().map(|t| GrobidTableOutput {
+                    id: t.id.clone(), caption: t.caption.clone(), content: t.content.clone(),
+                }).collect();
+                eprintln!("[xDoc:grobid] extracted: {} sections (flattened), {} figures, {} tables",
+                    sections.len(), figures.len(), tables.len());
+                return (sections, figures, tables);
+            } else {
+                eprintln!("[xDoc:grobid] Strategy 1: full_text is None — trying fallback");
+            }
+        }
+        Err(e) => {
+            eprintln!("[xDoc:grobid] Strategy 1 FAILED: {e}");
+        }
+    }
+
+    // ── Strategy 2: fulltext_to_tei → manual TEI XML parsing ──
+    eprintln!("[xDoc:grobid] Strategy 2: calling fulltext_to_tei for {}", path.display());
+    match grobid_rs::fulltext_to_tei(path) {
+        Ok(tei_xml) => {
+            eprintln!("[xDoc:grobid] Strategy 2: got TEI XML ({} chars), doing manual parse", tei_xml.len());
+            let (sections, figures, tables) = parse_tei_xml_manual(&tei_xml);
+            if !sections.is_empty() || !figures.is_empty() || !tables.is_empty() {
+                eprintln!("[xDoc:grobid] Manual TEI parse: {} sections, {} figures, {} tables",
+                    sections.len(), figures.len(), tables.len());
+                return (sections, figures, tables);
+            }
+            eprintln!("[xDoc:grobid] Manual TEI parse found nothing useful");
+        }
+        Err(e) => {
+            eprintln!("[xDoc:grobid] Strategy 2: fulltext_to_tei FAILED: {e}");
+        }
+    }
+
+    eprintln!("[xDoc:grobid] All structure extraction strategies failed → empty structure");
+    (Vec::new(), Vec::new(), Vec::new())
+}
+
+/// Manually parse TEI XML to extract sections, figures, and tables.
+/// This is a fallback when grobid_rs::parse_tei_str fails.
+fn parse_tei_xml_manual(tei_xml: &str) -> (Vec<GrobidSectionOutput>, Vec<GrobidFigureOutput>, Vec<GrobidTableOutput>) {
+    use regex::Regex;
+
+    let mut sections = Vec::new();
+    let mut figures = Vec::new();
+    let mut tables = Vec::new();
+
+    // ── Extract body content ──
+    let body_re = Regex::new(r"(?is)<body[^>]*>(.*?)</body>").ok();
+    let body = body_re
+        .and_then(|re| re.captures(tei_xml))
+        .map(|caps| caps.get(1).map(|m| m.as_str()).unwrap_or(""))
+        .unwrap_or(tei_xml);
+
+    // ── Extract sections (div > head) ──
+    // TEI sections are <div> elements with <head> as title and <p> as paragraphs
+    let div_re = Regex::new(r"(?is)<div\b[^>]*>(.*?)</div>").ok();
+    let head_re = Regex::new(r"(?is)<head\b[^>]*>(.*?)</head>").ok();
+    let p_re = Regex::new(r"(?is)<p\b[^>]*>(.*?)</p>").ok();
+    let tag_re = Regex::new(r"<[^>]+>").ok();
+
+    if let Some(div_regex) = &div_re {
+        for cap in div_regex.captures_iter(body) {
+            let div_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+            // Extract title from <head>
+            let title = head_re.as_ref().and_then(|re| {
+                re.captures(div_content).and_then(|c| c.get(1)).map(|m| {
+                    let raw = m.as_str();
+                    tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                })
+            });
+
+            // Extract paragraph text
+            let mut para_texts: Vec<String> = Vec::new();
+            if let Some(p_regex) = &p_re {
+                for p_cap in p_regex.captures_iter(div_content) {
+                    let raw = p_cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                    let clean = tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string());
+                    if !clean.is_empty() {
+                        para_texts.push(clean);
+                    }
+                }
+            }
+
+            let content = para_texts.join(" ");
+            if title.is_some() || !content.is_empty() {
+                sections.push(GrobidSectionOutput {
+                    title,
+                    level: 1,
+                    content: if content.len() > 2000 { content[..2000].to_string() } else { content },
+                });
+            }
+        }
+    }
+
+    // Try to determine section levels by numbering patterns
+    for sec in sections.iter_mut() {
+        if let Some(ref title_text) = sec.title {
+            let trimmed = title_text.trim();
+            // Simple heuristic: numbered sections like "1.", "2.1" etc.
+            if trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                let dot_count = trimmed.chars().take_while(|c| c.is_ascii_digit() || *c == '.').filter(|c| *c == '.').count();
+                sec.level = (dot_count + 1).min(6) as u8;
+            }
+        }
+    }
+
+    // ── Extract figures ──
+    let figure_re = Regex::new(r#"(?is)<figure\b[^>]*type\s*=\s*"figure"[^>]*>(.*?)</figure>"#).ok();
+    let figdesc_re = Regex::new(r"(?is)<figDesc\b[^>]*>(.*?)</figDesc>").ok();
+    let label_re = Regex::new(r"(?is)<label\b[^>]*>(.*?)</label>").ok();
+
+    if let Some(f_re) = &figure_re {
+        for cap in f_re.captures_iter(body) {
+            let fig_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+            let caption = figdesc_re.as_ref().and_then(|re| {
+                re.captures(fig_content).and_then(|c| c.get(1)).map(|m| {
+                    let raw = m.as_str();
+                    tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                })
+            });
+
+            let label = label_re.as_ref().and_then(|re| {
+                re.captures(fig_content).and_then(|c| c.get(1)).map(|m| {
+                    let raw = m.as_str();
+                    tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                })
+            });
+
+            // Extract id from xml:id attribute
+            let id = Regex::new(r#"xml:id\s*=\s*"([^"]+)""#).ok()
+                .and_then(|re| re.captures(fig_content).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()));
+
+            figures.push(GrobidFigureOutput {
+                id: id.or(label),
+                caption,
+                description: None,
+            });
+        }
+    }
+
+    // Also try generic <figure> without type attribute (some grobid outputs don't have type)
+    if figures.is_empty() {
+        let generic_fig_re = Regex::new(r"(?is)<figure\b[^>]*>(.*?)</figure>").ok();
+        if let Some(f_re) = &generic_fig_re {
+            for cap in f_re.captures_iter(body) {
+                let fig_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                // Skip table figures
+                if fig_content.contains("type=\"table\"") || fig_content.contains("type='table'") {
+                    continue;
+                }
+                let caption = figdesc_re.as_ref().and_then(|re| {
+                    re.captures(fig_content).and_then(|c| c.get(1)).map(|m| {
+                        let raw = m.as_str();
+                        tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                    })
+                });
+                let label = label_re.as_ref().and_then(|re| {
+                    re.captures(fig_content).and_then(|c| c.get(1)).map(|m| {
+                        let raw = m.as_str();
+                        tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                    })
+                });
+                if caption.is_some() || label.is_some() {
+                    let id = Regex::new(r#"xml:id\s*=\s*"([^"]+)""#).ok()
+                        .and_then(|re| re.captures(fig_content).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()));
+                    figures.push(GrobidFigureOutput {
+                        id: id.or(label),
+                        caption,
+                        description: None,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Extract tables ──
+    let table_re = Regex::new(r#"(?is)<figure\b[^>]*type\s*=\s*"table"[^>]*>(.*?)</figure>"#).ok();
+    if let Some(t_re) = &table_re {
+        for cap in t_re.captures_iter(body) {
+            let tbl_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+
+            let caption = figdesc_re.as_ref().and_then(|re| {
+                re.captures(tbl_content).and_then(|c| c.get(1)).map(|m| {
+                    let raw = m.as_str();
+                    tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                })
+            });
+
+            let label = label_re.as_ref().and_then(|re| {
+                re.captures(tbl_content).and_then(|c| c.get(1)).map(|m| {
+                    let raw = m.as_str();
+                    tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                })
+            });
+
+            let id = Regex::new(r#"xml:id\s*=\s*"([^"]+)""#).ok()
+                .and_then(|re| re.captures(tbl_content).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()));
+
+            tables.push(GrobidTableOutput {
+                id: id.or(label),
+                caption,
+                content: None,
+            });
+        }
+    }
+
+    // Also try generic <table> elements
+    if tables.is_empty() {
+        let generic_table_re = Regex::new(r"(?is)<table\b[^>]*>(.*?)</table>").ok();
+        if let Some(t_re) = &generic_table_re {
+            for (idx, cap) in t_re.captures_iter(body).enumerate() {
+                let tbl_content = cap.get(1).map(|m| m.as_str()).unwrap_or("");
+                let caption = figdesc_re.as_ref().and_then(|re| {
+                    re.captures(tbl_content).and_then(|c| c.get(1)).map(|m| {
+                        let raw = m.as_str();
+                        tag_re.as_ref().map(|tr| tr.replace_all(raw, "").trim().to_string()).unwrap_or(raw.to_string())
+                    })
+                });
+                tables.push(GrobidTableOutput {
+                    id: Some(format!("T{}", idx + 1)),
+                    caption,
+                    content: None,
+                });
+            }
+        }
+    }
+
+    eprintln!("[xDoc:grobid] manual TEI parse: {} sections, {} figures, {} tables",
+        sections.len(), figures.len(), tables.len());
+
+    (sections, figures, tables)
+}
+
+fn flatten_sections(sections: &[grobid_rs::Section]) -> Vec<GrobidSectionOutput> {
+    let mut result = Vec::new();
+    for sec in sections {
+        result.push(GrobidSectionOutput {
+            title: sec.title.clone(),
+            level: sec.level,
+            content: sec.content.clone(),
+        });
+        if !sec.subsections.is_empty() {
+            result.extend(flatten_sections(&sec.subsections));
+        }
+    }
+    result
+}
+
 #[tauri::command]
 async fn grobid_parse_document(
     app: AppHandle,
     file_path: String,
+    force: Option<bool>,
+    structure_only: Option<bool>,
     state: State<'_, GrobidEngineState>,
 ) -> Result<GrobidDocumentOutput, String> {
-    // Check cache
-    if let Some((ref cached_path, ref result)) = *state.cached_result.lock().unwrap() {
-        if cached_path == &file_path {
-            let _ = app.emit("grobid-parse-event", GrobidParseEvent {
-                status: "completed".to_string(),
-                message: "使用缓存结果".to_string(),
-                result: Some(result.clone()),
-                error: None,
-            });
-            return Ok(result.clone());
+    let force_reparse = force.unwrap_or(false);
+    let structure_only = structure_only.unwrap_or(false);
+
+    // ── Structure-only re-parse: reuse cached metadata/refs, only re-do fulltext ──
+    if structure_only {
+        let cached = state.cached_result.lock().unwrap().clone();
+        if let Some((ref cached_path, ref cached_doc)) = cached {
+            if cached_path == &file_path {
+                let path = PathBuf::from(&file_path);
+                let app_clone = app.clone();
+
+                let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                    status: "parsing".to_string(),
+                    message: "正在重新解析文档结构…".to_string(),
+                    result: None,
+                    error: None,
+                });
+
+                let cached_meta = cached_doc.metadata.clone();
+                let cached_refs = cached_doc.references.clone();
+                let cached_result_arc = state.cached_result.clone();
+
+                let parse_result = tauri::async_runtime::spawn_blocking(move || -> Result<GrobidDocumentOutput, String> {
+                    eprintln!("[xDoc:grobid] structure_only re-parse for {}", path.display());
+                    let (sections, figures, tables) = extract_structure(&path);
+
+                    Ok(GrobidDocumentOutput {
+                        metadata: cached_meta,
+                        sections, figures, tables,
+                        equations: Vec::new(),
+                        references: cached_refs,
+                    })
+                })
+                .await
+                .map_err(|e| format!("spawn_blocking failed: {e}"))?;
+
+                match parse_result {
+                    Ok(result) => {
+                        *cached_result_arc.lock().unwrap() = Some((file_path.clone(), result.clone()));
+                        // Also save to JSON file cache
+                        let pdf_path = PathBuf::from(&file_path);
+                        save_grobid_json_cache(&pdf_path, &result);
+                        let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
+                            status: "completed".to_string(),
+                            message: format!("结构重解析完成: {} 章节, {} 图片, {} 表格",
+                                result.sections.len(), result.figures.len(), result.tables.len()),
+                            result: Some(result.clone()),
+                            error: None,
+                        });
+                        return Ok(result);
+                    }
+                    Err(e) => {
+                        let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
+                            status: "error".to_string(),
+                            message: format!("结构重解析失败: {e}"),
+                            result: None,
+                            error: Some(e.clone()),
+                        });
+                        return Err(e);
+                    }
+                }
+            }
+        }
+        // No cache — fall through to full parse
+        eprintln!("[xDoc:grobid] structure_only requested but no cache for {}, doing full parse", file_path);
+    }
+
+    // Check caches (skip if force re-parsing); support partial merge for incomplete caches
+    let mut cached_meta_opt: Option<GrobidMetadataOutput> = None;
+    let mut cached_refs_opt: Option<Vec<GrobidRefOutput>> = None;
+    let mut cached_sections_opt: Option<Vec<GrobidSectionOutput>> = None;
+    let mut cached_figures_opt: Option<Vec<GrobidFigureOutput>> = None;
+    let mut cached_tables_opt: Option<Vec<GrobidTableOutput>> = None;
+    let mut need_structure = true;
+    let mut need_references = true;
+
+    if !force_reparse {
+        // Try in-memory cache first
+        let mem_cached = {
+            let guard = state.cached_result.lock().unwrap();
+            if let Some((ref p, ref r)) = *guard {
+                if p == &file_path {
+                    eprintln!("[xDoc:grobid] in-memory cache HIT for {}", file_path);
+                    Some(r.clone())
+                } else {
+                    eprintln!("[xDoc:grobid] in-memory cache MISS (cached={}, requested={})", p, file_path);
+                    None
+                }
+            } else { None }
+        };
+        // Try JSON file cache if no in-memory match
+        let file_cached = if mem_cached.is_none() {
+            load_grobid_json_cache(&PathBuf::from(&file_path))
+        } else { None };
+
+        if let Some(doc) = mem_cached.or(file_cached) {
+            let has_sections = !doc.sections.is_empty();
+            let has_references = !doc.references.is_empty();
+
+            if has_sections && has_references {
+                // Cache is complete — use it directly
+                eprintln!("[xDoc:grobid] using complete cache for {}", file_path);
+                *state.cached_result.lock().unwrap() = Some((file_path.clone(), doc.clone()));
+                let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                    status: "completed".to_string(),
+                    message: "使用缓存结果".to_string(),
+                    result: Some(doc.clone()),
+                    error: None,
+                });
+                return Ok(doc);
+            }
+
+            // Cache is incomplete — mark what's missing, keep what we have for merging
+            need_structure = !has_sections;
+            need_references = !has_references;
+            eprintln!("[xDoc:grobid] partial cache for {} (sections={}, refs={}), will re-parse missing parts",
+                file_path, if has_sections {"ok"} else {"MISSING"}, if has_references {"ok"} else {"MISSING"});
+            // Always preserve cached metadata for merging
+            cached_meta_opt = Some(doc.metadata);
+            if has_sections {
+                cached_sections_opt = Some(doc.sections);
+                cached_figures_opt = Some(doc.figures);
+                cached_tables_opt = Some(doc.tables);
+            }
+            if has_references {
+                cached_refs_opt = Some(doc.references);
+            }
+        } else {
+            eprintln!("[xDoc:grobid] no cache found for {}, will do full parse", file_path);
         }
     }
 
@@ -1090,10 +1537,19 @@ async fn grobid_parse_document(
         }
     }
 
-    // Emit parsing started
+    // Emit parsing started (with details on what needs re-parsing)
+    let parse_desc = if need_structure && need_references {
+        "正在重新解析结构和参考文献…".to_string()
+    } else if need_structure {
+        "正在重新解析文档结构…".to_string()
+    } else if need_references {
+        "正在重新解析参考文献…".to_string()
+    } else {
+        "正在解析 PDF…".to_string()
+    };
     let _ = app.emit("grobid-parse-event", GrobidParseEvent {
         status: "parsing".to_string(),
-        message: "正在解析 PDF…".to_string(),
+        message: parse_desc,
         result: None,
         error: None,
     });
@@ -1102,89 +1558,101 @@ async fn grobid_parse_document(
     let app_clone = app.clone();
     let cached_result_arc = state.cached_result.clone();
 
-    // Run header + references parsing on blocking thread (fulltext_to_structured is unreliable)
+    // Run header + references + structure parsing on blocking thread
+    // Only re-parse the parts that are missing from cache
     let parse_result = tauri::async_runtime::spawn_blocking(move || -> Result<GrobidDocumentOutput, String> {
-        // Parse header metadata
-        let metadata_result = grobid_rs::process_header_structured(&path);
-        // Parse references independently
-        let refs_result = grobid_rs::process_references_structured(&path);
+        // ── Structure: only call extract_structure when sections are missing ──
+        let (sections, figures, tables) = if need_structure {
+            eprintln!("[xDoc:grobid] re-parsing structure (sections missing from cache)");
+            extract_structure(&path)
+        } else {
+            eprintln!("[xDoc:grobid] using cached sections, skipping structure re-parse");
+            (
+                cached_sections_opt.unwrap_or_default(),
+                cached_figures_opt.unwrap_or_default(),
+                cached_tables_opt.unwrap_or_default(),
+            )
+        };
 
-        // Build metadata output (gracefully handle header parse failure)
-        let metadata = match &metadata_result {
-            Ok(meta) => GrobidMetadataOutput {
-                title: meta.title.clone(),
-                authors: meta.authors.iter().map(|a| GrobidAuthorOutput {
-                    first_name: a.first_name.clone(),
-                    middle_name: a.middle_name.clone(),
-                    last_name: a.last_name.clone(),
-                    full_name: a.full_name.clone(),
-                    email: a.email.clone(),
-                    affiliation: a.affiliation.clone(),
-                    identifier: a.identifier.clone(),
-                }).collect(),
-                abstract_text: meta.abstract_text.clone(),
-                date: meta.date.as_ref().map(|d| GrobidDateOutput {
-                    year: d.year.clone(),
-                    month: d.month.clone(),
-                    day: d.day.clone(),
-                    raw: d.raw.clone(),
-                }),
-                doi: meta.doi.clone(),
-                venue: meta.venue.as_ref().map(|v| GrobidVenueOutput {
-                    name: v.name.clone(),
-                    volume: v.volume.clone(),
-                    issue: v.issue.clone(),
-                    pages: v.pages.clone(),
-                    publisher: v.publisher.clone(),
-                }),
-                keywords: meta.keywords.clone(),
-            },
-            Err(e) => {
-                // If both fail, return error
-                if refs_result.is_err() {
-                    return Err(format!("Grobid header parsing failed: {e}"));
-                }
-                // Header failed but references succeeded — return empty metadata
-                GrobidMetadataOutput {
-                    title: None, authors: Vec::new(), abstract_text: None,
-                    date: None, doi: None, venue: None, keywords: Vec::new(),
+        // ── Metadata: only call GROBID when no cached metadata ──
+        let metadata = if cached_meta_opt.is_some() {
+            eprintln!("[xDoc:grobid] using cached metadata, skipping header re-parse");
+            cached_meta_opt.clone().unwrap()
+        } else {
+            match grobid_rs::process_header_structured(&path) {
+                Ok(meta) => GrobidMetadataOutput {
+                    title: meta.title.clone(),
+                    authors: meta.authors.iter().map(|a| GrobidAuthorOutput {
+                        first_name: a.first_name.clone(),
+                        middle_name: a.middle_name.clone(),
+                        last_name: a.last_name.clone(),
+                        full_name: a.full_name.clone(),
+                        email: a.email.clone(),
+                        affiliation: a.affiliation.clone(),
+                        identifier: a.identifier.clone(),
+                    }).collect(),
+                    abstract_text: meta.abstract_text.clone(),
+                    date: meta.date.as_ref().map(|d| GrobidDateOutput {
+                        year: d.year.clone(),
+                        month: d.month.clone(),
+                        day: d.day.clone(),
+                        raw: d.raw.clone(),
+                    }),
+                    doi: meta.doi.clone(),
+                    venue: meta.venue.as_ref().map(|v| GrobidVenueOutput {
+                        name: v.name.clone(),
+                        volume: v.volume.clone(),
+                        issue: v.issue.clone(),
+                        pages: v.pages.clone(),
+                        publisher: v.publisher.clone(),
+                    }),
+                    keywords: meta.keywords.clone(),
+                },
+                Err(e) => {
+                    eprintln!("[xDoc:grobid] header parsing failed: {e}");
+                    GrobidMetadataOutput {
+                        title: None, authors: Vec::new(), abstract_text: None,
+                        date: None, doi: None, venue: None, keywords: Vec::new(),
+                    }
                 }
             }
         };
 
-        // Build references output
-        let references = match &refs_result {
-            Ok(refs) => refs.iter().map(|r| GrobidRefOutput {
-                id: r.id.clone(),
-                title: r.title.clone(),
-                authors: r.authors.clone(),
-                year: r.date.as_ref().and_then(|d| d.year.clone()),
-                month: r.date.as_ref().and_then(|d| d.month.clone()),
-                day: r.date.as_ref().and_then(|d| d.day.clone()),
-                date_raw: r.date.as_ref().and_then(|d| d.raw.clone()),
-                venue: r.venue.clone(),
-                volume: r.volume.clone(),
-                issue: r.issue.clone(),
-                pages: r.pages.clone(),
-                publisher: r.publisher.clone(),
-                doi: r.doi.clone(),
-                raw: r.raw.clone(),
-            }).collect(),
-            Err(e) => {
-                // If both fail, return error
-                if metadata_result.is_err() {
-                    return Err(format!("Grobid references parsing also failed: {e}"));
+        // ── References: only call GROBID when references are missing ──
+        let references = if !need_references {
+            eprintln!("[xDoc:grobid] using cached references, skipping references re-parse");
+            cached_refs_opt.unwrap_or_default()
+        } else {
+            eprintln!("[xDoc:grobid] re-parsing references (missing from cache)");
+            match grobid_rs::process_references_structured(&path) {
+                Ok(refs) => refs.iter().map(|r| GrobidRefOutput {
+                    id: r.id.clone(),
+                    title: r.title.clone(),
+                    authors: r.authors.clone(),
+                    year: r.date.as_ref().and_then(|d| d.year.clone()),
+                    month: r.date.as_ref().and_then(|d| d.month.clone()),
+                    day: r.date.as_ref().and_then(|d| d.day.clone()),
+                    date_raw: r.date.as_ref().and_then(|d| d.raw.clone()),
+                    venue: r.venue.clone(),
+                    volume: r.volume.clone(),
+                    issue: r.issue.clone(),
+                    pages: r.pages.clone(),
+                    publisher: r.publisher.clone(),
+                    doi: r.doi.clone(),
+                    raw: r.raw.clone(),
+                }).collect(),
+                Err(e) => {
+                    eprintln!("[xDoc:grobid] references parsing failed: {e}");
+                    cached_refs_opt.unwrap_or_default()
                 }
-                // Metadata succeeded but references failed — return empty refs
-                Vec::new()
             }
         };
 
         Ok(GrobidDocumentOutput {
             metadata,
-            sections: Vec::new(),     // fulltext sections unreliable, omitted
-            figures: Vec::new(),
-            tables: Vec::new(),
+            sections,
+            figures,
+            tables,
             equations: Vec::new(),
             references,
         })
@@ -1194,12 +1662,17 @@ async fn grobid_parse_document(
 
     match parse_result {
         Ok(result) => {
-            // Cache the result
-            *cached_result_arc.lock().unwrap() = Some((file_path, result.clone()));
+            // Cache in-memory
+            *cached_result_arc.lock().unwrap() = Some((file_path.clone(), result.clone()));
+
+            // Save to JSON file cache (next to the PDF)
+            let pdf_path = PathBuf::from(&file_path);
+            save_grobid_json_cache(&pdf_path, &result);
 
             let _ = app_clone.emit("grobid-parse-event", GrobidParseEvent {
                 status: "completed".to_string(),
-                message: format!("解析完成: {} 条参考文献", result.references.len()),
+                message: format!("解析完成: {} 条参考文献, {} 章节",
+                    result.references.len(), result.sections.len()),
                 result: Some(result.clone()),
                 error: None,
             });
