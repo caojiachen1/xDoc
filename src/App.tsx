@@ -469,7 +469,7 @@ function App() {
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent).detail;
-      const { type, message } = detail;
+      const { message } = detail;
       const toast = document.createElement("div");
       toast.style.cssText = `
         position: fixed; bottom: 24px; right: 24px; z-index: 10000;
