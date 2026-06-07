@@ -974,7 +974,21 @@ async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<Stri
 
     *state.status.lock().unwrap() = "initializing".to_string();
 
-    let base_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
+    // Prioritise compile-time path (dev builds), fall back to exe-root dir (packaged builds)
+    let dev_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
+    let base_path = if dev_path.join("runtime").exists() {
+        dev_path
+    } else {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_default();
+        ["grobid-assets", "grobid_assets", "grobid-0.9.1"]
+            .iter()
+            .map(|name| exe_dir.join(name))
+            .find(|p| p.join("runtime").exists())
+            .unwrap_or(dev_path)
+    };
     let status_arc = state.status.clone();
     let error_arc = state.error_msg.clone();
 
@@ -1000,7 +1014,7 @@ async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<Stri
             }
         }
 
-        let jar_name = "grobid-core-0.8.2-onejar.jar";
+        let jar_name = "grobid-core-0.9.1-onejar.jar";
         let expected_jar = grobid_dir.join("grobid-core/build/libs").join(jar_name);
         if !expected_jar.exists() {
             let src_jar = base_path.join(jar_name);
@@ -1535,7 +1549,7 @@ async fn grobid_parse_document(
                     copy_dir_recursive(&grobid_home_src, &grobid_home_dst).ok();
                 }
             }
-            let jar_name = "grobid-core-0.8.2-onejar.jar";
+            let jar_name = "grobid-core-0.9.1-onejar.jar";
             let expected_jar = grobid_dir.join("grobid-core/build/libs").join(jar_name);
             if !expected_jar.exists() {
                 let src_jar = base_path.join(jar_name);
