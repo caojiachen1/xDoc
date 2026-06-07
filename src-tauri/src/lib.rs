@@ -21,6 +21,7 @@ use tauri::{AppHandle, Emitter, State};
 mod gguf_ocr;
 mod settings_db;
 mod plugin_host;
+mod plugin_storage;
 mod pptx_gen;
 use settings_db::{AiConfig, AnnotationRecord, JournalRanking, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
 use plugin_host::PluginState;
@@ -4057,12 +4058,31 @@ pub fn run() {
             plugin_host::plugin_get_manifest,
             plugin_host::plugin_emit_event,
             plugin_host::plugin_read_entry,
-            plugin_host::get_full_pdf_text,
-            plugin_host::extract_pdf_images,
-            plugin_host::extract_pdf_images_lopdf,
-            plugin_host::generate_pptx,
-            plugin_host::convert_template_to_html,
+            plugin_host::plugin_register_builtin,
             plugin_host::plugin_install_from_zip,
+            // v2 plugin APIs (permission-checked)
+            plugin_host::plugin_get_full_pdf_text,
+            plugin_host::plugin_extract_pdf_images,
+            plugin_host::plugin_extract_pdf_images_lopdf,
+            plugin_host::plugin_pdf_page_count,
+            plugin_host::plugin_pdf_page_text,
+            plugin_host::plugin_pdf_outline,
+            plugin_host::plugin_pdf_search,
+            plugin_host::plugin_pdf_info,
+            plugin_host::plugin_extract_first_page_metadata,
+            plugin_host::plugin_generate_pptx,
+            plugin_host::plugin_convert_template_to_html,
+            plugin_host::plugin_storage_get,
+            plugin_host::plugin_storage_set,
+            plugin_host::plugin_storage_delete,
+            plugin_host::plugin_storage_list,
+            plugin_host::plugin_query_papers,
+            plugin_host::plugin_get_paper_metadata,
+            plugin_host::plugin_update_paper_metadata,
+            plugin_host::plugin_get_platform,
+            plugin_host::plugin_get_app_version,
+            plugin_host::plugin_write_file,
+            plugin_host::plugin_read_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,11 +1,12 @@
 /**
- * PluginManager — Plugin lifecycle management
+ * PluginManager — Plugin lifecycle management (v2)
  *
  * Responsibilities:
  * 1. Fetch plugin manifest list from the Rust backend
- * 2. Load/unload plugins
- * 3. Collect hooks registered by plugins (context menu items, toolbar buttons, commands)
- * 4. Broadcast plugin events to the frontend UI
+ * 2. Load/unload plugins (main-thread or WebWorker)
+ * 3. Collect hooks (context menu, toolbar, commands, panels, etc.)
+ * 4. Broadcast lifecycle events via EventBus
+ * 5. Manage interceptor pipeline and UI extension registry
  */
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -16,9 +17,14 @@ import {
   type PluginContextMenuItem,
   type PluginToolbarButton,
   type PluginCommand,
+  type LlmConfigSnapshot,
   PLUGIN_EVENTS,
 } from "./types";
-import { createPluginContext } from "./context";
+import { createPluginContext, setInterceptorRunner, setUIRegistry } from "./context";
+import { eventBus } from "./event-bus";
+import { interceptorPipeline, setManagerRef } from "./interceptors";
+import { uiRegistry } from "./ui-extensions";
+import { loadPluginInWorker, activeWorkers } from "./sandbox/worker-host";
 
 type Listener = () => void;
 
@@ -28,19 +34,38 @@ class PluginManagerClass {
   /** State change listeners */
   private listeners: Set<Listener> = new Set();
 
-  /** ── Current PDF state (updated by App.tsx) ── */
+  /** Current PDF state (updated by App.tsx) */
   private currentPdfPath: string | null = null;
-  private llmConfig: {
-    vendor: string;
-    baseUrl: string;
-    apiKey: string;
-    model: string;
-  } | null = null;
+  private llmConfig: LlmConfigSnapshot | null = null;
 
-  /** ── Collected hooks (consumed by components) ── */
+  /** Collected hooks (consumed by components) */
   contextMenuItems: PluginContextMenuItem[] = [];
   toolbarButtons: PluginToolbarButton[] = [];
   commands: PluginCommand[] = [];
+
+  constructor() {
+    // Wire up interceptor runner so context.ts can use it
+    setInterceptorRunner({
+      runBefore: (hook, pluginId, data) =>
+        interceptorPipeline.runBefore(hook, pluginId, data),
+      runAfter: (hook, pluginId, data) =>
+        interceptorPipeline.runAfter(hook, pluginId, data),
+    });
+
+    // Inject manager reference into interceptors (avoids circular import)
+    setManagerRef({
+      getAllPlugins: () => this.getAllPlugins(),
+      makeContextFor: (pluginId: string) => this.makeContextFor(pluginId),
+    });
+
+    // Wire up UI registry so context.ts can use it
+    setUIRegistry({
+      registerPanel: (pluginId, config) => uiRegistry.registerPanel(pluginId, config),
+      registerSidebar: (pluginId, config) => uiRegistry.registerSidebar(pluginId, config),
+      registerFloatingWindow: (pluginId, config) =>
+        uiRegistry.registerFloatingWindow(pluginId, config),
+    });
+  }
 
   /** Subscribe to state changes */
   subscribe(listener: Listener): () => void {
@@ -54,18 +79,42 @@ class PluginManagerClass {
 
   /** Called by App.tsx when a PDF is opened */
   setCurrentPdfPath(path: string | null) {
+    const wasPath = this.currentPdfPath;
     this.currentPdfPath = path;
-    if (path) {
-      // Notify all plugins listening for onPdfOpened
+
+    if (path && !wasPath) {
+      // PDF opened
       const paper = { id: "", name: "", path };
       this.plugins.forEach((plugin) => {
         if (plugin.status === "enabled" && plugin.hooks.onPdfOpened) {
-          const ctx = this.makeContext(plugin.manifest.id);
+          const ctx = this.makeContextFor(plugin.manifest.id);
           plugin.hooks.onPdfOpened(ctx, paper).catch((err) => {
             console.warn(`[Plugin ${plugin.manifest.id}] onPdfOpened error:`, err);
           });
         }
       });
+      eventBus.emit(PLUGIN_EVENTS.PDF_OPENED, paper);
+    } else if (!path && wasPath) {
+      // PDF closed
+      this.plugins.forEach((plugin) => {
+        if (plugin.status === "enabled" && plugin.hooks.onPdfClosed) {
+          const ctx = this.makeContextFor(plugin.manifest.id);
+          plugin.hooks.onPdfClosed(ctx).catch((err) => {
+            console.warn(`[Plugin ${plugin.manifest.id}] onPdfClosed error:`, err);
+          });
+        }
+      });
+      eventBus.emit(PLUGIN_EVENTS.PDF_CLOSED);
+    } else if (path && wasPath && path !== wasPath) {
+      // PDF switched
+      const paper = { id: "", name: "", path };
+      this.plugins.forEach((plugin) => {
+        if (plugin.status === "enabled" && plugin.hooks.onPdfOpened) {
+          const ctx = this.makeContextFor(plugin.manifest.id);
+          plugin.hooks.onPdfOpened(ctx, paper).catch(console.warn);
+        }
+      });
+      eventBus.emit(PLUGIN_EVENTS.PDF_OPENED, paper);
     }
   }
 
@@ -73,25 +122,26 @@ class PluginManagerClass {
   async notifyPdfTextReady(fullText: string) {
     this.plugins.forEach((plugin) => {
       if (plugin.status === "enabled" && plugin.hooks.onPdfTextReady) {
-        const ctx = this.makeContext(plugin.manifest.id);
+        const ctx = this.makeContextFor(plugin.manifest.id);
         plugin.hooks.onPdfTextReady(ctx, fullText).catch((err) => {
           console.warn(`[Plugin ${plugin.manifest.id}] onPdfTextReady error:`, err);
         });
       }
     });
+    eventBus.emit(PLUGIN_EVENTS.PDF_TEXT_READY, fullText);
   }
 
   /** Set LLM config (updated when SettingsDialog saves) */
-  setLlmConfig(config: typeof this.llmConfig) {
+  setLlmConfig(config: LlmConfigSnapshot | null) {
     this.llmConfig = config;
   }
 
-  /** Get a snapshot of the LLM config (for context menu handler in host.ts) */
-  getLlmConfigSnapshot() {
+  /** Get a snapshot of the LLM config */
+  getLlmConfigSnapshot(): LlmConfigSnapshot | null {
     return this.llmConfig;
   }
 
-  /** Register a builtin plugin manifest (so it appears in getAllPlugins) */
+  /** Register a builtin plugin manifest */
   registerBuiltinManifest(manifest: PluginManifest): void {
     if (!this.plugins.has(manifest.id)) {
       this.plugins.set(manifest.id, {
@@ -100,19 +150,19 @@ class PluginManagerClass {
         hooks: {},
         isBuiltin: true,
       });
+      // Tell Rust side this is builtin (for permission bypass)
+      invoke("plugin_register_builtin", { pluginId: manifest.id }).catch(() => {});
       this.notify();
     }
   }
 
-  /** ── Core: discover and load plugins ── */
+  // ── Core: discover and load plugins ──
 
   async discoverPlugins(): Promise<PluginManifest[]> {
     try {
       const manifests = await invoke<PluginManifest[]>("plugin_list");
-
       for (const manifest of manifests) {
         if (!this.plugins.has(manifest.id)) {
-          // Initial state is disabled, do not auto-load code
           this.plugins.set(manifest.id, {
             manifest,
             status: "disabled",
@@ -128,7 +178,10 @@ class PluginManagerClass {
           try {
             await this.enablePlugin(pluginId);
           } catch (err) {
-            console.warn(`[PluginManager] Failed to auto-enable builtin plugin '${pluginId}':`, err);
+            console.warn(
+              `[PluginManager] Failed to auto-enable builtin plugin '${pluginId}':`,
+              err,
+            );
           }
         }
       }
@@ -147,29 +200,34 @@ class PluginManagerClass {
     if (!entry) throw new Error(`Plugin '${pluginId}' not found`);
 
     try {
-      // Dynamically load the plugin entry script
       const hooks = await this.loadPluginModule(entry.manifest);
       entry.hooks = hooks;
       entry.status = "enabled";
       entry.error = undefined;
 
-      // Call onInit
-      if (hooks.onInit) {
-        const ctx = this.makeContext(pluginId);
+      // Call onActivate (preferred) or onInit (deprecated compat)
+      if (hooks.onActivate) {
+        const ctx = this.makeContextFor(pluginId);
+        const moreHooks = await hooks.onActivate(ctx);
+        if (moreHooks) {
+          entry.hooks = { ...entry.hooks, ...moreHooks };
+        }
+      } else if (hooks.onInit) {
+        const ctx = this.makeContextFor(pluginId);
         const moreHooks = await hooks.onInit(ctx);
         if (moreHooks) {
           entry.hooks = { ...entry.hooks, ...moreHooks };
         }
       }
 
+      // Collect UI extension registrations
+      this.collectUIExtensions(pluginId, entry.hooks);
+
       // Re-collect hooks
       this.collectHooks();
       this.notify();
 
-      // Dispatch event
-      window.dispatchEvent(
-        new CustomEvent(PLUGIN_EVENTS.PLUGIN_ENABLED, { detail: { pluginId } })
-      );
+      eventBus.emit(PLUGIN_EVENTS.PLUGIN_ENABLED, { pluginId });
     } catch (err) {
       entry.status = "error";
       entry.error = String(err);
@@ -183,21 +241,35 @@ class PluginManagerClass {
     const entry = this.plugins.get(pluginId);
     if (!entry) return;
 
-    // Call onDestroy
-    if (entry.hooks.onDestroy) {
+    // Call onDeactivate (preferred) or onDestroy (deprecated compat)
+    if (entry.hooks.onDeactivate) {
+      await entry.hooks.onDeactivate().catch((err) => {
+        console.warn(`[Plugin ${pluginId}] onDeactivate error:`, err);
+      });
+    } else if (entry.hooks.onDestroy) {
       await entry.hooks.onDestroy().catch((err) => {
         console.warn(`[Plugin ${pluginId}] onDestroy error:`, err);
       });
     }
+
+    // Terminate Worker if active
+    const workerHost = activeWorkers.get(pluginId);
+    if (workerHost) {
+      workerHost.cleanup();
+    }
+
+    // Cleanup event bus subscriptions
+    eventBus.cleanupPlugin(pluginId);
+
+    // Cleanup UI extensions
+    uiRegistry.cleanupPlugin(pluginId);
 
     entry.hooks = {};
     entry.status = "disabled";
     this.collectHooks();
     this.notify();
 
-    window.dispatchEvent(
-      new CustomEvent(PLUGIN_EVENTS.PLUGIN_DISABLED, { detail: { pluginId } })
-    );
+    eventBus.emit(PLUGIN_EVENTS.PLUGIN_DISABLED, { pluginId });
   }
 
   /** Get all plugin statuses */
@@ -209,9 +281,41 @@ class PluginManagerClass {
     return this.plugins.get(pluginId);
   }
 
-  /** ── Private methods ── */
+  // ── Lifecycle notification methods ──
 
-  private makeContext(pluginId: string): PluginContext {
+  async notifyAppReady() {
+    for (const [, plugin] of this.plugins) {
+      if (plugin.status === "enabled" && plugin.hooks.onAppReady) {
+        const ctx = this.makeContextFor(plugin.manifest.id);
+        await plugin.hooks.onAppReady(ctx).catch(console.warn);
+      }
+    }
+    eventBus.emit(PLUGIN_EVENTS.APP_READY);
+  }
+
+  async notifySettingsChanged(key: string, value: unknown) {
+    for (const [, plugin] of this.plugins) {
+      if (plugin.status === "enabled" && plugin.hooks.onSettingsChanged) {
+        const ctx = this.makeContextFor(plugin.manifest.id);
+        await plugin.hooks.onSettingsChanged(ctx, key, value).catch(console.warn);
+      }
+    }
+    eventBus.emit(PLUGIN_EVENTS.SETTINGS_CHANGED, { key, value });
+  }
+
+  async notifyBeforeUnload() {
+    for (const [, plugin] of this.plugins) {
+      if (plugin.status === "enabled" && plugin.hooks.onBeforeUnload) {
+        const ctx = this.makeContextFor(plugin.manifest.id);
+        await plugin.hooks.onBeforeUnload(ctx).catch(console.warn);
+      }
+    }
+    eventBus.emit(PLUGIN_EVENTS.BEFORE_UNLOAD);
+  }
+
+  // ── Public: create context for a plugin (used by interceptors) ──
+
+  makeContextFor(pluginId: string): PluginContext {
     return createPluginContext({
       pluginId,
       getCurrentPdfPath: () => this.currentPdfPath,
@@ -219,43 +323,60 @@ class PluginManagerClass {
     });
   }
 
+  // ── Private methods ──
+
   /** Dynamically load a plugin module */
   private async loadPluginModule(manifest: PluginManifest): Promise<PluginHooks> {
-    // Loading strategy based on plugin entry type
-    // 1. If main is a .js file path → dynamic import
-    // 2. If main is a sidecar command → call via invoke
-    // 3. Inline plugin → return registered hooks directly
-
     const mainEntry = manifest.entry.main;
     if (!mainEntry) {
-      return {}; // Pure UI plugin, no loading logic needed
+      return {}; // Pure UI plugin
     }
 
-    // Option A: Inline registration (for demos / builtin plugins)
+    // Builtin: main-thread execution
     if (mainEntry.startsWith("builtin:")) {
       const builtinId = mainEntry.replace("builtin:", "");
       return loadBuiltinPlugin(builtinId);
     }
 
-    // Option B: Dynamically import JS from plugins directory
-    // Path format: plugins/ppt-generator/index.js
-    // In Vite, the plugin directory must be configured as a dynamically-loadable static asset
+    // External plugin: WebWorker sandbox
     try {
-      // Under Tauri, plugin JS is managed via sidecar or resource
-      // Simplified here: read via Tauri invoke and eval (sandbox-limited)
       const moduleCode = await invoke<string>("plugin_read_entry", {
         pluginId: manifest.id,
         entryPath: mainEntry,
       });
 
-      // Execute plugin code in a sandbox, passing an exports object
-      const exports: { hooks?: PluginHooks } = {};
-      const fn = new Function("module", "exports", moduleCode);
-      fn({ exports }, exports);
-      return exports.hooks ?? {};
+      const hooks = await loadPluginInWorker(manifest.id, moduleCode, {
+        pluginId: manifest.id,
+        getCurrentPdfPath: () => this.currentPdfPath,
+        getLlmConfig: () => this.llmConfig,
+      });
+
+      return hooks;
     } catch (err) {
-      console.warn(`[PluginManager] Failed to load module for ${manifest.id}:`, err);
+      console.warn(
+        `[PluginManager] Failed to load module for ${manifest.id}:`,
+        err,
+      );
       return {};
+    }
+  }
+
+  /** Collect UI extension registrations from hooks */
+  private collectUIExtensions(pluginId: string, hooks: PluginHooks) {
+    if (hooks.panels) {
+      for (const panel of hooks.panels()) {
+        uiRegistry.registerPanel(pluginId, panel);
+      }
+    }
+    if (hooks.sidebars) {
+      for (const sidebar of hooks.sidebars()) {
+        uiRegistry.registerSidebar(pluginId, sidebar);
+      }
+    }
+    if (hooks.floatingWindows) {
+      for (const fw of hooks.floatingWindows()) {
+        uiRegistry.registerFloatingWindow(pluginId, fw);
+      }
     }
   }
 
@@ -284,7 +405,7 @@ class PluginManagerClass {
 /** Singleton */
 export const pluginManager = new PluginManagerClass();
 
-// ── Inline builtin plugin registry ──────────────────────────────
+// ── Inline builtin plugin registry ──
 
 type BuiltinLoader = () => PluginHooks;
 const builtinRegistry = new Map<string, BuiltinLoader>();
@@ -299,12 +420,12 @@ function loadBuiltinPlugin(name: string): PluginHooks {
   return loader();
 }
 
-/** Return all builtin plugin IDs registered via registerBuiltinPlugin */
+/** Return all builtin plugin IDs */
 export function getRegisteredBuiltins(): string[] {
   return Array.from(builtinRegistry.keys());
 }
 
-/** Determine if a plugin is a builtin (checks manifest.entry.main starts with "builtin:") */
+/** Check if a plugin is builtin */
 export function isBuiltinPlugin(pluginId: string): boolean {
   const plugin = pluginManager.getPlugin(pluginId);
   if (!plugin) return false;

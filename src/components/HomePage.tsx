@@ -42,6 +42,7 @@ interface HomePageProps {
   llmSettings?: LlmSettings;
   onUpdateTitleTranslation?: (paperId: string, translation: string) => void;
   onUpdateAbstractTranslation?: (paperId: string, translation: string) => void;
+  onSelectPaper?: (paper: PaperInfo | null) => void;
 }
 
 const METADATA_FIELDS: { key: keyof PaperMetadata; label: string }[] = [
@@ -79,6 +80,7 @@ export default function HomePage({
   llmSettings,
   onUpdateTitleTranslation,
   onUpdateAbstractTranslation,
+  onSelectPaper,
 }: HomePageProps) {
   const [selectedCollection, setSelectedCollection] =
     useState<CollectionType>("all");
@@ -125,6 +127,14 @@ export default function HomePage({
   useEffect(() => {
     setShowTranslatedAbstract(false);
   }, [selectedPaperId]);
+
+  // Notify parent when selected paper changes
+  useEffect(() => {
+    const paper = selectedPaperId
+      ? papers.find((p) => p.id === selectedPaperId) ?? null
+      : null;
+    onSelectPaper?.(paper);
+  }, [selectedPaperId, papers, onSelectPaper]);
 
   // Auto-trigger metadata extraction when selecting a paper without metadata
   useEffect(() => {

@@ -34,9 +34,16 @@ import {
   usePluginLlmConfig,
   usePluginPdfPath,
   usePluginToolbarButtons,
+  usePluginToast,
 } from "./plugin";
 import { createPluginContext } from "./plugin/context";
 import { pluginManager } from "./plugin/manager";
+import CommandPalette from "./components/CommandPalette";
+import {
+  PluginPanelHost,
+  PluginSidebarHost,
+  PluginFloatingWindowHost,
+} from "./components/PluginPanelHost";
 import {
   copyToManaged,
   savePaper,
@@ -471,33 +478,47 @@ function App() {
   // ── Plugin system integration ──
   usePluginInit();
   usePluginLlmConfig(llmSettings);
+
+  // Track selected paper from HomePage (for command palette)
+  const [homeSelectedPaperPath, setHomeSelectedPaperPath] = useState<string | null>(null);
+  const handleHomeSelectPaper = useCallback((paper: PaperInfo | null) => {
+    setHomeSelectedPaperPath(paper?.path ?? null);
+  }, []);
   usePluginPdfPath(documentPath || null);
   const pluginToolbarBtns = usePluginToolbarButtons();
 
-  // Plugin toast notification listener (dark theme)
+  // Plugin toast notification listener (via EventBus v2)
+  usePluginToast((detail) => {
+    const { message } = detail;
+    const toast = document.createElement("div");
+    toast.style.cssText = `
+      position: fixed; bottom: 24px; right: 24px; z-index: 10000;
+      background: #2a2a2a; color: #e0e0e0; padding: 12px 20px;
+      border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      font-size: 13px; max-width: 420px; word-break: break-word;
+      animation: slideInRight 0.3s ease-out;
+      backdrop-filter: blur(8px);
+    `;
+    toast.textContent = message;
+    document.body.appendChild(toast);
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      toast.style.transition = "opacity 0.3s";
+      setTimeout(() => document.body.removeChild(toast), 300);
+    }, 4000);
+  });
+
+  // Command palette state (Ctrl+K)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   useEffect(() => {
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail;
-      const { message } = detail;
-      const toast = document.createElement("div");
-      toast.style.cssText = `
-        position: fixed; bottom: 24px; right: 24px; z-index: 10000;
-        background: #2a2a2a; color: #e0e0e0; padding: 12px 20px;
-        border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-        font-size: 13px; max-width: 420px; word-break: break-word;
-        animation: slideInRight 0.3s ease-out;
-        backdrop-filter: blur(8px);
-      `;
-      toast.textContent = message;
-      document.body.appendChild(toast);
-      setTimeout(() => {
-        toast.style.opacity = "0";
-        toast.style.transition = "opacity 0.3s";
-        setTimeout(() => document.body.removeChild(toast), 300);
-      }, 4000);
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setCommandPaletteOpen((prev) => !prev);
+      }
     };
-    window.addEventListener("plugin:toast", handler);
-    return () => window.removeEventListener("plugin:toast", handler);
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
   }, []);
 
   // Floating menu state
@@ -540,6 +561,16 @@ function App() {
   const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
   const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
   const tabBarRef = useRef<HTMLDivElement>(null);
+
+  // Effective PDF path for command palette:
+  // Priority: 1) current document (reader tab)  2) home page selected paper  3) last reader tab
+  const effectivePdfPath = useMemo(() => {
+    if (documentPath) return documentPath;
+    if (homeSelectedPaperPath) return homeSelectedPaperPath;
+    const readerTabs = tabs.filter(t => t.type === "reader" && t.documentPath);
+    if (readerTabs.length > 0) return readerTabs[readerTabs.length - 1].documentPath!;
+    return null;
+  }, [documentPath, homeSelectedPaperPath, tabs]);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
@@ -3554,6 +3585,7 @@ function App() {
               llmSettings={llmSettings}
               onUpdateTitleTranslation={handleUpdateTitleTranslation}
               onUpdateAbstractTranslation={handleUpdateAbstractTranslation}
+              onSelectPaper={handleHomeSelectPaper}
             />
           </Card>
         ) : (
@@ -4436,6 +4468,16 @@ function App() {
         onOcrModelPathChange={setOcrModelPath}
         llmSettings={llmSettings}
         onLlmSettingsChange={setLlmSettings}
+      />
+      {/* Plugin UI extensions */}
+      <PluginPanelHost />
+      <PluginSidebarHost />
+      <PluginFloatingWindowHost />
+      {/* Command palette (Ctrl+K) */}
+      <CommandPalette
+        open={commandPaletteOpen}
+        onClose={() => setCommandPaletteOpen(false)}
+        currentPdfPath={effectivePdfPath}
       />
     </div>
   );

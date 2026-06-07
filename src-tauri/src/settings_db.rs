@@ -197,6 +197,10 @@ impl SettingsDb {
         )
         .map_err(|e| anyhow::anyhow!("创建 journal_rankings 表失败: {e}"))?;
 
+        // Plugin key-value storage table
+        crate::plugin_storage::init_plugin_storage_table(&conn)
+            .map_err(|e| anyhow::anyhow!("初始化 plugin_storage 表失败: {e}"))?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             path,
