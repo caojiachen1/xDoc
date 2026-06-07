@@ -17,6 +17,7 @@ import {
 import {
   CheckmarkCircle24Regular,
   ErrorCircle24Regular,
+  Info24Regular,
   ArrowRight24Regular,
   ArrowDownload24Regular,
 } from "@fluentui/react-icons";
@@ -222,7 +223,8 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     localStorage.setItem("xdoc.settings.ocr.enabled", checked.toString());
   };
 
-  const isReady = layoutModelOk && (!ocrEnabled || ocrModelOk);
+  // Both models are optional — user can proceed regardless
+  const isReady = !checking;
 
   return (
     <div
@@ -250,7 +252,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
       >
         <Title2>初始设置</Title2>
         <Text style={{ color: "gray" }}>
-          在使用之前，请确认本地模型已就绪。未安装的模型可在此一键下载，LLM 服务可选配置。
+          本地模型和 LLM 服务均为可选配置，未安装不影响基础 PDF 阅读功能。下方可一键下载所需模型。
         </Text>
 
         <Divider />
@@ -274,9 +276,9 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
                 ) : layoutModelOk ? (
                   <CheckmarkCircle24Regular primaryFill="green" />
                 ) : (
-                  <ErrorCircle24Regular primaryFill="red" />
+                  <Info24Regular primaryFill="gray" />
                 )}
-                <Text>布局分析模型 (PP-DocLayoutV3.onnx)</Text>
+                <Text>布局分析模型 (PP-DocLayoutV3.onnx) <Text size={100} style={{ color: "gray" }}>(可选)</Text></Text>
               </div>
               {!layoutModelOk && !checking && !layoutDownload.downloading && (
                 <Button

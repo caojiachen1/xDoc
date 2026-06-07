@@ -433,6 +433,15 @@ function App() {
   const annotationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // OCR settings
+  // Auto-switch to text mode when layout model is not available
+  useEffect(() => {
+    if (!modelLoaded && selectMode === "box") {
+      setSelectMode("text");
+      setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+      window.getSelection()?.removeAllRanges();
+    }
+  }, [modelLoaded, selectMode]);
+
   const [ocrEnabled, setOcrEnabled] = useState(true);
   const [ocrModelPath, setOcrModelPath] = useState("");
 
@@ -865,6 +874,9 @@ function App() {
       priorityGrobidParse(paper.path);
     } else if (modelLoaded) {
       runModel(0, paper.path);
+    } else {
+      // Image without layout model — show placeholder message
+      setErrorMessage("布局模型未安装，无法分析图片文件。可先安装布局模型或打开 PDF 文档。");
     }
   }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse, documentPath, previewSrc]);
 
@@ -1416,7 +1428,8 @@ function App() {
       } else if (modelLoaded) {
          await runModel(0, selected);
       } else {
-         setErrorMessage("请先在菜单栏的“设置 > ONNX 模型”中加载模型");
+         // Image without layout model — show placeholder message
+         setErrorMessage("布局模型未安装，无法分析图片文件。可先安装布局模型或打开 PDF 文档。");
       }
     }
   };
@@ -3649,14 +3662,15 @@ function App() {
                       <Button
                         appearance={selectMode === "box" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${selectMode === "box" ? "toolbar-btn-active" : ""}`}
+                        disabled={!modelLoaded}
+                        className={`toolbar-btn ${selectMode === "box" && modelLoaded ? "toolbar-btn-active" : ""}`}
                         icon={<Square size={15} />}
                         onClick={() => {
                           setSelectMode("box");
                           setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
                           window.getSelection()?.removeAllRanges();
                         }}
-                        title="框选模式"
+                        title={modelLoaded ? "框选模式" : "需安装布局模型"}
                       />
                     </div>
                     <div className="pdf-toolbar-separator" />

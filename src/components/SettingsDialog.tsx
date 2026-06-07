@@ -148,6 +148,18 @@ function SettingsDialog(props: Props) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchModelsError, setFetchModelsError] = useState("");
 
+  // Check if OCR model files actually exist on disk
+  const [ocrModelExists, setOcrModelExists] = useState<boolean | null>(null);
+  const checkOcrModelExists = useCallback(async () => {
+    if (!ocrModelPath) { setOcrModelExists(false); return; }
+    try {
+      const exists = await invoke<boolean>("check_model_exists", { modelPath: ocrModelPath });
+      setOcrModelExists(exists);
+    } catch { setOcrModelExists(false); }
+  }, [ocrModelPath]);
+
+  useEffect(() => { checkOcrModelExists(); }, [checkOcrModelExists]);
+
   const unlistenRef = useRef<(() => void) | null>(null);
 
   /* ── download listener ─────────────────────────────── */
@@ -166,6 +178,8 @@ function SettingsDialog(props: Props) {
           });
           if (p.status === "completed") {
             onOcrModelPathChange("model/GLM-OCR-GGUF");
+            // Re-check model existence after download
+            checkOcrModelExists();
           }
         },
       );
@@ -509,13 +523,20 @@ function SettingsDialog(props: Props) {
                   <div className="sf-row">
                     <div className="sf-label">
                       <Text weight="semibold">启用 OCR</Text>
-                      <Text size={100} className="settings-hint">解析时自动识别</Text>
+                      <Text size={100} className="settings-hint">
+                        {ocrModelExists === false
+                          ? "⚠ 模型未安装，需先下载"
+                          : ocrModelExists === null
+                            ? "正在检查模型..."
+                            : "解析时自动识别"}
+                      </Text>
                     </div>
                     <div className="sf-control">
                       <Switch
                         checked={ocrEnabled}
+                        disabled={ocrModelExists === false}
                         onChange={(_, d) => onOcrEnabledChange(d.checked)}
-                        label={ocrEnabled ? "已开启" : "已关闭"}
+                        label={ocrModelExists === false ? "模型未安装" : (ocrEnabled ? "已开启" : "已关闭")}
                       />
                     </div>
                   </div>
