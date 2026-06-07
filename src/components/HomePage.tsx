@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages, Presentation } from "lucide-react";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
@@ -9,6 +9,9 @@ import type { PaperMetadata } from "../utils/pdfMetadata";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
 import type { LlmSettings } from "./SettingsDialog";
 import CitationExportDialog from "./CitationExportDialog";
+import { usePluginContextMenuItems } from "../plugin";
+import { createPluginContext } from "../plugin/context";
+import { pluginManager } from "../plugin/manager";
 
 export type GrobidStatus = "pending" | "parsing" | "done" | "error";
 
@@ -95,6 +98,8 @@ export default function HomePage({
   const [translatingIds, setTranslatingIds] = useState<Set<string>>(new Set());
   const [translatingAbstractId, setTranslatingAbstractId] = useState<string | null>(null);
   const [showTranslatedAbstract, setShowTranslatedAbstract] = useState(false);
+
+  const pluginContextMenuItems = usePluginContextMenuItems();
 
   // Close context menu on click / scroll
   useEffect(() => {
@@ -878,6 +883,32 @@ export default function HomePage({
               <Quote size={14} />
               <span>导出参考文献引用</span>
             </div>
+            {pluginContextMenuItems.length > 0 && (
+              <>
+                <div className="context-menu-separator" />
+                {pluginContextMenuItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="context-menu-item"
+                    onClick={() => {
+                      const ctx = createPluginContext({
+                        pluginId: item.id,
+                        getCurrentPdfPath: () => contextMenu.paper.path,
+                        getLlmConfig: () => pluginManager.getLlmConfigSnapshot(),
+                      });
+                      item.action(
+                        { id: contextMenu.paper.id, name: contextMenu.paper.name, path: contextMenu.paper.path },
+                        ctx
+                      );
+                      setContextMenu(null);
+                    }}
+                  >
+                    {item.icon === "presentation" && <Presentation size={14} />}
+                    <span>{item.label}</span>
+                  </div>
+                ))}
+              </>
+            )}
             <div className="context-menu-separator" />
             <div
               className="context-menu-item danger"

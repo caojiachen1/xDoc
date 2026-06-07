@@ -184,7 +184,7 @@ impl SettingsDb {
         )
         .map_err(|e| anyhow::anyhow!("创建 annotations 表失败: {e}"))?;
 
-        // Journal rankings table — CAS journal ranking data (分区表)
+        // Journal rankings table — CAS journal ranking data (tier table)
         conn.execute(
             "CREATE TABLE IF NOT EXISTS journal_rankings (
                 journal_norm TEXT PRIMARY KEY,

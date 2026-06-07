@@ -20,7 +20,10 @@ use tauri::{AppHandle, Emitter, State};
 #[allow(dead_code)]
 mod gguf_ocr;
 mod settings_db;
+mod plugin_host;
+mod pptx_gen;
 use settings_db::{AiConfig, AnnotationRecord, JournalRanking, PaperRecord, SettingEntry, SettingsDb, get_papers_dir};
+use plugin_host::PluginState;
 
 #[derive(Serialize, Clone)]
 pub struct LayoutBox {
@@ -519,7 +522,7 @@ fn merge_segments_with_layout(
 ) -> Vec<TextSegment> {
     // Collect text-region layout boxes, everything can contain text except maybe pure figures.
     // For safety, we can process all layout boxes, or exclude only figure(2).
-    // Let's include everything to ensure "每个检测到的区域" is clickable if it has text.
+    // Let's include everything to ensure every detected region is clickable if it has text.
     let mut text_boxes: Vec<&LayoutBox> = layout_boxes.iter().collect();
     text_boxes.sort_by_key(|b| b.read_order);
 
@@ -3008,10 +3011,10 @@ fn paper_rename(old_path: String, new_title: String) -> Result<String, String> {
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Journal ranking lookup (CAS 分区表)
+// Journal ranking lookup (CAS tier table)
 // ────────────────────────────────────────────────────────────────────────
 
-/// Look up a journal's CAS ranking (分区, Top, OA) by name.
+/// Look up a journal's CAS ranking (tier, Top, OA) by name.
 #[tauri::command]
 fn journal_ranking(journal_name: String, db: State<'_, SettingsDb>) -> Result<Option<JournalRanking>, String> {
     db.lookup_journal_ranking(&journal_name).map_err(|e| e.to_string())
@@ -3491,6 +3494,398 @@ fn split_sentences(text: String, language: String) -> Vec<String> {
     sentencex::segment(&language, &text).into_iter().map(|s| s.to_string()).collect()
 }
 
+// ── Plugin system helper functions ────────────────────────────────────
+
+/// Get the full PDF text (concatenated text from all pages)
+/// Called by the plugin system (plugin_host::get_full_pdf_text delegates here)
+pub fn get_full_pdf_text(file_path: &str) -> Result<String, String> {
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let bindings = bind_pdfium_with_candidates()?;
+    let pdfium = Pdfium::new(bindings);
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+    let page_count = document.pages().len();
+    let mut full_text = String::new();
+
+    for page_idx in 0..page_count {
+        if let Ok(page) = document.pages().get(page_idx as u16) {
+            if let Some(text) = page.text().ok() {
+                let page_text = text.all();
+                if !page_text.trim().is_empty() {
+                    if !full_text.is_empty() {
+                        full_text.push_str("\n\n");
+                    }
+                    full_text.push_str(&format!("[Page {}]\n", page_idx + 1));
+                    full_text.push_str(&page_text);
+                }
+            }
+        }
+    }
+
+    Ok(full_text)
+}
+
+/// Extract embedded images from PDF
+/// Uses pdfium-render to iterate through page image objects
+pub fn extract_pdf_images(
+    file_path: &str,
+    page_indices: Option<&[u32]>,
+) -> Result<Vec<plugin_host::PdfImageInfo>, String> {
+    use base64::Engine;
+
+    let path = Path::new(file_path);
+    if !path.exists() {
+        return Err("File not found".to_string());
+    }
+
+    let bindings = bind_pdfium_with_candidates()?;
+    let pdfium = Pdfium::new(bindings);
+    let document = pdfium
+        .load_pdf_from_file(path, None)
+        .map_err(|e| format!("Failed to open PDF: {e}"))?;
+
+    let page_count = document.pages().len();
+    let mut images = Vec::new();
+
+    let target_pages: Vec<u32> = match page_indices {
+        Some(indices) => indices.to_vec(),
+        None => (0..page_count as u32).collect(),
+    };
+
+    // debug: save extracted images to exe directory
+    let debug_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("debug_pdf_images")))
+        .unwrap_or_else(|| Path::new("debug_pdf_images").to_path_buf());
+    let _ = std::fs::create_dir_all(&debug_dir);
+    let pdf_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+
+    for &page_idx in &target_pages {
+        let page = match document.pages().get(page_idx as u16) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        for (img_idx, obj) in page.objects().iter().enumerate() {
+            if let Some(img_obj) = obj.as_image_object() {
+                // Get display size (bounds in PDF coordinate space, for display reference)
+                let (disp_w, disp_h) = if let Ok(bounds) = obj.bounds() {
+                    (
+                        (bounds.right().value - bounds.left().value) as u32,
+                        (bounds.bottom().value - bounds.top().value) as u32,
+                    )
+                } else {
+                    (0, 0)
+                };
+
+                // === Layer 1: get processed image directly from pdfium ===
+                // get_processed_image() handles: color spaces (Gray/CMYK/Indexed),
+                // image filters (JPEG/JPEG2000/JBIG2/CCITT), masks (SMask), ICC Profile
+                match img_obj.get_processed_image(&document) {
+                    Ok(processed) => {
+                        let img_w = processed.width();
+                        let img_h = processed.height();
+                        let mut png_bytes = Vec::new();
+                        let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                        if processed.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+                            // debug: save to local file
+                            let debug_name = format!("{pdf_stem}_p{page_idx}_i{img_idx}_processed.png");
+                            let _ = std::fs::write(debug_dir.join(&debug_name), &png_bytes);
+                            // eprintln!("[debug] saved {}", debug_name);
+
+                            let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+                            images.push(plugin_host::PdfImageInfo {
+                                page_index: page_idx,
+                                image_base64: b64,
+                                width: if disp_w > 0 { disp_w } else { img_w },
+                                height: if disp_h > 0 { disp_h } else { img_h },
+                            });
+                            continue;
+                        }
+                    }
+                    Err(_) => {} // Fall through to Layer 2
+                }
+
+                // === Layer 2 (fallback): raw data + manual encoding ===
+                if let Ok(raw_data) = img_obj.get_raw_image_data() {
+                    if raw_data.is_empty() {
+                        continue;
+                    }
+
+                    let img_w = img_obj.width().unwrap_or(0).max(0) as u32;
+                    let img_h = img_obj.height().unwrap_or(0).max(0) as u32;
+
+                    let (final_bytes, format) = match ensure_encoded_image(&raw_data, img_w, img_h) {
+                        Some(result) => result,
+                        None => continue,
+                    };
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&final_bytes);
+                    // debug: save to local file
+                    let debug_name = format!("{pdf_stem}_p{page_idx}_i{img_idx}_raw.png");
+                    let _ = std::fs::write(debug_dir.join(&debug_name), &final_bytes);
+                    // eprintln!("[debug] saved {}", debug_name);
+
+                    let _ = format;
+                    images.push(plugin_host::PdfImageInfo {
+                        page_index: page_idx,
+                        image_base64: b64,
+                        width: if disp_w > 0 { disp_w } else { img_w },
+                        height: if disp_h > 0 { disp_h } else { img_h },
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(images)
+}
+
+/// Ensure image data is in a valid encoded format (PNG/JPEG).
+/// Returns as-is if already PNG/JPEG; otherwise treats as raw RGBA pixel data and converts to PNG.
+/// Returns None if conversion fails (caller should skip this image).
+fn ensure_encoded_image(raw_data: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, String)> {
+    // Check for standard-format magic bytes
+    if raw_data.len() >= 8 && &raw_data[0..4] == &[0x89, 0x50, 0x4E, 0x47] {
+        return Some((raw_data.to_vec(), "PNG".to_string()));
+    }
+    if raw_data.len() >= 2 && &raw_data[0..2] == &[0xFF, 0xD8] {
+        return Some((raw_data.to_vec(), "JPEG".to_string()));
+    }
+    if raw_data.len() >= 4 && &raw_data[0..4] == b"GIF8" {
+        return Some((raw_data.to_vec(), "GIF".to_string()));
+    }
+
+    // Non-standard format → assume RGBA raw pixels, convert to PNG with image crate
+    if width > 0 && height > 0 {
+        let expected_len = (width * height * 4) as usize;
+        if raw_data.len() >= expected_len {
+            if let Some(img_buf) = image::RgbaImage::from_raw(width, height, raw_data[..expected_len].to_vec()) {
+                let dyn_img = image::DynamicImage::ImageRgba8(img_buf);
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if dyn_img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+                    return Some((png_bytes, "PNG".to_string()));
+                }
+            }
+        }
+        // If RGBA fails, try RGB (3 bytes per pixel)
+        let expected_rgb = (width * height * 3) as usize;
+        if raw_data.len() >= expected_rgb {
+            if let Some(img_buf) = image::RgbImage::from_raw(width, height, raw_data[..expected_rgb].to_vec()) {
+                let dyn_img = image::DynamicImage::ImageRgb8(img_buf);
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if dyn_img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+                    return Some((png_bytes, "PNG".to_string()));
+                }
+            }
+        }
+        // If RGB fails, try Gray (1 byte per pixel) → expand to RGB → PNG
+        let expected_gray = (width * height) as usize;
+        if raw_data.len() >= expected_gray {
+            if let Some(img_buf) = image::GrayImage::from_raw(width, height, raw_data[..expected_gray].to_vec()) {
+                let rgb = image::DynamicImage::ImageLuma8(img_buf).to_rgb8();
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if rgb.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+                    return Some((png_bytes, "PNG(grayscale)".to_string()));
+                }
+            }
+        }
+        // If Gray fails, try CMYK (4 bytes per pixel) → conversion formula → RGB → PNG
+        let expected_cmyk = (width * height * 4) as usize;
+        if raw_data.len() >= expected_cmyk {
+            let mut rgb_pixels = Vec::with_capacity((width * height * 3) as usize);
+            for i in (0..expected_cmyk).step_by(4) {
+                let c = raw_data[i] as f32 / 255.0;
+                let m = raw_data[i + 1] as f32 / 255.0;
+                let y = raw_data[i + 2] as f32 / 255.0;
+                let k = raw_data[i + 3] as f32 / 255.0;
+                let r = (255.0 * (1.0 - c) * (1.0 - k)) as u8;
+                let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
+                let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
+                rgb_pixels.extend_from_slice(&[r, g, b]);
+            }
+            if let Some(img_buf) = image::RgbImage::from_raw(width, height, rgb_pixels) {
+                let dyn_img = image::DynamicImage::ImageRgb8(img_buf);
+                let mut png_bytes = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut png_bytes);
+                if dyn_img.write_to(&mut cursor, image::ImageFormat::Png).is_ok() {
+                    return Some((png_bytes, "PNG(cmyk)".to_string()));
+                }
+            }
+        }
+    }
+
+    // Cannot convert, return None
+    eprintln!("[extract_pdf_images] Could not convert raw image data to PNG ({}x{}), skipping image", width, height);
+    None
+}
+
+/// Layer 3 (fallback): extract images via lopdf directly from PDF dictionaries
+/// Reads native PDF dictionaries for accurate ColorSpace / Filter / BitsPerComponent info,
+/// avoiding the guesswork needed with pdfium's raw data.
+pub fn extract_pdf_images_with_lopdf(
+    file_path: &str,
+    page_indices: Option<&[u32]>,
+) -> Result<Vec<plugin_host::PdfImageInfo>, String> {
+    use base64::Engine;
+
+    let doc = lopdf::Document::load(file_path).map_err(|e| format!("lopdf load failed: {e}"))?;
+    let pages = doc.get_pages();
+
+    // debug: save extracted images to exe directory
+    let debug_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("debug_pdf_images")))
+        .unwrap_or_else(|| Path::new("debug_pdf_images").to_path_buf());
+    let _ = std::fs::create_dir_all(&debug_dir);
+    let pdf_stem = Path::new(file_path).file_stem().and_then(|s| s.to_str()).unwrap_or("unknown");
+
+    let target_pages: Vec<u32> = match page_indices {
+        Some(indices) => indices.iter().map(|i| i + 1).collect(), // lopdf page numbers are 1-based
+        None => pages.keys().copied().collect(),
+    };
+
+    let mut images = Vec::new();
+
+    for &page_num in &target_pages {
+        let page_id = match pages.get(&page_num) {
+            Some(id) => *id,
+            None => continue,
+        };
+
+        let page_images = match doc.get_page_images(page_id) {
+            Ok(imgs) => imgs,
+            Err(_) => continue,
+        };
+
+        for (img_idx, pdf_img) in page_images.iter().enumerate() {
+            let w = pdf_img.width.max(0) as u32;
+            let h = pdf_img.height.max(0) as u32;
+            if w == 0 || h == 0 {
+                continue;
+            }
+
+            // Get color space
+            let cs = pdf_img.color_space.as_deref().unwrap_or("DeviceRGB");
+
+            // Detect filter type
+            let has_jpeg = pdf_img.filters.as_ref().map_or(false, |f| {
+                f.iter().any(|ft| ft == "DCTDecode")
+            });
+            let has_flate = pdf_img.filters.as_ref().map_or(false, |f| {
+                f.iter().any(|ft| ft == "FlateDecode")
+            });
+            let no_compression = pdf_img.filters.is_none()
+                || pdf_img.filters.as_ref().map_or(true, |f| f.is_empty());
+
+            // Get decoded pixel data
+            let pixel_data: Vec<u8> = if has_jpeg {
+                // DCTDecode = JPEG stream, use directly
+                pdf_img.content.to_vec()
+            } else if has_flate || no_compression {
+                // FlateDecode or uncompressed: decode from stream object
+                // PdfImage.content is the raw stream bytes (may still be compressed)
+                if let Ok(obj) = doc.get_object(pdf_img.id) {
+                    if let Ok(stream) = obj.as_stream() {
+                        stream.decompressed_content().unwrap_or_else(|_| pdf_img.content.to_vec())
+                    } else {
+                        pdf_img.content.to_vec()
+                    }
+                } else {
+                    pdf_img.content.to_vec()
+                }
+            } else {
+                // Other filters (JPXDecode/JBIG2/CCITT) — unsupported, skip
+                continue;
+            };
+
+            // Decode pixel data based on color space → PNG
+            let png_result: Option<Vec<u8>> = match cs {
+                "DeviceRGB" => {
+                    let expected = (w * h * 3) as usize;
+                    if pixel_data.len() >= expected {
+                        image::RgbImage::from_raw(w, h, pixel_data[..expected].to_vec()).map(|img| {
+                            let mut png = Vec::new();
+                            let mut cursor = std::io::Cursor::new(&mut png);
+                            let _ = image::DynamicImage::ImageRgb8(img)
+                                .write_to(&mut cursor, image::ImageFormat::Png);
+                            png
+                        })
+                    } else {
+                        None
+                    }
+                }
+                "DeviceGray" => {
+                    let expected = (w * h) as usize;
+                    if pixel_data.len() >= expected {
+                        image::GrayImage::from_raw(w, h, pixel_data[..expected].to_vec()).map(|img| {
+                            let rgb = image::DynamicImage::ImageLuma8(img).to_rgb8();
+                            let mut png = Vec::new();
+                            let mut cursor = std::io::Cursor::new(&mut png);
+                            let _ = rgb.write_to(&mut cursor, image::ImageFormat::Png);
+                            png
+                        })
+                    } else {
+                        None
+                    }
+                }
+                "DeviceCMYK" => {
+                    let expected = (w * h * 4) as usize;
+                    if pixel_data.len() >= expected {
+                        let mut rgb_pixels = Vec::with_capacity((w * h * 3) as usize);
+                        for i in (0..expected).step_by(4) {
+                            let c = pixel_data[i] as f32 / 255.0;
+                            let m = pixel_data[i + 1] as f32 / 255.0;
+                            let y = pixel_data[i + 2] as f32 / 255.0;
+                            let k = pixel_data[i + 3] as f32 / 255.0;
+                            let r = (255.0 * (1.0 - c) * (1.0 - k)) as u8;
+                            let g = (255.0 * (1.0 - m) * (1.0 - k)) as u8;
+                            let b = (255.0 * (1.0 - y) * (1.0 - k)) as u8;
+                            rgb_pixels.extend_from_slice(&[r, g, b]);
+                        }
+                        image::RgbImage::from_raw(w, h, rgb_pixels).map(|img| {
+                            let mut png = Vec::new();
+                            let mut cursor = std::io::Cursor::new(&mut png);
+                            let _ = image::DynamicImage::ImageRgb8(img)
+                                .write_to(&mut cursor, image::ImageFormat::Png);
+                            png
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => None, // ICCBased / Indexed complex color spaces → skip
+            };
+
+            if let Some(png_bytes) = png_result {
+                if !png_bytes.is_empty() {
+                    // debug: save to local file
+                    let debug_name = format!("{pdf_stem}_p{}_i{img_idx}_lopdf.png", page_num - 1);
+                    let _ = std::fs::write(debug_dir.join(&debug_name), &png_bytes);
+
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+                    images.push(plugin_host::PdfImageInfo {
+                        page_index: page_num - 1, // convert back to 0-indexed
+                        image_base64: b64,
+                        width: w,
+                        height: h,
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(images)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = resolve_dll_dir();
@@ -3557,10 +3952,27 @@ pub fn run() {
         }
     };
 
-    // Initialize journal rankings table from embedded data (CAS 分区表)
+    // Initialize journal rankings table from embedded data (CAS tier table)
     if let Err(e) = settings_db.init_journal_rankings() {
         eprintln!("[xDoc] failed to init journal rankings: {e}");
     }
+
+    // Initialize plugin system
+    let plugin_data_dir = {
+        // Use C:\xDoc as the plugin directory (matching settings_db), or fallback to exe directory
+        let base = if Path::new("C:\\xDoc").exists() {
+            PathBuf::from("C:\\xDoc")
+        } else {
+            env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."))
+        };
+        base
+    };
+    let plugin_state = PluginState::new(&plugin_data_dir);
+    let discovered = plugin_state.scan_plugins();
+    eprintln!("[xDoc] plugin system initialized: {} plugin(s) found", discovered.len());
 
     tauri::Builder::default()
         .manage(ModelState {
@@ -3580,6 +3992,7 @@ pub fn run() {
             cached_result: Arc::new(Mutex::new(None)),
         })
         .manage(settings_db)
+        .manage(plugin_state)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
@@ -3626,6 +4039,16 @@ pub fn run() {
             grobid_batch_parse,
             grobid_save_ref_enrichment,
             split_sentences,
+            plugin_host::plugin_list,
+            plugin_host::plugin_get_manifest,
+            plugin_host::plugin_emit_event,
+            plugin_host::plugin_read_entry,
+            plugin_host::get_full_pdf_text,
+            plugin_host::extract_pdf_images,
+            plugin_host::extract_pdf_images_lopdf,
+            plugin_host::generate_pptx,
+            plugin_host::convert_template_to_html,
+            plugin_host::plugin_install_from_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

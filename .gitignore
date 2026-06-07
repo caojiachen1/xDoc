@@ -28,3 +28,4 @@ lib/
 !lib/pdfium.dll
 *.md
 !README.md
+!PLUGIN_DEVELOPMENT_GUIDE.md

@@ -13,7 +13,7 @@ export type OutputFormat = "text" | "html" | "rtf";
 // ── Available citation styles ──────────────────────────────────────────
 
 export const CITATION_STYLES: CitationStyle[] = [
-  // ── 中国标准 ──
+  // ── Chinese standard ──
   { id: "gbt-7714-2015", name: "GB/T 7714-2015（中国国家标准）", category: "中国标准" },
 
   // ── APA ──
@@ -31,7 +31,7 @@ export const CITATION_STYLES: CitationStyle[] = [
   // ── Harvard ──
   { id: "harvard", name: "Harvard（哈佛引用格式）", category: "Harvard" },
 
-  // ── 理工医学 ──
+  // ── Sci/eng/medicine ──
   { id: "ieee", name: "IEEE（电气电子工程师学会）", category: "理工医学" },
   { id: "vancouver", name: "Vancouver（温哥华格式）", category: "理工医学" },
   { id: "ama-11th", name: "AMA 第11版（美国医学会）", category: "理工医学" },
@@ -40,13 +40,13 @@ export const CITATION_STYLES: CitationStyle[] = [
   { id: "aip", name: "AIP（美国物理联合会）", category: "理工医学" },
   { id: "aps", name: "APS（美国物理学会）", category: "理工医学" },
 
-  // ── 期刊 ──
+  // ── Journals ──
   { id: "nature", name: "Nature（《自然》期刊格式）", category: "期刊格式" },
   { id: "science", name: "Science（《科学》期刊格式）", category: "期刊格式" },
   { id: "cell", name: "Cell（《细胞》期刊格式）", category: "期刊格式" },
   { id: "pnas", name: "PNAS（美国科学院院刊格式）", category: "期刊格式" },
 
-  // ── 其他 ──
+  // ── Other ──
   { id: "iso-690", name: "ISO 690（国际标准化组织）", category: "国际标准" },
   { id: "turabian-9th", name: "Turabian 第9版（图拉比安格式）", category: "其他" },
   { id: "din-1505-2", name: "DIN 1505-2（德国标准）", category: "其他" },

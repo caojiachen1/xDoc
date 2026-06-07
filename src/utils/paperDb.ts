@@ -207,7 +207,7 @@ export async function exportAnnotatedPdf(
   });
 }
 
-// ── Journal ranking (CAS 分区表) ──────────────────────────────────────
+// ── Journal ranking (CAS tier table) ──────────────────────────────────────
 
 export interface JournalRanking {
   journal: string;

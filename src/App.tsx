@@ -30,6 +30,14 @@ import HomePage, { type PaperInfo, type GrobidStatus } from "./components/HomePa
 import ReferenceSidebar from "./components/ReferenceSidebar";
 import { extractMetadataEnhanced, type PaperMetadata } from "./utils/pdfMetadata";
 import {
+  usePluginInit,
+  usePluginLlmConfig,
+  usePluginPdfPath,
+  usePluginToolbarButtons,
+} from "./plugin";
+import { createPluginContext } from "./plugin/context";
+import { pluginManager } from "./plugin/manager";
+import {
   copyToManaged,
   savePaper,
   listPapers,
@@ -450,6 +458,40 @@ function App() {
     baseUrl: VENDOR_PRESETS.deepseek.baseUrl,
     model: VENDOR_PRESETS.deepseek.models[0],
   });
+
+  // ── Plugin system integration ──
+  usePluginInit();
+  usePluginLlmConfig(llmSettings);
+  usePluginPdfPath(documentPath || null);
+  const pluginToolbarBtns = usePluginToolbarButtons();
+
+  // Plugin toast notification listener (dark theme)
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const { type, message } = detail;
+      const toast = document.createElement("div");
+      toast.style.cssText = `
+        position: fixed; bottom: 24px; right: 24px; z-index: 10000;
+        background: #2a2a2a; color: #e0e0e0; padding: 12px 20px;
+        border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        font-size: 13px; max-width: 420px; word-break: break-word;
+        border: 1px solid rgba(128,128,128,0.3);
+        border-left: 3px solid rgba(128,128,128,0.5);
+        animation: slideInRight 0.3s ease-out;
+        backdrop-filter: blur(8px);
+      `;
+      toast.textContent = message;
+      document.body.appendChild(toast);
+      setTimeout(() => {
+        toast.style.opacity = "0";
+        toast.style.transition = "opacity 0.3s";
+        setTimeout(() => document.body.removeChild(toast), 300);
+      }, 4000);
+    };
+    window.addEventListener("plugin:toast", handler);
+    return () => window.removeEventListener("plugin:toast", handler);
+  }, []);
 
   // Floating menu state
   const [floatingMenu, setFloatingMenu] = useState<{
@@ -3753,6 +3795,36 @@ function App() {
                             disabled={exporting}
                             title="导出标注到新 PDF"
                           />
+                        </div>
+                      </>
+                    )}
+
+                    {/* ── Plugin toolbar buttons ── */}
+                    {pluginToolbarBtns.filter(b => b.placement === "reader").length > 0 && (
+                      <>
+                        <div className="pdf-toolbar-separator" />
+                        <div className="pdf-toolbar-group">
+                          {pluginToolbarBtns
+                            .filter(b => b.placement === "reader")
+                            .map((btn) => (
+                              <Button
+                                key={btn.id}
+                                appearance="transparent"
+                                size="small"
+                                className="toolbar-btn"
+                                onClick={() => {
+                                  const ctx = createPluginContext({
+                                    pluginId: btn.id,
+                                    getCurrentPdfPath: () => documentPath || null,
+                                    getLlmConfig: () => pluginManager.getLlmConfigSnapshot(),
+                                  });
+                                  btn.action(ctx);
+                                }}
+                                title={btn.tooltip || btn.label}
+                              >
+                                {btn.label}
+                              </Button>
+                            ))}
                         </div>
                       </>
                     )}

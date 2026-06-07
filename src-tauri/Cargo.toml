@@ -29,6 +29,7 @@ tauri-plugin-dialog = "2.7.0"
 tauri-plugin-http = "2"
 tauri-plugin-fs = "2"
 pdfium-render = "0.8.37"
+lopdf = "0.34"
 base64 = "0.22.1"
 regex = "1"
 libloading = "0.8"
@@ -40,4 +41,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 parking_lot = "0.12"
 grobid-rs = { git = "https://github.com/caojiachen1/grobid-rs", features = ["cache", "format"] }
 sentencex = "0.1"
+ppt-rs = "0.2"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+pptx2html-core = { git = "https://github.com/kim62210/pptx2html-turbo" }
 

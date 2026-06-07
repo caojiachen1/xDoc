@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { fetch } from "@tauri-apps/plugin-http";
+import { PluginManagerDialog } from "../plugin";
 import {
   Button,
   Switch,
@@ -19,12 +20,13 @@ import {
   Dismiss24Regular,
   BrainCircuit24Regular,
   TextFont24Regular,
+  PuzzleCubePiece24Regular,
 } from "@fluentui/react-icons";
 import "./SettingsDialog.css";
 
 /* ── types ─────────────────────────────────────────────── */
 type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
-type SettingsSection = "general" | "appearance" | "ocr" | "llm";
+type SettingsSection = "general" | "appearance" | "ocr" | "llm" | "plugin";
 
 interface DownloadProgress {
   model_type: string;
@@ -117,6 +119,7 @@ const NAV_ITEMS: { key: SettingsSection; label: string; icon: React.ReactNode }[
   { key: "appearance", label: "外观", icon: <TextFont24Regular /> },
   { key: "ocr", label: "OCR", icon: <Scan24Regular /> },
   { key: "llm", label: "LLM", icon: <BrainCircuit24Regular /> },
+  { key: "plugin", label: "插件", icon: <PuzzleCubePiece24Regular /> },
 ];
 
 /* ── component ──────────────────────────────────────────── */
@@ -686,6 +689,10 @@ function SettingsDialog(props: Props) {
                 </div>
               </div>
             )}
+
+            {section === "plugin" && (
+              <PluginManagerSection />
+            )}
           </div>
         </div>
       </div>
@@ -708,6 +715,15 @@ const zoomOptions: { value: ZoomMode; label: string }[] = [
   { value: "fit_height", label: "适应高度" },
   { value: "actual", label: "原始尺寸" },
 ];
+
+/* ── Plugin section wrapper ────────────────────────────── */
+function PluginManagerSection() {
+  return (
+    <div className="settings-section plugin-section">
+      <PluginManagerDialog />
+    </div>
+  );
+}
 
 export default SettingsDialog;
 export { STORAGE_KEYS };
