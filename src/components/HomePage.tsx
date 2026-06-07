@@ -446,7 +446,7 @@ export default function HomePage({
 
   // Strip leading "Abstract" label from abstract text
   const cleanAbstract = (text: string): string => {
-    return text.replace(/^(?:Abstract|ABSTRACT|abstract|摘要)[\s:：\-—]+/, "").trim();
+    return text.replace(/^(?:Abstract|ABSTRACT|abstract|摘要)[.\s:：\-—]*/, "").trim();
   };
 
   // Get ranking for a paper from the batch-fetched map

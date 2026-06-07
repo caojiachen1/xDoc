@@ -476,8 +476,6 @@ function App() {
         background: #2a2a2a; color: #e0e0e0; padding: 12px 20px;
         border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
         font-size: 13px; max-width: 420px; word-break: break-word;
-        border: 1px solid rgba(128,128,128,0.3);
-        border-left: 3px solid rgba(128,128,128,0.5);
         animation: slideInRight 0.3s ease-out;
         backdrop-filter: blur(8px);
       `;
