@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
 import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages, Presentation } from "lucide-react";
-import { confirm } from "@tauri-apps/plugin-dialog";
+import ConfirmDialog from "./ConfirmDialog";
 import { invoke } from "@tauri-apps/api/core";
 import { fetch } from "@tauri-apps/plugin-http";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -93,6 +93,14 @@ export default function HomePage({
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [infoPanelVisible, setInfoPanelVisible] = useState(true);
   const [citationDialogPaper, setCitationDialogPaper] = useState<PaperInfo | null>(null);
+
+  // Custom confirm dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    open: boolean;
+    title: string;
+    message: string;
+    onConfirm: () => void;
+  }>({ open: false, title: "", message: "", onConfirm: () => {} });
   const [rankingMap, setRankingMap] = useState<Map<string, JournalRanking | null>>(new Map());
   const rankingMapRef = useRef(rankingMap);
   rankingMapRef.current = rankingMap;
@@ -387,16 +395,20 @@ export default function HomePage({
     onOpenPaper(paper);
   };
 
-  const handleDeleteSelected = async () => {
+  const handleDeleteSelected = () => {
     if (selectedIds.size === 0) return;
     const msg = selectedIds.size === 1
       ? "确定要删除该文献吗？"
       : `确定要删除选中的 ${selectedIds.size} 篇文献吗？`;
-    const yes = await confirm(msg, { title: "删除确认", kind: "warning" });
-    if (yes) {
-      for (const id of selectedIds) onDeletePaper(id);
-      setSelectedIds(new Set());
-    }
+    setConfirmDialog({
+      open: true,
+      title: "删除确认",
+      message: msg,
+      onConfirm: () => {
+        for (const id of selectedIds) onDeletePaper(id);
+        setSelectedIds(new Set());
+      },
+    });
   };
 
   // ── Drag and Drop ──────────────────────────────────────────────────────────
@@ -998,9 +1010,13 @@ export default function HomePage({
             <div className="context-menu-separator" />
             <div
               className="context-menu-item danger"
-              onClick={async () => {
-                const ok = await confirm(`确定要删除「${contextMenu.paper.name}」吗？`);
-                if (ok) onDeletePaper(contextMenu.paper.id);
+              onClick={() => {
+                setConfirmDialog({
+                  open: true,
+                  title: "删除确认",
+                  message: `确定要删除「${contextMenu.paper.name}」吗？`,
+                  onConfirm: () => onDeletePaper(contextMenu.paper.id),
+                });
                 setContextMenu(null);
               }}
             >
@@ -1020,6 +1036,17 @@ export default function HomePage({
           onClose={() => setCitationDialogPaper(null)}
         />
       )}
+
+      {/* ── Confirm Dialog ── */}
+      <ConfirmDialog
+        open={confirmDialog.open}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        confirmLabel="删除"
+        danger
+        onClose={() => setConfirmDialog(prev => ({ ...prev, open: false }))}
+        onConfirm={confirmDialog.onConfirm}
+      />
     </div>
   );
 }

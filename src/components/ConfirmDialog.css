@@ -1,0 +1,140 @@
+/* ── overlay ──────────────────────────────────────────── */
+.cd-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  animation: cdOverlayIn 120ms ease;
+}
+
+@keyframes cdOverlayIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ── window ────────────────────────────────────────────── */
+.cd-window {
+  display: flex;
+  flex-direction: column;
+  width: 400px;
+  max-width: 90vw;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgb(40, 40, 40);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  animation: cdWindowIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes cdWindowIn {
+  from { opacity: 0; transform: scale(0.96) translateY(-8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* ── header ────────────────────────────────────────────── */
+.cd-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.cd-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #f3f3f3;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.cd-warn-icon {
+  color: #f44336;
+  flex-shrink: 0;
+}
+
+.cd-close-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.cd-close-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+}
+
+/* ── body ──────────────────────────────────────────────── */
+.cd-body {
+  padding: 16px 18px;
+}
+
+.cd-message {
+  margin: 0;
+  color: #d0d0d0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ── footer ────────────────────────────────────────────── */
+.cd-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 16px 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* ── buttons (same size & base style) ─────────────────── */
+.cd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 72px;
+  padding: 5px 16px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: #d0d0d0;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.cd-btn-cancel:hover {
+  background: rgba(255, 255, 255, 0.10);
+  border-color: rgba(255, 255, 255, 0.20);
+  color: #f0f0f0;
+}
+
+.cd-btn-primary:hover {
+  background: rgba(0, 212, 187, 0.15);
+  border-color: rgba(0, 212, 187, 0.4);
+  color: #00D4BB;
+}
+
+.cd-btn-danger {
+  background: rgba(244, 67, 54, 0.18);
+  border-color: rgba(244, 67, 54, 0.35);
+  color: #ef5350;
+}
+
+.cd-btn-danger:hover {
+  background: rgba(244, 67, 54, 0.30);
+  border-color: rgba(244, 67, 54, 0.50);
+  color: #ff8a80;
+}
