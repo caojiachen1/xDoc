@@ -952,6 +952,7 @@ pub struct GrobidEngineState {
     pub status: Arc<Mutex<String>>,            // "uninitialized" | "initializing" | "ready" | "error"
     pub error_msg: Arc<Mutex<Option<String>>>,
     pub cached_result: Arc<Mutex<Option<(String, GrobidDocumentOutput)>>>, // (file_path, result)
+    pub init_done: Arc<std::sync::Condvar>,    // signalled when init finishes (ready or error)
 }
 
 #[derive(Serialize, Clone)]
@@ -963,17 +964,77 @@ struct GrobidParseEvent {
     error: Option<String>,
 }
 
+/// Internal helper: wait on condvar until grobid engine leaves the
+/// "uninitialized" / "initializing" states, or until timeout.
+fn wait_for_grobid_done(
+    status: Arc<Mutex<String>>,
+    init_done: Arc<std::sync::Condvar>,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let guard = status.lock().unwrap();
+    let (guard, timeout_result) = init_done
+        .wait_timeout_while(guard, std::time::Duration::from_secs(timeout_secs), |s| {
+            *s == "initializing" || *s == "uninitialized"
+        })
+        .map_err(|_| "Timed out waiting for Grobid engine initialization".to_string())?;
+    if timeout_result.timed_out() {
+        return Err("Timed out waiting for Grobid engine initialization".to_string());
+    }
+    let status_str = guard.clone();
+    drop(guard);
+    if status_str == "ready" {
+        Ok(status_str)
+    } else if status_str == "error" {
+        Err("Grobid engine initialization failed".to_string())
+    } else {
+        Err(format!("Grobid engine in unexpected state: {status_str}"))
+    }
+}
+
 #[tauri::command]
 async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<String, String> {
-    let status = { state.status.lock().unwrap().clone() };
-    if status == "ready" {
-        return Ok("ready".to_string());
-    }
-    if status == "initializing" {
-        return Ok("initializing".to_string());
+    // Atomically check-and-claim initialization under a single lock hold.
+    // This prevents two concurrent callers from both seeing "uninitialized"
+    // and both proceeding to initialize the JVM.
+    let should_init = {
+        let mut guard = state.status.lock().unwrap();
+        match guard.as_str() {
+            "ready" => return Ok("ready".to_string()),
+            "error" => {
+                let err = state.error_msg.lock().unwrap().clone()
+                    .unwrap_or_else(|| "unknown error".to_string());
+                return Err(format!("Grobid engine previously failed to initialize: {err}"));
+            }
+            "initializing" | "uninitialized" => {
+                if *guard == "initializing" {
+                    // Someone else is already initializing — just wait
+                    false
+                } else {
+                    // We claim the init slot
+                    *guard = "initializing".to_string();
+                    true
+                }
+            }
+            other => {
+                return Err(format!("Grobid engine in unexpected state: {other}"));
+            }
+        }
+    };
+
+    if !should_init {
+        // Another task is initializing — wait for it to finish
+        eprintln!("[xDoc:grobid] ensure_ready: init already in progress, waiting…");
+        let status_arc = state.status.clone();
+        let init_done = state.init_done.clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            wait_for_grobid_done(status_arc, init_done, 300)
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking failed: {e}"))?;
     }
 
-    *state.status.lock().unwrap() = "initializing".to_string();
+    // We are the initializer — proceed with setup
+    // (status was already set to "initializing" in the atomic check-and-claim above)
 
     // Prioritise compile-time path (dev builds), fall back to exe-root dir (packaged builds)
     let dev_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
@@ -992,8 +1053,9 @@ async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<Stri
     };
     let status_arc = state.status.clone();
     let error_arc = state.error_msg.clone();
+    let init_done = state.init_done.clone();
 
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+    let result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let grobid_dir = base_path.join("grobid");
         let runtime_dir = base_path.join("runtime");
 
@@ -1038,16 +1100,27 @@ async fn grobid_ensure_ready(state: State<'_, GrobidEngineState>) -> Result<Stri
         }
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
-    .map(|_| {
-        *status_arc.lock().unwrap() = "ready".to_string();
-        "ready".to_string()
-    })
-    .map_err(|e| {
-        *status_arc.lock().unwrap() = "error".to_string();
-        *error_arc.lock().unwrap() = Some(e.clone());
-        e
-    })
+    .map_err(|e| format!("spawn_blocking failed: {e}"));
+
+    // Notify all waiters regardless of outcome
+    let final_result = match result {
+        Ok(Ok(())) => {
+            *status_arc.lock().unwrap() = "ready".to_string();
+            Ok("ready".to_string())
+        }
+        Ok(Err(e)) => {
+            *status_arc.lock().unwrap() = "error".to_string();
+            *error_arc.lock().unwrap() = Some(e.clone());
+            Err(e)
+        }
+        Err(e) => {
+            *status_arc.lock().unwrap() = "error".to_string();
+            *error_arc.lock().unwrap() = Some(e.clone());
+            Err(e)
+        }
+    };
+    init_done.notify_all();
+    final_result
 }
 
 /// Recursively flatten nested sections into a flat list with depth levels.
@@ -1520,7 +1593,8 @@ async fn grobid_parse_document(
         }
     }
 
-    // Ensure engine is ready
+    // Ensure engine is ready — delegate to grobid_ensure_ready which handles
+    // concurrent init waits via condvar, avoiding JNI-call-before-init races.
     let status = { state.status.lock().unwrap().clone() };
     if status != "ready" {
         let _ = app.emit("grobid-parse-event", GrobidParseEvent {
@@ -1531,57 +1605,15 @@ async fn grobid_parse_document(
             error: None,
         });
 
-        // Inline initialization
-        let base_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
-        let status_arc = state.status.clone();
-        let error_arc = state.error_msg.clone();
-
-        let init_result = tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-            let grobid_dir = base_path.join("grobid");
-            let runtime_dir = base_path.join("runtime");
-            if !runtime_dir.exists() {
-                return Err(format!("Grobid runtime directory not found: {}", runtime_dir.display()));
-            }
-            let grobid_home_dst = grobid_dir.join("grobid-home");
-            if !grobid_home_dst.join("models").exists() {
-                let grobid_home_src = base_path.join("grobid-home");
-                if grobid_home_src.exists() {
-                    std::fs::create_dir_all(&grobid_dir).ok();
-                    copy_dir_recursive(&grobid_home_src, &grobid_home_dst).ok();
-                }
-            }
-            let jar_name = "grobid-core-0.9.1-onejar.jar";
-            let expected_jar = grobid_dir.join("grobid-core/build/libs").join(jar_name);
-            if !expected_jar.exists() {
-                let src_jar = base_path.join(jar_name);
-                if src_jar.exists() {
-                    let jar_dir = expected_jar.parent().unwrap();
-                    std::fs::create_dir_all(jar_dir).ok();
-                    std::fs::copy(&src_jar, &expected_jar).ok();
-                }
-            }
-            let config = grobid_rs::GrobidConfig::builder().base_path(&base_path).build();
-            grobid_rs::init(&config).map_err(|e| format!("Grobid init failed: {e}"))
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking failed: {e}"));
-
-        match init_result {
-            Ok(Ok(())) => {
-                *status_arc.lock().unwrap() = "ready".to_string();
-            }
-            Ok(Err(e)) | Err(e) => {
-                *status_arc.lock().unwrap() = "error".to_string();
-                *error_arc.lock().unwrap() = Some(e.clone());
-                let _ = app.emit("grobid-parse-event", GrobidParseEvent {
-                    status: "error".to_string(),
-                    message: format!("引擎初始化失败: {e}"),
-                    file_path: Some(file_path.clone()),
-                    result: None,
-                    error: Some(e.clone()),
-                });
-                return Err(e);
-            }
+        if let Err(e) = grobid_ensure_ready(state.clone()).await {
+            let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                status: "error".to_string(),
+                message: format!("引擎初始化失败: {e}"),
+                file_path: Some(file_path.clone()),
+                result: None,
+                error: Some(e.clone()),
+            });
+            return Err(e);
         }
     }
 
@@ -1758,6 +1790,21 @@ async fn grobid_batch_parse(
     state: State<'_, GrobidEngineState>,
 ) -> Result<Vec<String>, String> {
     eprintln!("[xDoc:grobid] batch parse: {} files", paths.len());
+
+    // Ensure engine is fully initialized before processing any files
+    if let Err(e) = grobid_ensure_ready(state.clone()).await {
+        eprintln!("[xDoc:grobid] batch: engine init failed: {e}");
+        for file_path in &paths {
+            let _ = app.emit("grobid-parse-event", GrobidParseEvent {
+                status: "error".to_string(),
+                message: format!("引擎初始化失败: {e}"),
+                file_path: Some(file_path.clone()),
+                result: None,
+                error: Some(e.clone()),
+            });
+        }
+        return Err(e);
+    }
 
     let mut parsed_paths = Vec::new();
 
@@ -4005,6 +4052,7 @@ pub fn run() {
             status: Arc::new(Mutex::new("uninitialized".to_string())),
             error_msg: Arc::new(Mutex::new(None)),
             cached_result: Arc::new(Mutex::new(None)),
+            init_done: Arc::new(std::sync::Condvar::new()),
         })
         .manage(settings_db)
         .manage(plugin_state)

@@ -793,6 +793,17 @@ function App() {
       processGrobidBatch();
     }).catch(e => {
       console.error("[Grobid] engine init failed:", e);
+      // Mark all pending/queued paths as error so UI reflects the failure
+      setGrobidStatusMap(prev => {
+        const updated = { ...prev };
+        for (const p of grobidBatchQueueRef.current) {
+          if (updated[p] === "pending" || updated[p] === "parsing") {
+            updated[p] = "error";
+          }
+        }
+        return updated;
+      });
+      grobidBatchQueueRef.current = [];
     });
   }, [grobidStatusMap, processGrobidBatch]);
 
@@ -812,6 +823,7 @@ function App() {
       processGrobidBatch();
     }).catch(e => {
       console.error("[Grobid] engine init failed:", e);
+      setGrobidStatusMap(prev => ({ ...prev, [path]: "error" }));
     });
   }, [processGrobidBatch]);
 
