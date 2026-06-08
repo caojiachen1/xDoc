@@ -2715,6 +2715,25 @@
   cursor: not-allowed;
 }
 
+/* ── Clear cache button (red tint) ── */
+.ref-clear-btn:hover:not(:disabled) {
+  background: rgba(244, 67, 54, 0.12) !important;
+  border-color: rgba(244, 67, 54, 0.35) !important;
+  color: #ef9a9a !important;
+}
+
+/* ── Action row (multiple buttons side by side) ── */
+.ref-action-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.ref-action-row .ref-reparse-btn {
+  margin-bottom: 0;
+}
+
 /* ── Re-query ranking button ── */
 .ref-requery-btn {
   display: inline-flex;

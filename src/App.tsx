@@ -39,6 +39,7 @@ import {
 import { createPluginContext } from "./plugin/context";
 import { pluginManager } from "./plugin/manager";
 import CommandPalette from "./components/CommandPalette";
+import ReadingReportDialog from "./components/ReadingReport";
 import {
   PluginPanelHost,
   PluginSidebarHost,
@@ -562,6 +563,86 @@ function App() {
   const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
   const tabBarRef = useRef<HTMLDivElement>(null);
 
+  // Reading report dialog state
+  const [showReadingReport, setShowReadingReport] = useState(false);
+
+  // ── Reading session timer ─────────────────────────────────────────────────
+  // Tracks active reading time for the currently visible reader tab.
+  const readingSessionRef = useRef<{
+    paperId: string;
+    paperName: string;
+    startTime: Date;
+  } | null>(null);
+
+  const flushReadingSession = useCallback(async () => {
+    const session = readingSessionRef.current;
+    if (!session) return;
+    const endTime = new Date();
+    const durationSeconds = Math.floor((endTime.getTime() - session.startTime.getTime()) / 1000);
+    if (durationSeconds >= 5) {
+      try {
+        await invoke("reading_log_session", {
+          req: {
+            paper_id: session.paperId,
+            paper_name: session.paperName,
+            start_time: session.startTime.toISOString().slice(0, 19),
+            end_time: endTime.toISOString().slice(0, 19),
+            duration_seconds: durationSeconds,
+          },
+        });
+      } catch (e) {
+        console.warn("[reading] failed to log session:", e);
+      }
+    }
+    readingSessionRef.current = null;
+  }, []);
+
+  // Start / restart reading timer whenever activeTabId changes to a reader tab
+  useEffect(() => {
+    const activeTab = tabs.find(t => t.id === activeTabId);
+    if (activeTab?.type === "reader" && activeTab.documentPath) {
+      // Flush previous session if any
+      flushReadingSession();
+      // Find paper info for this path
+      const paper = papersList.find(p => p.path === activeTab.documentPath);
+      readingSessionRef.current = {
+        paperId: paper?.id || activeTab.id,
+        paperName: paper?.name || activeTab.title,
+        startTime: new Date(),
+      };
+    } else {
+      // Switched to home or non-reader tab — flush
+      flushReadingSession();
+    }
+  }, [activeTabId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Flush on window blur (user switched away) and resume on focus
+  useEffect(() => {
+    const onBlur = () => flushReadingSession();
+    const onFocus = () => {
+      const activeTab = tabs.find(t => t.id === activeTabId);
+      if (activeTab?.type === "reader" && activeTab.documentPath && !readingSessionRef.current) {
+        const paper = papersList.find(p => p.path === activeTab.documentPath);
+        readingSessionRef.current = {
+          paperId: paper?.id || activeTab.id,
+          paperName: paper?.name || activeTab.title,
+          startTime: new Date(),
+        };
+      }
+    };
+    window.addEventListener("blur", onBlur);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [tabs, activeTabId, papersList, flushReadingSession]);
+
+  // Flush on unmount
+  useEffect(() => {
+    return () => { flushReadingSession(); };
+  }, [flushReadingSession]);
+
   // Effective PDF path for command palette:
   // Priority: 1) current document (reader tab)  2) home page selected paper  3) last reader tab
   const effectivePdfPath = useMemo(() => {
@@ -637,6 +718,52 @@ function App() {
         setGrobidLoading(false);
       });
   }, [documentPath]);
+
+  // ── Clear Grobid cache and force re-parse (structure + references) ──────
+  const handleClearGrobidCacheAndReparse = useCallback(async () => {
+    if (!documentPath || !documentPath.toLowerCase().endsWith(".pdf")) return;
+    try {
+      await invoke("grobid_clear_cache", { filePath: documentPath });
+    } catch (e) {
+      console.warn("[App] grobid_clear_cache failed:", e);
+    }
+    grobidParsedPathRef.current = "";
+    triggerGrobidParse(documentPath, true);
+  }, [documentPath, triggerGrobidParse]);
+
+  // ── Clear metadata cache and re-extract ─────────────────────────────────
+  const handleClearMetadataAndReparse = useCallback(async () => {
+    const paper = papersList.find(p => p.path === documentPath);
+    if (!paper) return;
+    // Reset metadata fields in DB
+    const resetPaper: PaperInfo = {
+      ...paper,
+      metadata: undefined,
+      metadataExtracted: false,
+    };
+    setPapersList(prev => prev.map(p => p.id === paper.id ? resetPaper : p));
+    try { await savePaper(paperInfoToRecord(resetPaper)); } catch (e) { console.warn("[App] reset metadata failed:", e); }
+    // Also clear Grobid cache and re-parse (Grobid also extracts metadata)
+    try { await invoke("grobid_clear_cache", { filePath: documentPath }); } catch (_) { /* ignore */ }
+    grobidParsedPathRef.current = "";
+    triggerGrobidParse(documentPath, true);
+    // Trigger PDF-based metadata extraction
+    setExtractingPaperId(paper.id);
+    try {
+      const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
+      const metadata = await extractMetadataEnhanced(paper.path, base64Data);
+      const updatedPaper: PaperInfo = { ...resetPaper, metadata, metadataExtracted: true };
+      setPapersList(prev => prev.map(p => p.id === paper.id ? updatedPaper : p));
+      try { await savePaper(paperInfoToRecord(updatedPaper)); } catch (e) { console.warn("[App] save metadata failed:", e); }
+    } catch (e) {
+      console.error("[App] metadata re-extraction failed:", e);
+      const flagPaper: PaperInfo = { ...resetPaper, metadataExtracted: true };
+      setPapersList(prev => prev.map(p => p.id === paper.id ? flagPaper : p));
+      try { await savePaper(paperInfoToRecord(flagPaper)); } catch (_) { /* ignore */ }
+    } finally {
+      setExtractingPaperId(null);
+    }
+  }, [documentPath, papersList, triggerGrobidParse]);
 
   // ── Grobid batch parsing: queue management ─────────────────────────────
   // Process the batch queue: parse one PDF at a time, update status map
@@ -924,6 +1051,10 @@ function App() {
   }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse, documentPath, previewSrc]);
 
   const closeTab = useCallback((tabId: string) => {
+    // Flush reading session if closing the active reader tab
+    if (tabId === activeTabId) {
+      flushReadingSession();
+    }
     setTabs(prev => {
       const idx = prev.findIndex(t => t.id === tabId);
       if (idx === -1) return prev;
@@ -3433,6 +3564,7 @@ function App() {
                 }}>新建</MenuItem>
                 <MenuItem onClick={() => void selectDocument()}>打开</MenuItem>
                 <MenuItem onClick={() => void handleImportPapers()}>导入文件</MenuItem>
+                <MenuItem onClick={() => setShowReadingReport(true)}>阅读报告</MenuItem>
               </MenuList>
             </MenuPopover>
           </Menu>
@@ -4446,6 +4578,8 @@ function App() {
                   grobidError={grobidError}
                   onReparse={() => triggerGrobidParse(documentPath, true)}
                   onReparseStructure={triggerGrobidStructureOnly}
+                  onClearCacheAndReparse={handleClearGrobidCacheAndReparse}
+                  onClearMetadata={handleClearMetadataAndReparse}
                 />
               </>
             )}
@@ -4481,6 +4615,11 @@ function App() {
         llmSettings={llmSettings}
         onLlmSettingsChange={setLlmSettings}
       />
+      <ReadingReportDialog
+        open={showReadingReport}
+        onClose={() => setShowReadingReport(false)}
+      />
+
       {/* Plugin UI extensions */}
       <PluginPanelHost />
       <PluginSidebarHost />

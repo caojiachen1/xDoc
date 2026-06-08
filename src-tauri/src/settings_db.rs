@@ -197,6 +197,22 @@ impl SettingsDb {
         )
         .map_err(|e| anyhow::anyhow!("创建 journal_rankings 表失败: {e}"))?;
 
+        // Reading sessions table — tracks reading time per paper
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS reading_sessions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                paper_id        TEXT    NOT NULL,
+                paper_name      TEXT    NOT NULL,
+                start_time      TEXT    NOT NULL,
+                end_time        TEXT    NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                date            TEXT    NOT NULL,
+                hour            INTEGER NOT NULL
+             )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("创建 reading_sessions 表失败: {e}"))?;
+
         // Plugin key-value storage table
         crate::plugin_storage::init_plugin_storage_table(&conn)
             .map_err(|e| anyhow::anyhow!("初始化 plugin_storage 表失败: {e}"))?;
@@ -766,5 +782,101 @@ impl SettingsDb {
         }
 
         Ok(None)
+    }
+
+    // ────────────────────── Reading Sessions ──────────────────────
+
+    /// Log a reading session.
+    pub fn log_reading_session(
+        &self,
+        paper_id: &str,
+        paper_name: &str,
+        start_time: &str,
+        end_time: &str,
+        duration_seconds: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        // Extract date and hour from start_time (ISO 8601 format: "2026-06-08T14:30:00")
+        let date = start_time.get(0..10).unwrap_or("unknown").to_string();
+        let hour: i32 = start_time
+            .get(11..13)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        conn.execute(
+            "INSERT INTO reading_sessions (paper_id, paper_name, start_time, end_time, duration_seconds, date, hour)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![paper_id, paper_name, start_time, end_time, duration_seconds, date, hour],
+        )?;
+        Ok(())
+    }
+
+    /// Get total reading time in seconds across all sessions.
+    pub fn get_total_reading_seconds(&self) -> Result<i64> {
+        let conn = self.conn.lock();
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(duration_seconds), 0) FROM reading_sessions",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(total)
+    }
+
+    /// Get per-paper reading time leaderboard (top N).
+    pub fn get_paper_reading_ranking(&self, limit: i32) -> Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT paper_id, paper_name, SUM(duration_seconds) as total
+             FROM reading_sessions
+             GROUP BY paper_id
+             ORDER BY total DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Get daily reading time distribution (date -> total seconds) for last N days.
+    pub fn get_daily_reading_distribution(&self, days: i32) -> Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT date, SUM(duration_seconds) as total
+             FROM reading_sessions
+             WHERE date >= date('now', ?1 || ' days')
+             GROUP BY date
+             ORDER BY date ASC",
+        )?;
+        let rows = stmt.query_map(params![-days], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Get hourly reading time distribution (hour 0-23 -> total seconds).
+    pub fn get_hourly_reading_distribution(&self) -> Result<Vec<(i32, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT hour, SUM(duration_seconds) as total
+             FROM reading_sessions
+             GROUP BY hour
+             ORDER BY hour ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
     }
 }

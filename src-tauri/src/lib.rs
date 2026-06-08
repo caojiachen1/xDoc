@@ -1880,6 +1880,21 @@ async fn grobid_save_ref_enrichment(
     Ok(())
 }
 
+/// Delete the Grobid JSON cache file for a given PDF and clear in-memory cache.
+#[tauri::command]
+fn grobid_clear_cache(file_path: String, state: State<'_, GrobidEngineState>) -> Result<(), String> {
+    let pdf_path = std::path::PathBuf::from(&file_path);
+    let cache_path = grobid_cache_path(&pdf_path);
+    if cache_path.exists() {
+        std::fs::remove_file(&cache_path)
+            .map_err(|e| format!("Failed to delete cache file: {e}"))?;
+        eprintln!("[xDoc:grobid] deleted JSON cache: {}", cache_path.display());
+    }
+    // Clear in-memory cache
+    *state.cached_result.lock().unwrap() = None;
+    Ok(())
+}
+
 fn threshold_cache_key(threshold: f32) -> i32 {
     (threshold * 1000.0).round() as i32
 }
@@ -3083,6 +3098,95 @@ fn journal_ranking(journal_name: String, db: State<'_, SettingsDb>) -> Result<Op
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Reading sessions
+// ────────────────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct ReadingSessionRequest {
+    paper_id: String,
+    paper_name: String,
+    start_time: String,
+    end_time: String,
+    duration_seconds: i64,
+}
+
+#[derive(Serialize)]
+struct ReadingReportResponse {
+    total_seconds: i64,
+    ranking: Vec<PaperReadingRank>,
+    daily: Vec<DailyReading>,
+    hourly: Vec<HourlyReading>,
+}
+
+#[derive(Serialize)]
+struct PaperReadingRank {
+    paper_id: String,
+    paper_name: String,
+    total_seconds: i64,
+}
+
+#[derive(Serialize)]
+struct DailyReading {
+    date: String,
+    total_seconds: i64,
+}
+
+#[derive(Serialize)]
+struct HourlyReading {
+    hour: i32,
+    total_seconds: i64,
+}
+
+#[tauri::command]
+fn reading_log_session(req: ReadingSessionRequest, db: State<'_, SettingsDb>) -> Result<(), String> {
+    if req.duration_seconds < 5 {
+        // Ignore very short sessions (< 5 seconds)
+        return Ok(());
+    }
+    db.log_reading_session(
+        &req.paper_id,
+        &req.paper_name,
+        &req.start_time,
+        &req.end_time,
+        req.duration_seconds,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn reading_get_report(db: State<'_, SettingsDb>) -> Result<ReadingReportResponse, String> {
+    let total_seconds = db.get_total_reading_seconds().map_err(|e| e.to_string())?;
+    let ranking = db
+        .get_paper_reading_ranking(20)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(paper_id, paper_name, total_seconds)| PaperReadingRank {
+            paper_id,
+            paper_name,
+            total_seconds,
+        })
+        .collect();
+    let daily = db
+        .get_daily_reading_distribution(30)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(date, total_seconds)| DailyReading { date, total_seconds })
+        .collect();
+    let hourly = db
+        .get_hourly_reading_distribution()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|(hour, total_seconds)| HourlyReading { hour, total_seconds })
+        .collect();
+    Ok(ReadingReportResponse {
+        total_seconds,
+        ranking,
+        daily,
+        hourly,
+    })
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Annotation persistence
 // ────────────────────────────────────────────────────────────────────────
 
@@ -4093,6 +4197,8 @@ pub fn run() {
             paper_file_size,
             paper_rename,
             journal_ranking,
+            reading_log_session,
+            reading_get_report,
             annotation_save,
             annotation_load,
             annotation_delete,
@@ -4101,6 +4207,7 @@ pub fn run() {
             grobid_parse_document,
             grobid_batch_parse,
             grobid_save_ref_enrichment,
+            grobid_clear_cache,
             split_sentences,
             plugin_host::plugin_list,
             plugin_host::plugin_get_manifest,

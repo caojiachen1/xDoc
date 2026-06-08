@@ -19,6 +19,7 @@ import {
   ListTree,
   Image,
   Table,
+  Trash2,
 } from "lucide-react";
 import { resolveDoi, searchByTitle } from "../utils/crossrefResolver";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
@@ -162,6 +163,8 @@ interface ReferenceSidebarProps {
   grobidError: string;
   onReparse?: () => void;
   onReparseStructure?: () => void;
+  onClearCacheAndReparse?: () => void;
+  onClearMetadata?: () => void;
 }
 
 export default function ReferenceSidebar({
@@ -173,6 +176,8 @@ export default function ReferenceSidebar({
   grobidError,
   onReparse,
   onReparseStructure,
+  onClearCacheAndReparse,
+  onClearMetadata,
 }: ReferenceSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>("info");
   const [references, setReferences] = useState<EnrichedReference[]>([]);
@@ -626,10 +631,39 @@ export default function ReferenceSidebar({
       </button>
     ) : null;
 
+    // Clear cache buttons
+    const clearMetadataBtn = onClearMetadata ? (
+      <button
+        className="ref-reparse-btn ref-clear-btn"
+        onClick={onClearMetadata}
+        disabled={grobidLoading}
+        title="清除元数据缓存并重新提取"
+      >
+        <Trash2 size={11} />
+        清除缓存
+      </button>
+    ) : null;
+
+    const clearCacheBtn = onClearCacheAndReparse ? (
+      <button
+        className="ref-reparse-btn ref-clear-btn"
+        onClick={onClearCacheAndReparse}
+        disabled={grobidLoading}
+        title="删除 Grobid 缓存文件并重新全量解析"
+      >
+        <Trash2 size={11} />
+        清除缓存
+      </button>
+    ) : null;
+
     if (hasGrobidMeta) {
       return (
         <div className="ref-info-section">
-          {reparseButton}
+          <div className="ref-action-row">
+            {reparseButton}
+            {clearMetadataBtn}
+            {clearCacheBtn}
+          </div>
           {grobidMeta.title && (
             <div className="ref-info-title">{grobidMeta.title}</div>
           )}
@@ -820,12 +854,27 @@ export default function ReferenceSidebar({
         <BookOpen size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
         <div>等待 Grobid 解析…</div>
         <div className="ref-empty-hint">打开 PDF 后自动提取文献信息</div>
-        {reparseButton}
+        <div className="ref-action-row">
+          {reparseButton}
+          {clearMetadataBtn}
+        </div>
       </div>
     );
   };
 
   const renderReferencesTab = () => {
+    const clearRefsBtn = onClearCacheAndReparse ? (
+      <button
+        className="ref-refs-btn ref-clear-btn"
+        onClick={onClearCacheAndReparse}
+        disabled={grobidLoading}
+        title="删除缓存并重新提取参考文献"
+      >
+        <Trash2 size={11} />
+        清除缓存
+      </button>
+    ) : null;
+
     return (
       <div className="ref-refs-section">
         {/* Toolbar */}
@@ -838,6 +887,7 @@ export default function ReferenceSidebar({
               : "未提取"}
           </span>
           <div className="ref-refs-actions">
+            {clearRefsBtn}
             {references.length > 0 && (() => {
               const anyEnriching = references.some(r => r.enriching) || enrichingCount > 0;
               return (
@@ -1006,12 +1056,27 @@ export default function ReferenceSidebar({
       </button>
     ) : null;
 
+    const clearStructBtn = onClearCacheAndReparse ? (
+      <button
+        className="ref-reparse-btn ref-clear-btn"
+        onClick={onClearCacheAndReparse}
+        disabled={grobidLoading}
+        title="删除缓存并重新解析文档结构"
+      >
+        <Trash2 size={11} />
+        清除缓存
+      </button>
+    ) : null;
+
     if (!grobidDocument) {
       return (
         <div className="ref-empty">
           <ListTree size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
           <div>等待解析…</div>
-          {reparseStructBtn}
+          <div className="ref-action-row">
+            {reparseStructBtn}
+            {clearStructBtn}
+          </div>
         </div>
       );
     }
@@ -1025,7 +1090,10 @@ export default function ReferenceSidebar({
           <ListTree size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
           <div>未检测到文档结构</div>
           <div className="ref-empty-hint">部分 PDF 可能无法提取完整结构</div>
-          {reparseStructBtn}
+          <div className="ref-action-row">
+            {reparseStructBtn}
+            {clearStructBtn}
+          </div>
         </div>
       );
     }
@@ -1044,7 +1112,10 @@ export default function ReferenceSidebar({
             {tables.length > 0 && ` · ${tables.length} 表格`}
             {equations && equations.length > 0 && ` · ${equations.length} 公式`}
           </span>
-          {reparseStructBtn}
+          <div className="ref-refs-actions">
+            {reparseStructBtn}
+            {clearStructBtn}
+          </div>
         </div>
 
         {/* Loading overlay */}
