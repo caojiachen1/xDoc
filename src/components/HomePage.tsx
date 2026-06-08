@@ -85,7 +85,7 @@ export default function HomePage({
   const [selectedCollection, setSelectedCollection] =
     useState<CollectionType>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedPaperId, setSelectedPaperId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isDragOver, setIsDragOver] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; paper: PaperInfo } | null>(null);
@@ -96,6 +96,10 @@ export default function HomePage({
   const [rankingMap, setRankingMap] = useState<Map<string, JournalRanking | null>>(new Map());
   const rankingMapRef = useRef(rankingMap);
   rankingMapRef.current = rankingMap;
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ active: boolean; lastRowId: string | null; didDrag: boolean }>({
+    active: false, lastRowId: null, didDrag: false,
+  });
   const [showChinese, setShowChinese] = useState(false);
   const [translatingIds, setTranslatingIds] = useState<Set<string>>(new Set());
   const [translatingAbstractId, setTranslatingAbstractId] = useState<string | null>(null);
@@ -115,6 +119,24 @@ export default function HomePage({
     };
   }, [contextMenu]);
 
+  // Flip context menu when it overflows viewport bottom/right
+  useEffect(() => {
+    if (!contextMenu || !contextMenuRef.current) return;
+    const menu = contextMenuRef.current;
+    const rect = menu.getBoundingClientRect();
+    let { x, y } = contextMenu;
+    if (y + rect.height > window.innerHeight) {
+      y = Math.max(0, contextMenu.y - rect.height);
+    }
+    if (x + rect.width > window.innerWidth) {
+      x = Math.max(0, window.innerWidth - rect.width - 4);
+    }
+    if (x !== contextMenu.x || y !== contextMenu.y) {
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+    }
+  }, [contextMenu]);
+
   // Reset copied-field indicator on any click outside the copy buttons
   useEffect(() => {
     if (!copiedField) return;
@@ -122,6 +144,12 @@ export default function HomePage({
     document.addEventListener("click", reset);
     return () => document.removeEventListener("click", reset);
   }, [copiedField]);
+
+  const selectedPaperId = useMemo(() => {
+    if (selectedIds.size === 0) return null;
+    const arr = Array.from(selectedIds);
+    return arr[arr.length - 1];
+  }, [selectedIds]);
 
   // Reset abstract translation view when selecting a different paper
   useEffect(() => {
@@ -360,11 +388,14 @@ export default function HomePage({
   };
 
   const handleDeleteSelected = async () => {
-    if (!selectedPaperId) return;
-    const yes = await confirm("确定要删除该文献吗？", { title: "删除确认", kind: "warning" });
+    if (selectedIds.size === 0) return;
+    const msg = selectedIds.size === 1
+      ? "确定要删除该文献吗？"
+      : `确定要删除选中的 ${selectedIds.size} 篇文献吗？`;
+    const yes = await confirm(msg, { title: "删除确认", kind: "warning" });
     if (yes) {
-      onDeletePaper(selectedPaperId);
-      setSelectedPaperId(null);
+      for (const id of selectedIds) onDeletePaper(id);
+      setSelectedIds(new Set());
     }
   };
 
@@ -557,7 +588,7 @@ export default function HomePage({
           <button
             className="home-toolbar-btn"
             onClick={handleDeleteSelected}
-            disabled={!selectedPaperId}
+            disabled={selectedIds.size === 0}
           >
             <Trash2 size={14} />
             删除
@@ -597,7 +628,7 @@ export default function HomePage({
           </button>
         </div>
 
-        <div className="home-paper-list" onClick={() => setSelectedPaperId(null)}>
+        <div className="home-paper-list" onClick={() => setSelectedIds(new Set())}>
           {filteredPapers.length > 0 ? (
             <table className="home-table">
               <thead>
@@ -613,17 +644,61 @@ export default function HomePage({
                   <th style={{ width: "12%" }}>最近阅读</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody
+                onMouseDown={(e) => {
+                  const row = (e.target as HTMLElement).closest("tr.home-table-row") as HTMLElement | null;
+                  if (!row || e.button !== 0) return;
+                  dragRef.current = { active: true, lastRowId: row.dataset.paperId ?? null, didDrag: false };
+                }}
+                onMouseMove={(e) => {
+                  if (!dragRef.current.active || e.buttons === 0) {
+                    dragRef.current.active = false;
+                    return;
+                  }
+                  const row = (e.target as HTMLElement).closest("tr.home-table-row") as HTMLElement | null;
+                  if (!row) return;
+                  const rowId = row.dataset.paperId;
+                  if (rowId && rowId !== dragRef.current.lastRowId) {
+                    dragRef.current.didDrag = true;
+                    dragRef.current.lastRowId = rowId;
+                    setSelectedIds((prev) => new Set(prev).add(rowId));
+                  }
+                }}
+                onMouseUp={() => { dragRef.current.active = false; }}
+                onMouseLeave={() => { dragRef.current.active = false; }}
+              >
                 {filteredPapers.map((paper) => (
                   <tr
                     key={paper.id}
-                    className={`home-table-row ${selectedPaperId === paper.id ? "selected" : ""}`}
-                    onClick={(e) => { e.stopPropagation(); setSelectedPaperId(paper.id); }}
+                    data-paper-id={paper.id}
+                    className={`home-table-row ${selectedIds.has(paper.id) ? "selected" : ""}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (dragRef.current.didDrag) { dragRef.current.didDrag = false; return; }
+                      if (e.ctrlKey) {
+                        setSelectedIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(paper.id)) next.delete(paper.id); else next.add(paper.id);
+                          return next;
+                        });
+                      } else if (e.shiftKey && selectedIds.size > 0) {
+                        const lastId = Array.from(selectedIds).pop()!;
+                        const ids = filteredPapers.map((p) => p.id);
+                        const a = ids.indexOf(lastId);
+                        const b = ids.indexOf(paper.id);
+                        const [from, to] = a < b ? [a, b] : [b, a];
+                        setSelectedIds(new Set(ids.slice(from, to + 1)));
+                      } else {
+                        setSelectedIds(new Set([paper.id]));
+                      }
+                    }}
                     onDoubleClick={() => handleDoubleClick(paper)}
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
-                      setSelectedPaperId(paper.id);
+                      if (!selectedIds.has(paper.id)) {
+                        setSelectedIds(new Set([paper.id]));
+                      }
                       setContextMenu({ x: e.clientX, y: e.clientY, paper });
                     }}
                   >
@@ -838,6 +913,7 @@ export default function HomePage({
           onContextMenu={(e) => e.preventDefault()}
         >
           <div
+            ref={contextMenuRef}
             className="context-menu"
             style={{ left: contextMenu.x, top: contextMenu.y }}
             onClick={(e) => e.stopPropagation()}
