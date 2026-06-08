@@ -22,7 +22,8 @@ fn require_permission(
 ) -> std::result::Result<(), String> {
     // Builtin plugins (those whose id is registered as builtin) bypass permission checks
     // since they ship with the app. External plugins are strictly enforced.
-    if state.is_builtin(plugin_id) {
+    // System-internal pluginIds (prefixed with __) also bypass checks.
+    if state.is_builtin(plugin_id) || plugin_id.starts_with("__") {
         return Ok(());
     }
     if !state.has_permission(plugin_id, permission) {
@@ -778,6 +779,13 @@ pub fn plugin_get_app_version(
 ) -> Result<String, String> {
     require_permission(&state, &plugin_id, "system:info")?;
     Ok(env!("CARGO_PKG_VERSION").to_string())
+}
+
+/// Returns the app version without requiring any permission check.
+/// Used internally by the plugin manager for version compatibility checks.
+#[tauri::command]
+pub fn plugin_get_app_version_public() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 // ── File I/O APIs (permission-checked, sandboxed) ─────────────────

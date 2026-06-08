@@ -43,7 +43,7 @@ export function PluginPanelHost() {
               if (el && !containerRefs.current.has(panel.id)) {
                 containerRefs.current.set(panel.id, el);
                 try {
-                  const cleanup = panel.render(el);
+                  const cleanup = panel.render?.(el);
                   if (cleanup) {
                     cleanupRefs.current.set(panel.id, cleanup);
                     panel.cleanup = cleanup;
@@ -140,7 +140,7 @@ export function PluginSidebarHost() {
               if (el && !containerRefs.current.has(sidebar.id)) {
                 containerRefs.current.set(sidebar.id, el);
                 try {
-                  const cleanup = sidebar.render(el);
+                  const cleanup = sidebar.render?.(el);
                   if (cleanup) sidebar.cleanup = cleanup;
                 } catch (err) {
                   console.warn(`[PluginSidebarHost] render error:`, err);
@@ -237,7 +237,7 @@ export function PluginFloatingWindowHost() {
               if (el && !containerRefs.current.has(fw.id)) {
                 containerRefs.current.set(fw.id, el);
                 try {
-                  const cleanup = fw.render(el);
+                  const cleanup = fw.render?.(el);
                   if (cleanup) fw.cleanup = cleanup;
                 } catch (err) {
                   console.warn(`[PluginFloatingWindowHost] render error:`, err);

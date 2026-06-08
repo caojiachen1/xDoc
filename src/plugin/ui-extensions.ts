@@ -16,8 +16,10 @@ export interface PanelState {
   icon?: string;
   position: "bottom" | "right";
   visible: boolean;
+  /** HTML content for iframe rendering (worker plugins) */
+  html?: string;
   cleanup?: () => void;
-  render: (container: HTMLElement) => void | (() => void);
+  render?: (container: HTMLElement) => void | (() => void);
   onShow?: () => void;
   onHide?: () => void;
   onResize?: (size: { width: number; height: number }) => void;
@@ -31,8 +33,10 @@ export interface SidebarState {
   side: "left" | "right";
   width: number;
   visible: boolean;
+  /** HTML content for iframe rendering (worker plugins) */
+  html?: string;
   cleanup?: () => void;
-  render: (container: HTMLElement) => void | (() => void);
+  render?: (container: HTMLElement) => void | (() => void);
 }
 
 export interface FloatingWindowState {
@@ -46,8 +50,10 @@ export interface FloatingWindowState {
   draggable: boolean;
   resizable: boolean;
   visible: boolean;
+  /** HTML content for iframe rendering (worker plugins) */
+  html?: string;
   cleanup?: () => void;
-  render: (container: HTMLElement) => void | (() => void);
+  render?: (container: HTMLElement) => void | (() => void);
 }
 
 // ── Registry ───────────────────────────────────────────────────────
@@ -79,6 +85,7 @@ class UIExtensionRegistry {
       icon: config.icon,
       position: config.position ?? "bottom",
       visible: false,
+      html: config.html,
       render: config.render,
       onShow: config.onShow,
       onHide: config.onHide,
@@ -97,6 +104,7 @@ class UIExtensionRegistry {
       side: config.side ?? "right",
       width: config.width ?? 300,
       visible: false,
+      html: config.html,
       render: config.render,
     });
     this.notify();
@@ -115,6 +123,7 @@ class UIExtensionRegistry {
       draggable: config.draggable ?? true,
       resizable: config.resizable ?? true,
       visible: false,
+      html: config.html,
       render: config.render,
     });
     this.notify();

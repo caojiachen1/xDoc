@@ -43,6 +43,7 @@ export {
   type EventBus,
   type EventHandler,
   type WorkerMessageType,
+  type WorkerUIRegistration,
   type PluginLifecycleHooks,
   type PluginInterceptorHooks,
   type PluginUIHooks,
@@ -65,7 +66,7 @@ export type { PanelState, SidebarState, FloatingWindowState } from "./ui-extensi
 
 export { createPluginContext } from "./context";
 
-export { loadPluginInWorker, activeWorkers } from "./sandbox/worker-host";
+export { loadPluginInWorker, activeWorkers, syncWorkerState, syncAllWorkers } from "./sandbox/worker-host";
 
 // ── React hooks ────────────────────────────────────────────────────
 

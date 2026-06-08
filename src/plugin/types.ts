@@ -217,10 +217,12 @@ export interface PanelRegistration {
   title: string;
   icon?: string;
   position?: "bottom" | "right";
+  /** HTML content to render in a sandboxed iframe (for worker plugins) */
+  html?: string;
   onShow?: () => void;
   onHide?: () => void;
   onResize?: (size: { width: number; height: number }) => void;
-  render: (container: HTMLElement) => void | (() => void);
+  render?: (container: HTMLElement) => void | (() => void);
 }
 
 export interface SidebarRegistration {
@@ -229,7 +231,9 @@ export interface SidebarRegistration {
   icon?: string;
   side?: "left" | "right";
   width?: number;
-  render: (container: HTMLElement) => void | (() => void);
+  /** HTML content to render in a sandboxed iframe (for worker plugins) */
+  html?: string;
+  render?: (container: HTMLElement) => void | (() => void);
 }
 
 export interface FloatingWindowRegistration {
@@ -241,7 +245,27 @@ export interface FloatingWindowRegistration {
   y?: number;
   draggable?: boolean;
   resizable?: boolean;
-  render: (container: HTMLElement) => void | (() => void);
+  /** HTML content to render in a sandboxed iframe (for worker plugins) */
+  html?: string;
+  render?: (container: HTMLElement) => void | (() => void);
+}
+
+// ── Worker UI registration (serializable, no render functions) ────
+
+export interface WorkerUIRegistration {
+  id: string;
+  title: string;
+  icon?: string;
+  /** HTML content to render in a sandboxed iframe (worker-only) */
+  html?: string;
+  position?: "bottom" | "right";
+  side?: "left" | "right";
+  width?: number;
+  height?: number;
+  x?: number;
+  y?: number;
+  draggable?: boolean;
+  resizable?: boolean;
 }
 
 // ── Context menu / toolbar / command types ────────────────────────
@@ -461,7 +485,7 @@ export interface EventBus {
 // ── Worker communication protocol ─────────────────────────────────
 
 export type WorkerMessageType =
-  | { type: "init"; code: string; pluginId: string }
+  | { type: "init"; code: string; pluginId: string; currentPdfPath?: string | null; llmConfig?: LlmConfigSnapshot | null }
   | { type: "init_result"; success: boolean; error?: string }
   | { type: "api_call"; callId: string; method: string; args: unknown[] }
   | {
@@ -481,7 +505,14 @@ export type WorkerMessageType =
   | { type: "event_subscribe"; event: string }
   | { type: "event_unsubscribe"; event: string }
   | { type: "event_emit"; event: string; payload: unknown }
-  | { type: "event_receive"; event: string; payload: unknown };
+  | { type: "event_receive"; event: string; payload: unknown }
+  // ── Streaming LLM protocol ──────────────────────────────────────
+  | { type: "stream_call"; callId: string; params: LlmInvokeParams }
+  | { type: "stream_chunk"; callId: string; chunk: string; done: boolean }
+  // ── UI registration protocol ────────────────────────────────────
+  | { type: "ui_register"; uiType: "panel" | "sidebar" | "floatingWindow"; config: WorkerUIRegistration }
+  // ── State sync (host → worker) ─────────────────────────────────
+  | { type: "state_update"; currentPdfPath?: string | null; llmConfig?: LlmConfigSnapshot | null };
 
 // ── Internal event names ─────────────────────────────────────────
 

@@ -15,13 +15,27 @@ interface PendingCall {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingStream {
+  onChunk: (chunk: string, done: boolean) => void;
+  resolve: (fullContent: string) => void;
+  reject: (error: Error) => void;
+  fullContent: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 const pendingCalls = new Map<string, PendingCall>();
+const pendingStreams = new Map<string, PendingStream>();
 let callIdCounter = 0;
 const CALL_TIMEOUT = 30_000;
+const STREAM_TIMEOUT = 120_000; // 2 min for long-running streams
 
 // Plugin hooks registered by the loaded code
 let pluginHooks: Record<string, Function> = {};
 let myPluginId = "";
+
+// Cached state synced from host
+let cachedCurrentPdfPath: string | null = null;
+let cachedLlmConfig: Record<string, unknown> | null = null;
 
 // Internal event listeners (worker-side)
 const eventListeners = new Map<string, Set<Function>>();
@@ -34,6 +48,9 @@ self.onmessage = async (e: MessageEvent) => {
   switch (msg.type) {
     case "init": {
       myPluginId = msg.pluginId;
+      // Cache initial state from host
+      if (msg.currentPdfPath !== undefined) cachedCurrentPdfPath = msg.currentPdfPath;
+      if (msg.llmConfig !== undefined) cachedLlmConfig = msg.llmConfig;
       try {
         const exports: Record<string, unknown> = {};
         // Execute plugin code inside the Worker scope
@@ -106,6 +123,30 @@ self.onmessage = async (e: MessageEvent) => {
       }
       break;
     }
+
+    // ── Streaming chunk from host ─────────────────────────────────
+    case "stream_chunk": {
+      const stream = pendingStreams.get(msg.callId);
+      if (stream) {
+        if (msg.done) {
+          clearTimeout(stream.timer);
+          stream.onChunk(msg.chunk, true);
+          stream.resolve(stream.fullContent);
+          pendingStreams.delete(msg.callId);
+        } else {
+          stream.fullContent += msg.chunk;
+          stream.onChunk(msg.chunk, false);
+        }
+      }
+      break;
+    }
+
+    // ── State sync from host ──────────────────────────────────────
+    case "state_update": {
+      if (msg.currentPdfPath !== undefined) cachedCurrentPdfPath = msg.currentPdfPath;
+      if (msg.llmConfig !== undefined) cachedLlmConfig = msg.llmConfig;
+      break;
+    }
   }
 };
 
@@ -128,7 +169,9 @@ function callApi(method: string, args: unknown[]): Promise<unknown> {
 const proxyContext = {
   pluginId: "",
 
-  getCurrentPdfPath: () => null as string | null, // sync not possible; use async
+  // Use cached value from host state sync
+  getCurrentPdfPath: () => cachedCurrentPdfPath,
+
   getPdfFullText: () => callApi("getPdfFullText", []) as Promise<string>,
   getPdfPages: () => callApi("getPdfPages", []) as Promise<{ count: number }>,
   getPageText: (idx: number) => callApi("getPageText", [idx]) as Promise<string>,
@@ -140,14 +183,28 @@ const proxyContext = {
   extractPdfImages: (pages?: number[]) => callApi("extractPdfImages", [pages]),
 
   invokeLlm: (params: unknown) => callApi("invokeLlm", [params]) as Promise<string>,
+
+  // ── True streaming LLM via chunked message protocol ─────────────
   invokeLlmStream: (params: unknown, onChunk: Function) => {
-    // Streaming not supported in Worker — fall back to non-streaming
-    return callApi("invokeLlm", [params]).then((result) => {
-      onChunk?.(result, true);
-      return result as string;
+    return new Promise<string>((resolve, reject) => {
+      const callId = `stream_${++callIdCounter}_${Date.now()}`;
+      const timer = setTimeout(() => {
+        pendingStreams.delete(callId);
+        reject(new Error(`Stream '${callId}' timed out after ${STREAM_TIMEOUT}ms`));
+      }, STREAM_TIMEOUT);
+      pendingStreams.set(callId, {
+        onChunk: onChunk as (chunk: string, done: boolean) => void,
+        resolve,
+        reject,
+        fullContent: "",
+        timer,
+      });
+      self.postMessage({ type: "stream_call", callId, params });
     });
   },
-  getLlmConfig: () => null,
+
+  // Use cached value from host state sync
+  getLlmConfig: () => cachedLlmConfig,
 
   storage: {
     get: (key: string) => callApi("storage.get", [key]) as Promise<string | null>,
@@ -156,13 +213,90 @@ const proxyContext = {
     list: () => callApi("storage.list", []) as Promise<string[]>,
   },
 
-  writeFile: (filename: string, content: string | Uint8Array) =>
-    callApi("writeFile", [filename, typeof content === "string" ? content : ""]) as Promise<string>,
+  writeFile: (filename: string, content: string | Uint8Array) => {
+    // Serialize Uint8Array to base64 for postMessage transfer
+    if (content instanceof Uint8Array) {
+      const bytes = content;
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      const b64 = btoa(binary);
+      return callApi("writeFile", [filename, b64, true]) as Promise<string>;
+    }
+    return callApi("writeFile", [filename, content, false]) as Promise<string>;
+  },
   readFile: (filename: string) => callApi("readFile", [filename]) as Promise<string>,
 
-  registerPanel: () => { /* not supported in Worker */ },
-  registerSidebar: () => { /* not supported in Worker */ },
-  registerFloatingWindow: () => { /* not supported in Worker */ },
+  // ── UI registration via message protocol ────────────────────────
+  registerPanel: (config: {
+    id: string;
+    title: string;
+    icon?: string;
+    position?: "bottom" | "right";
+    html?: string;
+  }) => {
+    self.postMessage({
+      type: "ui_register",
+      uiType: "panel",
+      config: {
+        id: config.id,
+        title: config.title,
+        icon: config.icon,
+        position: config.position,
+        html: config.html,
+      },
+    });
+  },
+  registerSidebar: (config: {
+    id: string;
+    title: string;
+    icon?: string;
+    side?: "left" | "right";
+    width?: number;
+    html?: string;
+  }) => {
+    self.postMessage({
+      type: "ui_register",
+      uiType: "sidebar",
+      config: {
+        id: config.id,
+        title: config.title,
+        icon: config.icon,
+        side: config.side,
+        width: config.width,
+        html: config.html,
+      },
+    });
+  },
+  registerFloatingWindow: (config: {
+    id: string;
+    title: string;
+    width?: number;
+    height?: number;
+    x?: number;
+    y?: number;
+    draggable?: boolean;
+    resizable?: boolean;
+    html?: string;
+  }) => {
+    self.postMessage({
+      type: "ui_register",
+      uiType: "floatingWindow",
+      config: {
+        id: config.id,
+        title: config.title,
+        width: config.width,
+        height: config.height,
+        x: config.x,
+        y: config.y,
+        draggable: config.draggable,
+        resizable: config.resizable,
+        html: config.html,
+      },
+    });
+  },
+
   showInputDialog: (opts: unknown) => callApi("showInputDialog", [opts]) as Promise<string | null>,
   showProgressDialog: (opts: unknown) => callApi("showProgressDialog", [opts]) as Promise<void>,
 
@@ -201,9 +335,11 @@ const proxyContext = {
     callApi("emitBackend", [event, payload]) as Promise<void>,
 
   showToast: (type: string, message: string) => {
+    // Use a unique callId so fire-and-forget doesn't collide
+    const callId = `toast_${++callIdCounter}_${Date.now()}`;
     self.postMessage({
       type: "api_call",
-      callId: "fire_and_forget",
+      callId,
       method: "showToast",
       args: [type, message],
     });

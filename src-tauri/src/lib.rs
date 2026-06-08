@@ -4236,6 +4236,7 @@ pub fn run() {
             plugin_host::plugin_update_paper_metadata,
             plugin_host::plugin_get_platform,
             plugin_host::plugin_get_app_version,
+            plugin_host::plugin_get_app_version_public,
             plugin_host::plugin_write_file,
             plugin_host::plugin_read_file,
         ])

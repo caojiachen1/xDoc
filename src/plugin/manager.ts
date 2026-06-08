@@ -7,6 +7,9 @@
  * 3. Collect hooks (context menu, toolbar, commands, panels, etc.)
  * 4. Broadcast lifecycle events via EventBus
  * 5. Manage interceptor pipeline and UI extension registry
+ * 6. Persist plugin enabled/disabled state
+ * 7. Validate minAppVersion on discovery
+ * 8. Sync state changes to active workers
  */
 import { invoke } from "@tauri-apps/api/core";
 import {
@@ -24,9 +27,12 @@ import { createPluginContext, setInterceptorRunner, setUIRegistry } from "./cont
 import { eventBus } from "./event-bus";
 import { interceptorPipeline, setManagerRef } from "./interceptors";
 import { uiRegistry } from "./ui-extensions";
-import { loadPluginInWorker, activeWorkers } from "./sandbox/worker-host";
+import { loadPluginInWorker, activeWorkers, syncAllWorkers } from "./sandbox/worker-host";
 
 type Listener = () => void;
+
+/** Storage key prefix for persisted plugin states */
+const PLUGIN_STATE_STORAGE_KEY = "__plugin_manager__";
 
 class PluginManagerClass {
   /** All discovered plugins */
@@ -82,6 +88,9 @@ class PluginManagerClass {
     const wasPath = this.currentPdfPath;
     this.currentPdfPath = path;
 
+    // Sync state to all active workers
+    syncAllWorkers({ currentPdfPath: path });
+
     if (path && !wasPath) {
       // PDF opened
       const paper = { id: "", name: "", path };
@@ -134,6 +143,8 @@ class PluginManagerClass {
   /** Set LLM config (updated when SettingsDialog saves) */
   setLlmConfig(config: LlmConfigSnapshot | null) {
     this.llmConfig = config;
+    // Sync state to all active workers
+    syncAllWorkers({ llmConfig: config });
   }
 
   /** Get a snapshot of the LLM config */
@@ -161,7 +172,32 @@ class PluginManagerClass {
   async discoverPlugins(): Promise<PluginManifest[]> {
     try {
       const manifests = await invoke<PluginManifest[]>("plugin_list");
+
+      // Get current app version for minAppVersion validation
+      let appVersion = "0.0.0";
+      try {
+        appVersion = await invoke<string>("plugin_get_app_version_public");
+      } catch {
+        console.warn("[PluginManager] Could not determine app version");
+      }
+
       for (const manifest of manifests) {
+        // Validate minAppVersion
+        if (manifest.minAppVersion && !isVersionSatisfied(appVersion, manifest.minAppVersion)) {
+          console.warn(
+            `[PluginManager] Plugin '${manifest.id}' requires app version >= ${manifest.minAppVersion}, ` +
+            `but current is ${appVersion}. Skipping.`,
+          );
+          // Still register but mark as error
+          this.plugins.set(manifest.id, {
+            manifest,
+            status: "error",
+            hooks: {},
+            error: `Requires app version >= ${manifest.minAppVersion} (current: ${appVersion})`,
+          });
+          continue;
+        }
+
         if (!this.plugins.has(manifest.id)) {
           this.plugins.set(manifest.id, {
             manifest,
@@ -185,6 +221,9 @@ class PluginManagerClass {
           }
         }
       }
+
+      // Restore persisted enabled/disabled states for external plugins
+      await this.restorePluginStates();
 
       this.notify();
       return manifests;
@@ -227,6 +266,9 @@ class PluginManagerClass {
       this.collectHooks();
       this.notify();
 
+      // Persist state
+      await this.savePluginStates();
+
       eventBus.emit(PLUGIN_EVENTS.PLUGIN_ENABLED, { pluginId });
     } catch (err) {
       entry.status = "error";
@@ -268,6 +310,9 @@ class PluginManagerClass {
     entry.status = "disabled";
     this.collectHooks();
     this.notify();
+
+    // Persist state
+    await this.savePluginStates();
 
     eventBus.emit(PLUGIN_EVENTS.PLUGIN_DISABLED, { pluginId });
   }
@@ -380,8 +425,12 @@ class PluginManagerClass {
     }
   }
 
-  /** Collect hooks from all enabled plugins */
+  /** Collect hooks from all enabled plugins (with id-based dedup) */
   private collectHooks() {
+    const menuIds = new Set<string>();
+    const toolbarIds = new Set<string>();
+    const commandIds = new Set<string>();
+
     this.contextMenuItems = [];
     this.toolbarButtons = [];
     this.commands = [];
@@ -390,15 +439,95 @@ class PluginManagerClass {
       if (plugin.status !== "enabled") return;
 
       if (plugin.hooks.contextMenuItems) {
-        this.contextMenuItems.push(...plugin.hooks.contextMenuItems());
+        for (const item of plugin.hooks.contextMenuItems()) {
+          if (!menuIds.has(item.id)) {
+            menuIds.add(item.id);
+            this.contextMenuItems.push(item);
+          } else {
+            console.warn(
+              `[PluginManager] Duplicate context menu item '${item.id}' from '${plugin.manifest.id}' ignored`,
+            );
+          }
+        }
       }
       if (plugin.hooks.toolbarButtons) {
-        this.toolbarButtons.push(...plugin.hooks.toolbarButtons());
+        for (const btn of plugin.hooks.toolbarButtons()) {
+          if (!toolbarIds.has(btn.id)) {
+            toolbarIds.add(btn.id);
+            this.toolbarButtons.push(btn);
+          } else {
+            console.warn(
+              `[PluginManager] Duplicate toolbar button '${btn.id}' from '${plugin.manifest.id}' ignored`,
+            );
+          }
+        }
       }
       if (plugin.hooks.commands) {
-        this.commands.push(...plugin.hooks.commands());
+        for (const cmd of plugin.hooks.commands()) {
+          if (!commandIds.has(cmd.id)) {
+            commandIds.add(cmd.id);
+            this.commands.push(cmd);
+          } else {
+            console.warn(
+              `[PluginManager] Duplicate command '${cmd.id}' from '${plugin.manifest.id}' ignored`,
+            );
+          }
+        }
       }
     });
+  }
+
+  // ── Persistence ──
+
+  /** Save enabled/disabled state of external plugins to storage */
+  private async savePluginStates(): Promise<void> {
+    try {
+      const states: Record<string, "enabled" | "disabled"> = {};
+      for (const [id, plugin] of this.plugins) {
+        if (!plugin.isBuiltin) {
+          states[id] = plugin.status === "enabled" ? "enabled" : "disabled";
+        }
+      }
+      await invoke<void>("plugin_storage_set", {
+        key: PLUGIN_STATE_STORAGE_KEY,
+        value: JSON.stringify(states),
+        pluginId: "__plugin_manager__",
+      });
+    } catch (err) {
+      console.warn("[PluginManager] Failed to persist plugin states:", err);
+    }
+  }
+
+  /** Restore enabled/disabled states from storage and auto-enable external plugins */
+  private async restorePluginStates(): Promise<void> {
+    try {
+      const raw = await invoke<string | null>("plugin_storage_get", {
+        key: PLUGIN_STATE_STORAGE_KEY,
+        pluginId: "__plugin_manager__",
+      });
+      if (!raw) return;
+
+      const states = JSON.parse(raw) as Record<string, "enabled" | "disabled">;
+
+      for (const [pluginId, savedStatus] of Object.entries(states)) {
+        const plugin = this.plugins.get(pluginId);
+        if (!plugin || plugin.isBuiltin) continue;
+        if (plugin.status === "error") continue; // Don't re-enable broken plugins
+
+        if (savedStatus === "enabled" && plugin.status === "disabled") {
+          try {
+            await this.enablePlugin(pluginId);
+          } catch (err) {
+            console.warn(
+              `[PluginManager] Failed to restore plugin '${pluginId}':`,
+              err,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("[PluginManager] Failed to restore plugin states:", err);
+    }
   }
 }
 
@@ -430,4 +559,29 @@ export function isBuiltinPlugin(pluginId: string): boolean {
   const plugin = pluginManager.getPlugin(pluginId);
   if (!plugin) return false;
   return plugin.manifest.entry.main?.startsWith("builtin:") ?? false;
+}
+
+// ── Version comparison utility ──
+
+/**
+ * Compare two semver strings.
+ * Returns: -1 if a < b, 0 if equal, 1 if a > b.
+ */
+function compareSemver(a: string, b: string): -1 | 0 | 1 {
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const na = pa[i] ?? 0;
+    const nb = pb[i] ?? 0;
+    if (na > nb) return 1;
+    if (na < nb) return -1;
+  }
+  return 0;
+}
+
+/**
+ * Check if currentVersion >= requiredVersion (semver).
+ */
+function isVersionSatisfied(currentVersion: string, requiredVersion: string): boolean {
+  return compareSemver(currentVersion, requiredVersion) >= 0;
 }
