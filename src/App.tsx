@@ -2,9 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getDocument, TextLayer } from "pdfjs-dist";
 import * as pdfjsWorker from "pdfjs-dist/build/pdf.worker.min.mjs";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { fetch } from "@tauri-apps/plugin-http";
 import {
   Button,
   Card,
@@ -23,12 +21,10 @@ import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-ico
 import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download, BookOpen } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-import { marked } from "marked";
-import SettingsDialog, { VENDOR_PRESETS, FONT_PRESETS, type LlmSettings } from "./components/SettingsDialog";
+import SettingsDialog from "./components/SettingsDialog";
 import EnvironmentCheck from "./components/EnvironmentCheck";
-import HomePage, { type PaperInfo, type GrobidStatus } from "./components/HomePage";
+import HomePage, { type PaperInfo } from "./components/HomePage";
 import ReferenceSidebar from "./components/ReferenceSidebar";
-import { extractMetadataEnhanced, type PaperMetadata } from "./utils/pdfMetadata";
 import {
   usePluginInit,
   usePluginLlmConfig,
@@ -40,328 +36,48 @@ import { createPluginContext } from "./plugin/context";
 import { pluginManager } from "./plugin/manager";
 import CommandPalette from "./components/CommandPalette";
 import ReadingReportDialog from "./components/ReadingReport";
+import AboutDialog from "./components/AboutDialog";
 import {
   PluginPanelHost,
   PluginSidebarHost,
   PluginFloatingWindowHost,
 } from "./components/PluginPanelHost";
 import {
-  copyToManaged,
-  savePaper,
-  listPapers,
-  deletePaper as dbDeletePaper,
-  renamePaper,
-  recordToPaperInfo,
-  paperInfoToRecord,
-  annotationSave,
-  annotationLoad,
-  annotationDelete,
-  exportAnnotatedPdf,
-  type PageAnnotations,
-} from "./utils/paperDb";
+  CLASSES,
+  COLORS,
+  HOME_TAB_ID,
+  ERASER_CURSOR,
+  isVisualBox,
+  actionLabels,
+  mergeTextLayerSpans,
+  type LayoutBox,
+  type TextSegment,
+  type DetectionResponse,
+  type ExtractContentResponse,
+  type DragMode,
+  type SelectMode,
+  type TopMenuKey,
+} from "./types";
+import {
+  useSettings,
+  useGrobid,
+  useAnnotations,
+  useTabs,
+  usePapers,
+  useAiChat,
+  useOcr,
+  useSidebar,
+  useZoom,
+  useReadingSession,
+} from "./hooks";
 import "./App.css";
-
-interface LayoutBox {
-  cls_id: number;
-  score: number;
-  xmin: number;
-  ymin: number;
-  xmax: number;
-  ymax: number;
-  read_order: number;
-}
-
-interface TextSegment {
-  text: string;
-  xmin: number;
-  ymin: number;
-  xmax: number;
-  ymax: number;
-}
-
-interface ExtractContentResponse {
-  width: number;
-  height: number;
-  preview_data_url: string;
-  page_index: number;
-  page_count: number;
-  segments: TextSegment[];
-}
-
-interface DetectionResponse {
-  width: number;
-  height: number;
-  preview_data_url: string;
-  source_type: "pdf" | "image" | string;
-  page_index: number;
-  page_count: number;
-  boxes: LayoutBox[];
-}
-
-interface GrobidAuthorOutput {
-  first_name: string | null;
-  middle_name: string | null;
-  last_name: string | null;
-  full_name: string | null;
-  email: string | null;
-  affiliation: string | null;
-  identifier: string | null;
-}
-interface GrobidDateOutput {
-  year: string | null;
-  month: string | null;
-  day: string | null;
-  raw: string | null;
-}
-interface GrobidVenueOutput {
-  name: string | null;
-  volume: string | null;
-  issue: string | null;
-  pages: string | null;
-  publisher: string | null;
-}
-interface GrobidMetadataOutput {
-  title: string | null;
-  authors: GrobidAuthorOutput[];
-  abstract_text: string | null;
-  date: GrobidDateOutput | null;
-  doi: string | null;
-  venue: GrobidVenueOutput | null;
-  keywords: string[];
-}
-interface GrobidSectionOutput {
-  title: string | null;
-  level: number;
-  content: string;
-}
-interface GrobidFigureOutput {
-  id: string | null;
-  caption: string | null;
-  description: string | null;
-}
-interface GrobidTableOutput {
-  id: string | null;
-  caption: string | null;
-  content: string | null;
-}
-interface GrobidEquationOutput {
-  id: string | null;
-  content: string;
-  description: string | null;
-}
-interface GrobidRefOutput {
-  id: string | null;
-  title: string | null;
-  authors: string[];
-  year: string | null;
-  month: string | null;
-  day: string | null;
-  date_raw: string | null;
-  venue: string | null;
-  volume: string | null;
-  issue: string | null;
-  pages: string | null;
-  publisher: string | null;
-  doi: string | null;
-  raw: string | null;
-}
-interface GrobidDocumentOutput {
-  metadata: GrobidMetadataOutput;
-  sections: GrobidSectionOutput[];
-  figures: GrobidFigureOutput[];
-  tables: GrobidTableOutput[];
-  equations: GrobidEquationOutput[];
-  references: GrobidRefOutput[];
-}
-
-const CLASSES = [
-  "abstract",          // 0
-  "algorithm",         // 1
-  "aside_text",        // 2
-  "chart",             // 3
-  "content",           // 4
-  "display_formula",   // 5
-  "doc_title",         // 6
-  "figure_title",      // 7
-  "footer",            // 8
-  "footer_image",      // 9
-  "footnote",          // 10
-  "formula_number",    // 11
-  "header",            // 12
-  "header_image",      // 13
-  "image",             // 14
-  "inline_formula",    // 15
-  "number",            // 16
-  "paragraph_title",   // 17
-  "reference",         // 18
-  "reference_content", // 19
-  "seal",              // 20
-  "table",             // 21
-  "text",              // 22
-  "vertical_text",     // 23
-  "vision_footnote",   // 24
-];
-
-const COLORS = [
-  "#FF3838",
-  "#FF9D97",
-  "#FF701F",
-  "#FFB21D",
-  "#CFD231",
-  "#48F90A",
-  "#92CC17",
-  "#3DDB86",
-  "#1A9334",
-  "#00D4BB",
-  "#2C99A8",
-  "#FF6B6B",
-  "#FFD93D",
-  "#6BCB77",
-  "#4D96FF",
-  "#C084FC",
-  "#FB923C",
-  "#34D399",
-  "#F472B6",
-  "#818CF8",
-  "#FBBF24",
-  "#A78BFA",
-  "#60A5FA",
-  "#F87171",
-  "#38BDF8",
-];
-
-type ZoomMode = "fit_page" | "fit_width" | "fit_height" | "actual" | "custom";
-type DragMode = "move" | "select";
-type SelectMode = "box" | "text";
-type AnnotationTool = "pen" | "eraser" | "text" | "rect" | "ellipse" | "line" | null;
-type EraserMode = "free" | "stroke";
-type TopMenuKey = "file" | "settings" | "help" | null;
-
-interface AnnotationShape {
-  id: string;
-  type: "freehand" | "eraser" | "rect" | "ellipse" | "text" | "line";
-  /** Normalized coordinates (0–1) relative to image dimensions */
-  points: { x: number; y: number }[];
-  color: string;
-  size: number;
-  text?: string;
-  /** For text: normalized width/height of the bounding box */
-  width?: number;
-  height?: number;
-}
-
-export const STORAGE_KEYS = {
-  modelPath: "xdoc.settings.modelPath",
-  scoreThreshold: "xdoc.settings.scoreThreshold",
-  zoomMode: "xdoc.settings.zoomMode",
-  pdfTextExtractionEnabled: "xdoc.settings.pdfTextExtractionEnabled",
-  llmVendor: "xdoc.settings.llm.vendor",
-  llmVendorApiKeys: "xdoc.settings.llm.vendorApiKeys",
-  llmBaseUrl: "xdoc.settings.llm.baseUrl",
-  llmModel: "xdoc.settings.llm.model",
-  textFontSize: "xdoc.settings.textFontSize",
-  aiFontSize: "xdoc.settings.aiFontSize",
-  textFontFamily: "xdoc.settings.textFontFamily",
-  aiFontFamily: "xdoc.settings.aiFontFamily",
-} as const;
-
-interface TabInfo {
-  id: string;
-  title: string;
-  type: "home" | "reader";
-  documentPath?: string;
-}
-
-const HOME_TAB_ID = "home";
-
-// Custom eraser cursor — SVG of a tilted eraser, hotspot at the contact tip
-const ERASER_CURSOR = `url("data:image/svg+xml,${encodeURIComponent(
-  '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="30" viewBox="0 0 20 30">'
-  + '<path d="M13,1 L19,7 L9,17 L3,11 Z" fill="%23fce4ec" stroke="%23666" stroke-width="1" stroke-linejoin="round"/>'
-  + '<path d="M3,11 L9,17 L5,21 L1,17 Z" fill="%23ef9a9a" stroke="%23666" stroke-width="1" stroke-linejoin="round"/>'
-  + '<line x1="6" y1="4" x2="16" y2="14" stroke="white" stroke-width="1" opacity="0.35"/>'
-  + '</svg>'
-)}") 6 22, auto`;
-
-// Merge adjacent text spans on the same line within the pdfjs TextLayer
-// to prevent ::selection highlight overlap at word boundaries (visible on titles).
-// Each PDF text item is rendered as a separate absolutely-positioned <span> by pdfjs.
-// When spans have --scale-x transforms, their visual bounds can extend beyond layout
-// bounds, causing semi-transparent selection backgrounds to stack at word gaps.
-// Merging same-line spans into one eliminates these internal boundaries.
-function mergeTextLayerSpans(container: HTMLElement) {
-  const spans = Array.from(
-    container.querySelectorAll(
-      ":scope > span:not(.markedContent), :scope > .markedContent > span:not(.markedContent)"
-    )
-  ) as HTMLElement[];
-  if (spans.length <= 1) return;
-
-  const containerH = container.offsetHeight || 1;
-  const containerW = container.offsetWidth || 1;
-
-  // pdfjs positions spans with percentage left/top — convert to px for comparison
-  const pctToPxTop = (v: string) => (parseFloat(v) || 0) / 100 * containerH;
-  const pctToPxLeft = (v: string) => (parseFloat(v) || 0) / 100 * containerW;
-
-  // Shared canvas for measuring merged text width
-  const measureCanvas = document.createElement("canvas");
-  const measureCtx = measureCanvas.getContext("2d")!;
-
-  let groupFirst: HTMLElement | null = null;
-  let groupTopPx = 0;
-  let groupRightPx = 0;
-  let groupText = "";
-
-  const flushGroup = () => {
-    if (!groupFirst) return;
-    groupFirst.textContent = groupText;
-
-    // Measure merged text at natural size to compute scaleX
-    const cs = getComputedStyle(groupFirst);
-    measureCtx.font = `${cs.fontWeight} ${cs.fontStyle} ${cs.fontSize} ${cs.fontFamily}`;
-    const measured = measureCtx.measureText(groupText).width;
-    const leftPx = pctToPxLeft(groupFirst.style.left);
-    const targetWidth = groupRightPx - leftPx;
-    if (measured > 0 && targetWidth > 0) {
-      groupFirst.style.setProperty("--scale-x", String(targetWidth / measured));
-    } else {
-      groupFirst.style.removeProperty("--scale-x");
-    }
-    groupFirst = null;
-  };
-
-  for (const span of spans) {
-    const topPx = pctToPxTop(span.style.top);
-    const leftPx = pctToPxLeft(span.style.left);
-    const layoutWidth = span.offsetWidth; // layout width (excludes CSS transform)
-    const rightPx = leftPx + layoutWidth;
-
-    if (groupFirst && Math.abs(topPx - groupTopPx) < 2) {
-      // Same line (within 2px) — absorb into merged group
-      const gap = Math.max(0, leftPx - groupRightPx);
-      const cs = getComputedStyle(span);
-      const spaceWidth = parseFloat(cs.fontSize) / 4 || 4;
-      groupText += " ".repeat(Math.max(0, Math.round(gap / spaceWidth))) + (span.textContent || "");
-      groupRightPx = Math.max(groupRightPx, rightPx);
-      span.remove();
-    } else {
-      flushGroup();
-      groupFirst = span;
-      groupTopPx = topPx;
-      groupRightPx = rightPx;
-      groupText = span.textContent || "";
-    }
-  }
-  flushGroup();
-}
 
 // Register pdfjs worker on global scope (fake-worker mode for Tauri webview)
 (globalThis as Record<string, unknown>).pdfjsWorker = pdfjsWorker;
 
 function App() {
+  // ── Local state (not managed by hooks) ─────────────────────────────────────
   const [environmentReady, setEnvironmentReady] = useState(false);
-  const [modelPath, setModelPath] = useState("");
   const [documentPath, setDocumentPath] = useState("");
   const [previewSrc, setPreviewSrc] = useState("");
   const [boxes, setBoxes] = useState<LayoutBox[]>([]);
@@ -369,122 +85,50 @@ function App() {
   const [selectedParagraph, setSelectedParagraph] = useState<TextSegment | null>(null);
   const [selectedFigure, setSelectedFigure] = useState<LayoutBox | null>(null);
   const [figureImageDataUrl, setFigureImageDataUrl] = useState<string>("");
-  const [aiAction, setAiAction] = useState<string>("");
-  const [aiResult, setAiResult] = useState<string>("");
-
-  // Q&A follow-up state
-  const [qaHistory, setQaHistory] = useState<{ question: string; answer: string }[]>([]);
-  const [qaInput, setQaInput] = useState("");
-  const [qaLoading, setQaLoading] = useState(false);
-  const qaSourceTextRef = useRef("");
-  const aiScrollRef = useRef<HTMLDivElement>(null);
-  // Fulltext memory — persists across selection changes
-  const fulltextAiResultRef = useRef("");
-  const fulltextQaHistoryRef = useRef<{ question: string; answer: string }[]>([]);
-  const fulltextSourceTextRef = useRef("");
-  const [loading, setLoading] = useState(false);
-  const [modelLoaded, setModelLoaded] = useState(false);
-  const [scoreThreshold, setScoreThreshold] = useState(0.5);
-  const [pdfTextExtractionEnabled, setPdfTextExtractionEnabled] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
-  const [displaySize, setDisplaySize] = useState({ width: 0, height: 0 });
   const [pdfPageIndex, setPdfPageIndex] = useState(0);
   const [pdfPageCount, setPdfPageCount] = useState(0);
-  const [zoomMode, setZoomMode] = useState<ZoomMode>("fit_page");
-  const [customScale, setCustomScale] = useState(1);
   const [openMenu, setOpenMenu] = useState<TopMenuKey>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [dragMode, setDragMode] = useState<DragMode>("select");
   const [selectMode, setSelectMode] = useState<SelectMode>("box");
-
-  // Sidebar state
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [sidebarMode, setSidebarMode] = useState<"thumbnails" | "outline">("thumbnails");
-  const [thumbnails, setThumbnails] = useState<string[]>([]);
-  const [outlineItems, setOutlineItems] = useState<{ title: string; page_index: number; depth: number }[]>([]);
-  const [sidebarLoading, setSidebarLoading] = useState(false);
-  const [sidebarWidth, setSidebarWidth] = useState(220);
-  const sidebarDragRef = useRef<{ startX: number; startWidth: number } | null>(null);
-
-  // Reference sidebar state
-  const [refSidebarOpen, setRefSidebarOpen] = useState(false);
-  const [refSidebarWidth, setRefSidebarWidth] = useState(320);
-
-  // Grobid parsing state (async, non-blocking)
-  const [grobidLoading, setGrobidLoading] = useState(false);
-  const [grobidDocument, setGrobidDocument] = useState<GrobidDocumentOutput | null>(null);
-  const [grobidError, setGrobidError] = useState<string>("");
-  const grobidParsedPathRef = useRef<string>("");
-  const grobidCancelledRef = useRef<boolean>(false);
-
-  // Grobid batch parsing state — tracks parse status per paper path
-  const [grobidStatusMap, setGrobidStatusMap] = useState<Record<string, GrobidStatus>>({});
-  const grobidBatchRunningRef = useRef<boolean>(false);
-  const grobidBatchQueueRef = useRef<string[]>([]);
-
-  // ── Annotation State ──────────────────────────────────────────────────────
-  const [annotationMode, setAnnotationMode] = useState<AnnotationTool>(null);
-  const [annotationColor, setAnnotationColor] = useState("#FF3838");
-  const [annotationSize, setAnnotationSize] = useState(2);
-  const [annotations, setAnnotations] = useState<AnnotationShape[]>([]);
-  const [annotationHistory, setAnnotationHistory] = useState<AnnotationShape[][]>([]);
-  const [annotationRedoStack, setAnnotationRedoStack] = useState<AnnotationShape[][]>([]);
-  /** Annotations stored per page, keyed by page index */
-  const pageAnnotationsRef = useRef<Map<number, AnnotationShape[]>>(new Map());
-  const annotationPageRef = useRef(0);
-  const annotationCanvasRef = useRef<HTMLCanvasElement>(null);
-  const annotationDrawingRef = useRef(false);
-  const annotationCurrentShapeRef = useRef<AnnotationShape | null>(null);
-  const [eraserMode, setEraserMode] = useState<EraserMode>("free");
-  /** Debounce timer for auto-saving annotations to DB */
-  const annotationSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // OCR settings
-  // Auto-switch to text mode when layout model is not available
-  useEffect(() => {
-    if (!modelLoaded && selectMode === "box") {
-      setSelectMode("text");
-      setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
-      window.getSelection()?.removeAllRanges();
-    }
-  }, [modelLoaded, selectMode]);
-
-  const [ocrEnabled, setOcrEnabled] = useState(true);
-  const [ocrModelPath, setOcrModelPath] = useState("");
-
-  // OCR runtime state
-  const [ocrText, setOcrText] = useState("");
-  const [ocrLoading, setOcrLoading] = useState(false);
-  const [ocrInitialized, setOcrInitialized] = useState(false);
-  const [ocrError, setOcrError] = useState("");
-
-  // Sentence-split text states (populated asynchronously via Rust sentencex)
-  const [splitParagraphWords, setSplitParagraphWords] = useState<string[]>([]);
-  const [splitOcrText, setSplitOcrText] = useState("");
-
-  // Fulltext extraction state
-  const [fulltextExtracting, setFulltextExtracting] = useState(false);
-  const [fulltextProgress, setFulltextProgress] = useState({ current: 0, total: 0 });
-  const fulltextCancelRef = useRef(false);
-
-  // LLM settings
-  const [llmSettings, setLlmSettings] = useState<LlmSettings>({
-    vendor: "deepseek",
-    vendorApiKeys: {},
-    baseUrl: VENDOR_PRESETS.deepseek.baseUrl,
-    model: VENDOR_PRESETS.deepseek.models[0],
-  });
-
-  // ── Plugin system integration ──
-  usePluginInit();
-  usePluginLlmConfig(llmSettings);
-
-  // Track selected paper from HomePage (for command palette)
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [showReadingReport, setShowReadingReport] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
   const [homeSelectedPaperPath, setHomeSelectedPaperPath] = useState<string | null>(null);
-  const handleHomeSelectPaper = useCallback((paper: PaperInfo | null) => {
-    setHomeSelectedPaperPath(paper?.path ?? null);
-  }, []);
+
+  // ── Local refs ─────────────────────────────────────────────────────────────
+  const textLayerRef = useRef<HTMLDivElement>(null);
+  const pdfJsDocRef = useRef<any>(null);
+  const textLayerInstanceRef = useRef<any>(null);
+  const mainLayoutRef = useRef<HTMLDivElement>(null);
+
+  // ── Hook initialization (order matters: zoom before annotations, aiChat before ocr) ──
+  const settings = useSettings(environmentReady);
+  const zoom = useZoom(imageSize, settings.zoomMode, settings.setZoomMode, "", "");
+  const tabs = useTabs((path) => setDocumentPath(path || ""));
+  const papers = usePapers((paper) => {
+    const tab = tabs.tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
+    if (tab) tabs.closeTab(tab.id, clearCurrentDocument, loadPageData, grobid.triggerGrobidParse, settings.modelLoaded, settings.scoreThreshold);
+  });
+  const grobid = useGrobid(documentPath, papers.papersList);
+  const annotations = useAnnotations(documentPath, pdfPageIndex, zoom.displaySize);
+  const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
+  const aiChat = useAiChat(
+    settings.llmSettings, documentPath, pdfPageIndex, pdfPageCount,
+    isPdfSelected, settings.scoreThreshold, settings.modelLoaded,
+    selectedParagraph, figureImageDataUrl, settings.setErrorMessage,
+  );
+  const ocr = useOcr(
+    settings.ocrEnabled, settings.ocrModelPath, documentPath,
+    pdfPageIndex, selectedParagraph, aiChat.selectedParagraphPageRef,
+  );
+  const sidebar = useSidebar(documentPath, isPdfSelected);
+  void useReadingSession(tabs.tabs, tabs.activeTabId, papers.papersList);
+
+  // ── Plugin system integration ──────────────────────────────────────────────
+  usePluginInit();
+  usePluginLlmConfig(settings.llmSettings);
   usePluginPdfPath(documentPath || null);
   const pluginToolbarBtns = usePluginToolbarButtons();
 
@@ -509,914 +153,81 @@ function App() {
     }, 4000);
   });
 
-  // Command palette state (Ctrl+K)
-  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  // ── Computed values ────────────────────────────────────────────────────────
+  const currentPaper = useMemo(() => papers.papersList.find(p => p.path === documentPath) || null, [papers.papersList, documentPath]);
+
+  const effectivePdfPath = useMemo(() => {
+    if (documentPath) return documentPath;
+    if (homeSelectedPaperPath) return homeSelectedPaperPath;
+    const readerTabs = tabs.tabs.filter(t => t.type === "reader" && t.documentPath);
+    if (readerTabs.length > 0) return readerTabs[readerTabs.length - 1].documentPath!;
+    return null;
+  }, [documentPath, homeSelectedPaperPath, tabs.tabs]);
+
+  // ── Home page paper selection handler (for command palette) ─────────────────
+  const handleHomeSelectPaper = useCallback((paper: PaperInfo | null) => {
+    setHomeSelectedPaperPath(paper?.path ?? null);
+  }, []);
+
+  // ── Keyboard shortcuts (Ctrl+K, Ctrl+O, Ctrl+N, Ctrl+,, etc.) ─────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
-        e.preventDefault();
-        setCommandPaletteOpen((prev) => !prev);
+      if (!(e.ctrlKey || e.metaKey)) return;
+      switch (e.key) {
+        case "k":
+          e.preventDefault();
+          setCommandPaletteOpen((prev) => !prev);
+          break;
+        case "o":
+          e.preventDefault();
+          void selectDocument();
+          break;
+        case "n":
+          e.preventDefault();
+          tabs.setTabs([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
+          tabs.setActiveTabId(HOME_TAB_ID);
+          clearCurrentDocument();
+          break;
+        case ",":
+          e.preventDefault();
+          setSettingsOpen((prev) => !prev);
+          break;
+        case "=":
+        case "+":
+          if (isPdfSelected) { e.preventDefault(); zoom.handleZoomIn(); }
+          break;
+        case "-":
+          if (isPdfSelected) { e.preventDefault(); zoom.handleZoomOut(); }
+          break;
+        case "0":
+          if (isPdfSelected) { e.preventDefault(); zoom.handleZoomPreset(1.0); }
+          break;
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
+  }, [isPdfSelected]);
 
-  // Floating menu state
-  const [floatingMenu, setFloatingMenu] = useState<{
-    visible: boolean;
-    x: number;
-    y: number;
-    selectedText: string;
-  }>({ visible: false, x: 0, y: 0, selectedText: "" });
-
-  // PDF text-layer floating menu state
-  const [pdfFloatingMenu, setPdfFloatingMenu] = useState<{
-    visible: boolean;
-    x: number;
-    y: number;
-    selectedText: string;
-  }>({ visible: false, x: 0, y: 0, selectedText: "" });
-
-  // TextLayer refs (pdfjs-dist)
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const pdfJsDocRef = useRef<any>(null);
-  const textLayerInstanceRef = useRef<any>(null);
-
-  // Font size state
-  const [textFontSize, setTextFontSize] = useState(15);
-  const [aiFontSize, setAiFontSize] = useState(14);
-  const [textFontFamily, setTextFontFamily] = useState(FONT_PRESETS[0].value);
-  const [aiFontFamily, setAiFontFamily] = useState(FONT_PRESETS[0].value);
-
-  // Resize state
-  const [leftPaneWidth, setLeftPaneWidth] = useState<number | string>("50%");
-  const [topPaneHeight, setTopPaneHeight] = useState<number | string>("50%");
-
-  // Tab state
-  const [tabs, setTabs] = useState<TabInfo[]>([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
-  const [activeTabId, setActiveTabId] = useState(HOME_TAB_ID);
-  const [papersList, setPapersList] = useState<PaperInfo[]>([]);
-  const [extractingPaperId, setExtractingPaperId] = useState<string | null>(null);
-  const [dragTabId, setDragTabId] = useState<string | null>(null);
-  const [dragOverTabId, setDragOverTabId] = useState<string | null>(null);
-  const dragStartRef = useRef<{ x: number; y: number; tabId: string } | null>(null);
-  const tabBarRef = useRef<HTMLDivElement>(null);
-
-  // Reading report dialog state
-  const [showReadingReport, setShowReadingReport] = useState(false);
-
-  // ── Reading session timer ─────────────────────────────────────────────────
-  // Tracks active reading time for the currently visible reader tab.
-  const readingSessionRef = useRef<{
-    paperId: string;
-    paperName: string;
-    startTime: Date;
-  } | null>(null);
-
-  const flushReadingSession = useCallback(async () => {
-    const session = readingSessionRef.current;
-    if (!session) return;
-    const endTime = new Date();
-    const durationSeconds = Math.floor((endTime.getTime() - session.startTime.getTime()) / 1000);
-    if (durationSeconds >= 5) {
-      try {
-        await invoke("reading_log_session", {
-          req: {
-            paper_id: session.paperId,
-            paper_name: session.paperName,
-            start_time: session.startTime.toISOString().slice(0, 19),
-            end_time: endTime.toISOString().slice(0, 19),
-            duration_seconds: durationSeconds,
-          },
-        });
-      } catch (e) {
-        console.warn("[reading] failed to log session:", e);
-      }
-    }
-    readingSessionRef.current = null;
-  }, []);
-
-  // Start / restart reading timer whenever activeTabId changes to a reader tab
+  // ── Auto-switch to text mode when layout model is not available ────────────
   useEffect(() => {
-    const activeTab = tabs.find(t => t.id === activeTabId);
-    if (activeTab?.type === "reader" && activeTab.documentPath) {
-      // Flush previous session if any
-      flushReadingSession();
-      // Find paper info for this path
-      const paper = papersList.find(p => p.path === activeTab.documentPath);
-      readingSessionRef.current = {
-        paperId: paper?.id || activeTab.id,
-        paperName: paper?.name || activeTab.title,
-        startTime: new Date(),
-      };
-    } else {
-      // Switched to home or non-reader tab — flush
-      flushReadingSession();
+    if (!settings.modelLoaded && selectMode === "box") {
+      setSelectMode("text");
+      aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+      window.getSelection()?.removeAllRanges();
     }
-  }, [activeTabId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [settings.modelLoaded, selectMode]);
 
-  // Flush on window blur (user switched away) and resume on focus
-  useEffect(() => {
-    const onBlur = () => flushReadingSession();
-    const onFocus = () => {
-      const activeTab = tabs.find(t => t.id === activeTabId);
-      if (activeTab?.type === "reader" && activeTab.documentPath && !readingSessionRef.current) {
-        const paper = papersList.find(p => p.path === activeTab.documentPath);
-        readingSessionRef.current = {
-          paperId: paper?.id || activeTab.id,
-          paperName: paper?.name || activeTab.title,
-          startTime: new Date(),
-        };
-      }
-    };
-    window.addEventListener("blur", onBlur);
-    window.addEventListener("focus", onFocus);
-    return () => {
-      window.removeEventListener("blur", onBlur);
-      window.removeEventListener("focus", onFocus);
-    };
-  }, [tabs, activeTabId, papersList, flushReadingSession]);
-
-  // Flush on unmount
-  useEffect(() => {
-    return () => { flushReadingSession(); };
-  }, [flushReadingSession]);
-
-  // Effective PDF path for command palette:
-  // Priority: 1) current document (reader tab)  2) home page selected paper  3) last reader tab
-  const effectivePdfPath = useMemo(() => {
-    if (documentPath) return documentPath;
-    if (homeSelectedPaperPath) return homeSelectedPaperPath;
-    const readerTabs = tabs.filter(t => t.type === "reader" && t.documentPath);
-    if (readerTabs.length > 0) return readerTabs[readerTabs.length - 1].documentPath!;
-    return null;
-  }, [documentPath, homeSelectedPaperPath, tabs]);
-
-  const stageRef = useRef<HTMLDivElement>(null);
-  const imgRef = useRef<HTMLImageElement>(null);
-  const mainLayoutRef = useRef<HTMLDivElement>(null);
-  const rightPaneRef = useRef<HTMLDivElement>(null);
-  const requestVersionRef = useRef(0);
-  const isDraggingRef = useRef(false);
-  const justDraggedRef = useRef(false);
-
-  // AI result cache per paragraph — persists across page switches
-  const paragraphAiCacheRef = useRef<Map<string, {
-    aiAction: string;
-    aiResult: string;
-    qaHistory: { question: string; answer: string }[];
-    qaSourceText: string;
-  }>>(new Map());
-
-  // Track which page the currently selected paragraph/figure belongs to
-  const selectedParagraphPageRef = useRef(-1);
-  const selectedFigurePageRef = useRef(-1);
-
-  const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
-
-  // Current paper for reference sidebar
-  const currentPaper = useMemo(() => papersList.find(p => p.path === documentPath) || null, [papersList, documentPath]);
-
-  // ── Grobid: trigger parse when a PDF is opened (async, non-blocking) ──────
-  const triggerGrobidParse = useCallback((path: string, force: boolean = false) => {
-    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
-    if (!force && grobidParsedPathRef.current === path && grobidDocument) return;
-    grobidParsedPathRef.current = path;
-    grobidCancelledRef.current = false;
-    setGrobidDocument(null);
-    setGrobidError("");
-    setGrobidLoading(true);
-    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path, force, structureOnly: false })
-      .then((result) => {
-        if (grobidCancelledRef.current) return;
-        setGrobidDocument(result);
-        setGrobidLoading(false);
-      })
-      .catch((e) => {
-        if (grobidCancelledRef.current) return;
-        setGrobidError(String(e));
-        setGrobidLoading(false);
-      });
-  }, [grobidDocument]);
-
-  // ── Grobid: re-parse structure only (keeps cached metadata/refs) ──────
-  const triggerGrobidStructureOnly = useCallback(() => {
-    const path = documentPath;
-    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
-    grobidCancelledRef.current = false;
-    setGrobidLoading(true);
-    invoke<GrobidDocumentOutput>("grobid_parse_document", { filePath: path, force: true, structureOnly: true })
-      .then((result) => {
-        if (grobidCancelledRef.current) return;
-        setGrobidDocument(result);
-        setGrobidLoading(false);
-      })
-      .catch((e) => {
-        if (grobidCancelledRef.current) return;
-        setGrobidError(String(e));
-        setGrobidLoading(false);
-      });
-  }, [documentPath]);
-
-  // ── Clear Grobid cache and force re-parse (structure + references) ──────
-  const handleClearGrobidCacheAndReparse = useCallback(async () => {
-    if (!documentPath || !documentPath.toLowerCase().endsWith(".pdf")) return;
-    try {
-      await invoke("grobid_clear_cache", { filePath: documentPath });
-    } catch (e) {
-      console.warn("[App] grobid_clear_cache failed:", e);
-    }
-    grobidParsedPathRef.current = "";
-    triggerGrobidParse(documentPath, true);
-  }, [documentPath, triggerGrobidParse]);
-
-  // ── Clear metadata cache and re-extract ─────────────────────────────────
-  const handleClearMetadataAndReparse = useCallback(async () => {
-    const paper = papersList.find(p => p.path === documentPath);
-    if (!paper) return;
-    // Reset metadata fields in DB
-    const resetPaper: PaperInfo = {
-      ...paper,
-      metadata: undefined,
-      metadataExtracted: false,
-    };
-    setPapersList(prev => prev.map(p => p.id === paper.id ? resetPaper : p));
-    try { await savePaper(paperInfoToRecord(resetPaper)); } catch (e) { console.warn("[App] reset metadata failed:", e); }
-    // Also clear Grobid cache and re-parse (Grobid also extracts metadata)
-    try { await invoke("grobid_clear_cache", { filePath: documentPath }); } catch (_) { /* ignore */ }
-    grobidParsedPathRef.current = "";
-    triggerGrobidParse(documentPath, true);
-    // Trigger PDF-based metadata extraction
-    setExtractingPaperId(paper.id);
-    try {
-      const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
-      const metadata = await extractMetadataEnhanced(paper.path, base64Data);
-      const updatedPaper: PaperInfo = { ...resetPaper, metadata, metadataExtracted: true };
-      setPapersList(prev => prev.map(p => p.id === paper.id ? updatedPaper : p));
-      try { await savePaper(paperInfoToRecord(updatedPaper)); } catch (e) { console.warn("[App] save metadata failed:", e); }
-    } catch (e) {
-      console.error("[App] metadata re-extraction failed:", e);
-      const flagPaper: PaperInfo = { ...resetPaper, metadataExtracted: true };
-      setPapersList(prev => prev.map(p => p.id === paper.id ? flagPaper : p));
-      try { await savePaper(paperInfoToRecord(flagPaper)); } catch (_) { /* ignore */ }
-    } finally {
-      setExtractingPaperId(null);
-    }
-  }, [documentPath, papersList, triggerGrobidParse]);
-
-  // ── Grobid batch parsing: queue management ─────────────────────────────
-  // Process the batch queue: parse one PDF at a time, update status map
-  const processGrobidBatch = useCallback(async () => {
-    if (grobidBatchRunningRef.current) return;
-    grobidBatchRunningRef.current = true;
-
-    while (grobidBatchQueueRef.current.length > 0) {
-      const path = grobidBatchQueueRef.current.shift()!;
-      // Skip if already done
-      setGrobidStatusMap(prev => {
-        if (prev[path] === "done") return prev;
-        return { ...prev, [path]: "parsing" };
-      });
-
-      try {
-        const result = await invoke<GrobidDocumentOutput>("grobid_parse_document", {
-          filePath: path, force: false, structureOnly: false
-        });
-        setGrobidStatusMap(prev => ({ ...prev, [path]: "done" }));
-
-        // If this is the currently-viewed PDF, update the sidebar document
-        if (grobidParsedPathRef.current === path) {
-          setGrobidDocument(result);
-          setGrobidLoading(false);
-        }
-
-        // Cross-validate: merge GROBID metadata into paper metadata
-        crossValidateGrobidMeta(path, result);
-      } catch (e) {
-        console.error(`[Grobid batch] failed for ${path}:`, e);
-        setGrobidStatusMap(prev => ({ ...prev, [path]: "error" }));
-      }
-    }
-
-    grobidBatchRunningRef.current = false;
-  }, []);
-
-  // Cross-validate GROBID metadata with existing paper metadata
-  const crossValidateGrobidMeta = useCallback((path: string, doc: GrobidDocumentOutput) => {
-    const paper = papersList.find(p => p.path === path);
-    if (!paper?.metadata || !doc.metadata) return;
-
-    const existing = paper.metadata;
-    const grobid = doc.metadata;
-    const merged: PaperMetadata = { ...existing };
-
-    // Title: prefer GROBID if it looks more complete (longer, has real words)
-    if (grobid.title && existing.title) {
-      const grobidClean = grobid.title.replace(/\s+/g, " ").trim();
-      const existingClean = (existing.title || "").replace(/\s+/g, " ").trim();
-      // Keep the longer/cleaner title
-      if (grobidClean.length > existingClean.length && grobidClean.length > 10) {
-        merged.title = grobidClean;
-      }
-    } else if (grobid.title && !existing.title) {
-      merged.title = grobid.title;
-    }
-
-    // DOI: prefer existing (from CrossRef/XMP), fallback to GROBID
-    if (!merged.doi && grobid.doi) {
-      merged.doi = grobid.doi;
-    }
-
-    // Authors: merge — prefer CrossRef authors if available, supplement with GROBID
-    if (grobid.authors && grobid.authors.length > 0) {
-      if (!merged.authors || merged.authors.length === 0) {
-        merged.authors = grobid.authors.map(a => a.full_name || `${a.first_name || ""} ${a.last_name || ""}`.trim());
-      }
-    }
-
-    // Date: prefer existing, fallback to GROBID
-    if (!merged.date && grobid.date?.raw) {
-      merged.date = grobid.date.raw;
-    }
-
-    // Journal/venue
-    if (!merged.journal && grobid.venue?.name) {
-      merged.journal = grobid.venue.name;
-    }
-
-    // Keywords
-    if (grobid.keywords && grobid.keywords.length > 0) {
-      if (!merged.keywords || merged.keywords.length === 0) {
-        merged.keywords = grobid.keywords;
-      } else {
-        // Merge unique keywords
-        const existingLower = new Set(merged.keywords.map(k => k.toLowerCase()));
-        for (const kw of grobid.keywords) {
-          if (!existingLower.has(kw.toLowerCase())) {
-            merged.keywords.push(kw);
-          }
-        }
-      }
-    }
-
-    // Abstract
-    if (!merged.abstract && grobid.abstract_text) {
-      merged.abstract = grobid.abstract_text;
-    }
-
-    // Update paper metadata in the list
-    setPapersList(prev => prev.map(p =>
-      p.path === path ? { ...p, metadata: merged } : p
-    ));
-
-    // Persist to database
-    invoke("paper_save", {
-      id: paper.id,
-      updates: {
-        title: merged.title || null,
-        authors: merged.authors ? JSON.stringify(merged.authors) : null,
-        doi: merged.doi || null,
-        date: merged.date || null,
-        journal: merged.journal || null,
-        keywords: merged.keywords ? JSON.stringify(merged.keywords) : null,
-        abstract_text: merged.abstract || null,
-        metadata_extracted: true,
-      }
-    }).catch(e => console.warn("[Grobid] failed to save merged metadata:", e));
-  }, [papersList]);
-
-  // Start batch parsing all PDFs that haven't been parsed yet
-  const startGrobidBatch = useCallback((papers: PaperInfo[]) => {
-    const pdfPaths = papers
-      .filter(p => p.path.toLowerCase().endsWith(".pdf"))
-      .map(p => p.path);
-
-    // Add paths not yet in the status map to the queue
-    const newPaths = pdfPaths.filter(p =>
-      !grobidStatusMap[p] || grobidStatusMap[p] === "pending"
-    );
-
-    if (newPaths.length === 0) return;
-
-    // Initialize status for new paths
-    setGrobidStatusMap(prev => {
-      const updated = { ...prev };
-      for (const p of newPaths) {
-        if (!updated[p]) updated[p] = "pending";
-      }
-      return updated;
-    });
-
-    // Add to queue (avoid duplicates)
-    for (const p of newPaths) {
-      if (!grobidBatchQueueRef.current.includes(p)) {
-        grobidBatchQueueRef.current.push(p);
-      }
-    }
-
-    // Ensure engine is ready first, then process
-    invoke("grobid_ensure_ready").then(() => {
-      processGrobidBatch();
-    }).catch(e => {
-      console.error("[Grobid] engine init failed:", e);
-      // Mark all pending/queued paths as error so UI reflects the failure
-      setGrobidStatusMap(prev => {
-        const updated = { ...prev };
-        for (const p of grobidBatchQueueRef.current) {
-          if (updated[p] === "pending" || updated[p] === "parsing") {
-            updated[p] = "error";
-          }
-        }
-        return updated;
-      });
-      grobidBatchQueueRef.current = [];
-    });
-  }, [grobidStatusMap, processGrobidBatch]);
-
-  // Priority parse: insert at the front of the queue and process immediately
-  const priorityGrobidParse = useCallback((path: string) => {
-    if (!path || !path.toLowerCase().endsWith(".pdf")) return;
-
-    // Remove from queue if already there
-    grobidBatchQueueRef.current = grobidBatchQueueRef.current.filter(p => p !== path);
-    // Insert at front
-    grobidBatchQueueRef.current.unshift(path);
-
-    setGrobidStatusMap(prev => ({ ...prev, [path]: "parsing" }));
-
-    // Ensure engine + process
-    invoke("grobid_ensure_ready").then(() => {
-      processGrobidBatch();
-    }).catch(e => {
-      console.error("[Grobid] engine init failed:", e);
-      setGrobidStatusMap(prev => ({ ...prev, [path]: "error" }));
-    });
-  }, [processGrobidBatch]);
-
-  // Auto-start batch parsing when papers list changes (new imports, app startup)
-  useEffect(() => {
-    if (papersList.length > 0) {
-      // Delay slightly to avoid blocking initial render
-      const timer = setTimeout(() => startGrobidBatch(papersList), 2000);
-      return () => clearTimeout(timer);
-    }
-  }, [papersList.length]); // Only trigger on count change, not full list
-
-  // ── Tab System Handlers ────────────────────────────────────────────────────
-  const openPaperTab = useCallback((paper: PaperInfo) => {
-    // Check if tab already exists for this paper
-    const existingTab = tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
-    if (existingTab) {
-      setActiveTabId(existingTab.id);
-      // If document is not currently loaded (e.g. user is on home tab), reload it
-      if (documentPath !== paper.path || !previewSrc) {
-        setDocumentPath(paper.path);
-        setPreviewSrc("");
-        setBoxes([]);
-        setSegments([]);
-        setSelectedParagraph(null);
-        setSelectedFigure(null);
-        setFigureImageDataUrl("");
-        setAiResult("");
-        setAiAction("");
-        setPdfPageIndex(0);
-        setPdfPageCount(0);
-        paragraphAiCacheRef.current.clear();
-        if (paper.path.toLowerCase().endsWith(".pdf")) {
-          loadPageData(paper.path, 0);
-          triggerGrobidParse(paper.path);
-        } else if (modelLoaded) {
-          runModel(0, paper.path);
-        }
-      }
-      return;
-    }
-
-    // Extract filename from path
-    const pathParts = paper.path.replace(/\\/g, "/").split("/");
-    const fileName = pathParts[pathParts.length - 1] || paper.name;
-    const tabTitle = fileName.replace(/\.[^.]+$/, "");
-
-    const newTab: TabInfo = {
-      id: `reader-${Date.now()}`,
-      title: tabTitle,
-      type: "reader",
-      documentPath: paper.path,
-    };
-
-    setTabs(prev => [...prev, newTab]);
-    setActiveTabId(newTab.id);
-
-    // Update lastReadDate
-    setPapersList(prev => prev.map(p =>
-      p.id === paper.id ? { ...p, lastReadDate: new Date().toISOString() } : p
-    ));
-
-    // Load document
-    setDocumentPath(paper.path);
-    setPreviewSrc("");
-    setBoxes([]);
-    setSegments([]);
-    setSelectedParagraph(null);
-    setSelectedFigure(null);
-    setFigureImageDataUrl("");
-    setAiResult("");
-    setAiAction("");
-    setImageSize({ width: 0, height: 0 });
-    setDisplaySize({ width: 0, height: 0 });
-    setPdfPageIndex(0);
-    setPdfPageCount(0);
-    paragraphAiCacheRef.current.clear();
-
-    if (paper.path.toLowerCase().endsWith(".pdf")) {
-      loadPageData(paper.path, 0).then(() => {
-        if (modelLoaded) {
-          invoke("prefetch_document", {
-            filePath: paper.path,
-            currentPage: 0,
-            scoreThreshold,
-          }).catch(() => {});
-        }
-      });
-      // Auto-trigger Grobid parse (async, non-blocking) — also prioritize in batch queue
-      triggerGrobidParse(paper.path);
-      priorityGrobidParse(paper.path);
-    } else if (modelLoaded) {
-      runModel(0, paper.path);
-    } else {
-      // Image without layout model — show placeholder message
-      setErrorMessage("布局模型未安装，无法分析图片文件。可先安装布局模型或打开 PDF 文档。");
-    }
-  }, [tabs, modelLoaded, scoreThreshold, triggerGrobidParse, priorityGrobidParse, documentPath, previewSrc]);
-
-  const closeTab = useCallback((tabId: string) => {
-    // Flush reading session if closing the active reader tab
-    if (tabId === activeTabId) {
-      flushReadingSession();
-    }
-    setTabs(prev => {
-      const idx = prev.findIndex(t => t.id === tabId);
-      if (idx === -1) return prev;
-
-      const newTabs = prev.filter(t => t.id !== tabId);
-      // Ensure at least home tab exists
-      if (newTabs.length === 0) {
-        newTabs.push({ id: HOME_TAB_ID, title: "主页", type: "home" });
-      }
-
-      if (activeTabId === tabId) {
-        const newActiveIdx = Math.min(idx, newTabs.length - 1);
-        const newActive = newTabs[newActiveIdx];
-        setActiveTabId(newActive.id);
-        if (newActive.type === "home") {
-          grobidCancelledRef.current = true;
-          setDocumentPath("");
-          setPreviewSrc("");
-          setBoxes([]);
-          setSegments([]);
-          setSelectedParagraph(null);
-          setSelectedFigure(null);
-          setFigureImageDataUrl("");
-          setAiResult("");
-          setAiAction("");
-          setErrorMessage("");
-        } else if (newActive.documentPath) {
-          // Switch to that tab's document
-          const newPath = newActive.documentPath;
-          setDocumentPath(newPath);
-          setPreviewSrc("");
-          setBoxes([]);
-          setSegments([]);
-          setSelectedParagraph(null);
-          setSelectedFigure(null);
-          setFigureImageDataUrl("");
-          setAiResult("");
-          setAiAction("");
-          setPdfPageIndex(0);
-          setPdfPageCount(0);
-          paragraphAiCacheRef.current.clear();
-          if (newPath.toLowerCase().endsWith(".pdf")) {
-            loadPageData(newPath, 0);
-            triggerGrobidParse(newPath);
-          } else if (modelLoaded) {
-            runModel(0, newPath);
-          }
-        }
-      }
-
-      return newTabs;
-    });
-  }, [activeTabId, modelLoaded, triggerGrobidParse]);
-
-  const switchToTab = useCallback((tabId: string) => {
-    if (tabId === activeTabId) return;
-    setActiveTabId(tabId);
-
-    const tab = tabs.find(t => t.id === tabId);
-    if (!tab) return;
-
-    if (tab.type === "home") {
-      grobidCancelledRef.current = true;
-      setDocumentPath("");
-      setPreviewSrc("");
-      setBoxes([]);
-      setSegments([]);
-      setSelectedParagraph(null);
-      setSelectedFigure(null);
-      setFigureImageDataUrl("");
-      setAiResult("");
-      setAiAction("");
-      setErrorMessage("");
-    } else if (tab.documentPath && tab.documentPath !== documentPath) {
-      // Load the tab's document
-      setDocumentPath(tab.documentPath);
-      setPreviewSrc("");
-      setBoxes([]);
-      setSegments([]);
-      setSelectedParagraph(null);
-      setSelectedFigure(null);
-      setFigureImageDataUrl("");
-      setAiResult("");
-      setAiAction("");
-      setPdfPageIndex(0);
-      setPdfPageCount(0);
-      paragraphAiCacheRef.current.clear();
-      if (tab.documentPath.toLowerCase().endsWith(".pdf")) {
-        loadPageData(tab.documentPath, 0);
-        triggerGrobidParse(tab.documentPath);
-      } else if (modelLoaded) {
-        runModel(0, tab.documentPath);
-      }
-    }
-  }, [activeTabId, tabs, documentPath, modelLoaded, triggerGrobidParse]);
-
-  const handleImportPapers = useCallback(async () => {
-    const selected = await open({
-      multiple: true,
-      filters: [{ name: "Documents", extensions: ["pdf", "png", "jpg", "jpeg", "bmp", "webp"] }],
-    });
-    if (selected && Array.isArray(selected)) {
-      const existingPaths = new Set(papersList.map(p => p.originalPath));
-      const newPapers: PaperInfo[] = [];
-      for (const sourcePath of selected) {
-        // Skip duplicates — same source file already imported
-        if (existingPaths.has(sourcePath)) {
-          console.log(`[App] skipping duplicate import: ${sourcePath}`);
-          continue;
-        }
-        const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
-        try {
-          const managedPath = await copyToManaged(sourcePath, id);
-          let fileSize: number | undefined;
-          try { fileSize = await invoke<number>("paper_file_size", { filePath: managedPath }); } catch {}
-          const paper: PaperInfo = {
-            id,
-            name,
-            path: managedPath,
-            originalPath: sourcePath,
-            managedPath,
-            importDate: new Date().toISOString(),
-            fileSize,
-          };
-          await savePaper(paperInfoToRecord(paper));
-          newPapers.push(paper);
-        } catch (e) {
-          console.error(`[App] failed to import ${name}:`, e);
-        }
-      }
-      if (newPapers.length > 0) {
-        setPapersList(prev => [...prev, ...newPapers]);
-      }
-    }
-  }, [papersList]);
-
-  const handleDeletePaper = useCallback(async (id: string) => {
-    const paper = papersList.find(p => p.id === id);
-    if (!paper) return;
-    setPapersList(prev => prev.filter(p => p.id !== id));
-    // Close any open tab for this paper
-    const tab = tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
-    if (tab) {
-      closeTab(tab.id);
-    }
-    // Delete from DB (also removes managed file)
-    try {
-      await dbDeletePaper(id);
-    } catch (e) {
-      console.error("[App] failed to delete paper from DB:", e);
-    }
-  }, [papersList, tabs, closeTab]);
-
-  const handleDropImport = useCallback(async (paths: string[]) => {
-    const existingPaths = new Set(papersList.map(p => p.originalPath));
-    const newPapers: PaperInfo[] = [];
-    for (const sourcePath of paths) {
-      // Skip duplicates — same source file already imported
-      if (existingPaths.has(sourcePath)) {
-        console.log(`[App] skipping duplicate import: ${sourcePath}`);
-        continue;
-      }
-      const id = `paper-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      const name = sourcePath.replace(/\\/g, "/").split("/").pop() || sourcePath;
-      try {
-        const managedPath = await copyToManaged(sourcePath, id);
-        let fileSize: number | undefined;
-        try { fileSize = await invoke<number>("paper_file_size", { filePath: managedPath }); } catch {}
-        const paper: PaperInfo = {
-          id,
-          name,
-          path: managedPath,
-          originalPath: sourcePath,
-          managedPath,
-          importDate: new Date().toISOString(),
-          fileSize,
-        };
-        await savePaper(paperInfoToRecord(paper));
-        newPapers.push(paper);
-      } catch (e) {
-        console.error(`[App] failed to import dropped file ${name}:`, e);
-      }
-    }
-    if (newPapers.length > 0) {
-      setPapersList(prev => [...prev, ...newPapers]);
-    }
-  }, [papersList]);
-
-  const handleExtractMetadata = useCallback(async (paperId: string) => {
-    const paper = papersList.find(p => p.id === paperId);
-    if (!paper || paper.metadataExtracted) return;
-
-    setExtractingPaperId(paperId);
-    const t0 = performance.now();
-    try {
-      console.log("[App] reading file base64...", paper.path);
-      const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
-      console.log(`[App] base64 ready (${(base64Data.length / 1024).toFixed(0)} KB, +${(performance.now() - t0).toFixed(0)}ms)`);
-      console.log("[App] starting extractMetadataEnhanced...");
-      const metadata = await extractMetadataEnhanced(paper.path, base64Data);
-      console.log(`[App] extractMetadataEnhanced done (+${(performance.now() - t0).toFixed(0)}ms), title=${JSON.stringify(metadata.title)}`);
-
-      // Rename managed file to title if available
-      let renamedPaper = { ...paper, metadata, metadataExtracted: true };
-      if (metadata.title && paper.managedPath) {
-        try {
-          const newPath = await renamePaper(paper.managedPath, metadata.title);
-          renamedPaper.path = newPath;
-          renamedPaper.managedPath = newPath;
-          renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
-          console.log(`[App] renamed managed file to: ${renamedPaper.name}`);
-        } catch (e) {
-          console.warn("[App] rename failed:", e);
-        }
-      }
-
-      setPapersList(prev => prev.map(p =>
-        p.id === paperId ? renamedPaper : p
-      ));
-      // Persist metadata to DB
-      try { await savePaper(paperInfoToRecord(renamedPaper)); } catch (e) { console.warn("[App] save metadata failed:", e); }
-    } catch (e) {
-      console.error("Metadata extraction failed:", e);
-      const updatedPaper: PaperInfo = { ...paper, metadataExtracted: true };
-      setPapersList(prev => prev.map(p =>
-        p.id === paperId ? updatedPaper : p
-      ));
-      try { await savePaper(paperInfoToRecord(updatedPaper)); } catch (e2) { console.warn("[App] save metadata flag failed:", e2); }
-    } finally {
-      setExtractingPaperId(null);
-    }
-  }, [papersList]);
-
-  // Update a paper's titleTranslation in the list and persist to DB
-  const handleUpdateTitleTranslation = useCallback(async (paperId: string, translation: string) => {
-    setPapersList(prev => prev.map(p => {
-      if (p.id !== paperId) return p;
-      const updated: PaperInfo = {
-        ...p,
-        metadata: { ...p.metadata, titleTranslation: translation },
-      };
-      // Persist async (fire-and-forget)
-      savePaper(paperInfoToRecord(updated)).catch(e => console.warn("[App] persist titleTranslation failed:", e));
-      return updated;
-    }));
-  }, []);
-
-  // Update a paper's abstractTranslation in the list and persist to DB
-  const handleUpdateAbstractTranslation = useCallback(async (paperId: string, translation: string) => {
-    setPapersList(prev => prev.map(p => {
-      if (p.id !== paperId) return p;
-      const updated: PaperInfo = {
-        ...p,
-        metadata: { ...p.metadata, abstractTranslation: translation },
-      };
-      savePaper(paperInfoToRecord(updated)).catch(e => console.warn("[App] persist abstractTranslation failed:", e));
-      return updated;
-    }));
-  }, []);
-
-  const isVisualBox = (clsId: number) => {
-    // chart, display_formula, footer_image, header_image, image, inline_formula, seal, table
-    const visual = new Set([3, 5, 9, 13, 14, 15, 20, 21]);
-    return visual.has(clsId);
-  };
-
-  const isGarbageBox = (clsId: number) => {
-    // footer, footer_image, header, header_image, number (page number), seal, formula_number
-    const garbage = new Set([8, 9, 12, 13, 16, 20, 11]);
-    return garbage.has(clsId);
-  };
-
-  const isSegmentGarbage = (seg: TextSegment, layoutBoxes: LayoutBox[]): boolean => {
-    const cx = (seg.xmin + seg.xmax) / 2;
-    const cy = (seg.ymin + seg.ymax) / 2;
-    return layoutBoxes.some(
-      (box) =>
-        isGarbageBox(box.cls_id) &&
-        cx >= box.xmin && cx <= box.xmax &&
-        cy >= box.ymin && cy <= box.ymax
-    );
-  };
-
-  const selectFigure = async (box: LayoutBox) => {
-    // Save current paragraph's AI result to cache before switching to figure
-    if (selectedParagraph && aiResult) {
-      const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
-      paragraphAiCacheRef.current.set(currentKey, {
-        aiAction: aiAction,
-        aiResult: aiResult,
-        qaHistory: qaHistory,
-        qaSourceText: qaSourceTextRef.current,
-      });
-    }
-    selectedFigurePageRef.current = pdfPageIndex;
-    setSelectedParagraph(null);
-    setSelectedFigure(box);
-    setAiResult("");
-    setAiAction("");
-
-    const naturalW = imageSize.width;
-    const naturalH = imageSize.height;
-    if (naturalW === 0 || naturalH === 0 || !previewSrc) return;
-
-    try {
-      const sx = box.xmin;
-      const sy = box.ymin;
-      const sw = box.xmax - box.xmin;
-      const sh = box.ymax - box.ymin;
-
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, sw);
-      canvas.height = Math.max(1, sh);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-
-      const fullImg = new Image();
-      fullImg.src = previewSrc;
-      await new Promise<void>((resolve, reject) => {
-        fullImg.onload = () => resolve();
-        fullImg.onerror = () => reject(new Error("image load failed"));
-      });
-      ctx.drawImage(fullImg, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-      setFigureImageDataUrl(canvas.toDataURL("image/png"));
-    } catch {
-      setFigureImageDataUrl("");
-    }
-  };
-
-  const selectModel = async () => {
-    setErrorMessage("");
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "ONNX Model", extensions: ["onnx"] }],
-    });
-
-    if (selected && typeof selected === "string") {
-      setModelPath(selected);
-      try {
-        setLoading(true);
-        await invoke("load_model", { modelPath: selected });
-        setModelLoaded(true);
-      } catch (e) {
-        setModelLoaded(false);
-        setErrorMessage(`模型加载失败: ${String(e)}`);
-      } finally {
-        setLoading(false);
-      }
-    }
-  };
-
+  // ── runModel — runs layout detection on a document ─────────────────────────
   const runModel = async (targetPageIndex?: number, targetFilePath?: string, thresholdOverride?: number) => {
     const activeFilePath = targetFilePath ?? documentPath;
-    if (!modelLoaded || !activeFilePath) return;
+    if (!settings.modelLoaded || !activeFilePath) return;
 
     const activeIsPdf = activeFilePath.toLowerCase().endsWith(".pdf");
-    const activeThreshold = thresholdOverride ?? scoreThreshold;
+    const activeThreshold = thresholdOverride ?? settings.scoreThreshold;
 
-    setErrorMessage("");
+    settings.setErrorMessage("");
     try {
-      setLoading(true);
+      settings.setLoading(true);
       const pageIndex = activeIsPdf ? Math.max(0, targetPageIndex ?? pdfPageIndex) : 0;
       const result = await invoke<DetectionResponse>("run_doclayout", {
         filePath: activeFilePath,
@@ -1430,31 +241,28 @@ function App() {
       setPdfPageCount(result.page_count);
       setBoxes(result.boxes);
     } catch (e) {
-      setErrorMessage(`检测失败: ${String(e)}`);
+      settings.setErrorMessage(`检测失败: ${String(e)}`);
     } finally {
-      setLoading(false);
+      settings.setLoading(false);
     }
   };
 
+  // ── loadPageData — loads a PDF page (text + layout) ────────────────────────
   const loadPageData = async (filePath: string, newPage: number) => {
-    const version = ++requestVersionRef.current;
-    const isCurrent = () => requestVersionRef.current === version;
+    const version = ++zoom.requestVersionRef.current;
+    const isCurrent = () => zoom.requestVersionRef.current === version;
     const isPdf = filePath.toLowerCase().endsWith(".pdf");
 
-    // Immediately update page index for instant UI feedback
     setPdfPageIndex(newPage);
-    // Don't clear selectedParagraph/figure/aiResult — keep them displayed
-    // across page switches; they refresh only when user clicks a new paragraph
-    setErrorMessage("");
-    setLoading(true);
+    settings.setErrorMessage("");
+    settings.setLoading(true);
 
     try {
-      if (isPdf && modelLoaded) {
-        // Step 1: text extraction + inference (populates inference_cache as side effect)
+      if (isPdf && settings.modelLoaded) {
         const textResult = await invoke<ExtractContentResponse>("get_pdf_paragraphs", {
           filePath,
           pageIndex: newPage,
-          scoreThreshold,
+          scoreThreshold: settings.scoreThreshold,
         });
         if (!isCurrent()) return;
 
@@ -1464,10 +272,9 @@ function App() {
         setPdfPageCount(textResult.page_count);
         setSegments(textResult.segments);
 
-        // Step 2: layout boxes — cache hit now that step 1 populated inference_cache
         const modelResult = await invoke<DetectionResponse>("run_doclayout", {
           filePath,
-          scoreThreshold,
+          scoreThreshold: settings.scoreThreshold,
           pageIndex: newPage,
         });
         if (!isCurrent()) return;
@@ -1475,7 +282,6 @@ function App() {
         setPreviewSrc(modelResult.preview_data_url);
         setBoxes(modelResult.boxes);
       } else if (isPdf) {
-        // No model loaded — just get text
         const textResult = await invoke<ExtractContentResponse>("get_pdf_text", {
           filePath,
           pageIndex: newPage,
@@ -1487,11 +293,10 @@ function App() {
         setPdfPageIndex(textResult.page_index);
         setPdfPageCount(textResult.page_count);
         setSegments(textResult.segments);
-      } else if (modelLoaded) {
-        // Image file
+      } else if (settings.modelLoaded) {
         const modelResult = await invoke<DetectionResponse>("run_doclayout", {
           filePath,
-          scoreThreshold,
+          scoreThreshold: settings.scoreThreshold,
           pageIndex: 0,
         });
         if (!isCurrent()) return;
@@ -1504,14 +309,15 @@ function App() {
       }
     } catch (e) {
       if (!isCurrent()) return;
-      setErrorMessage(`页面加载失败: ${String(e)}`);
+      settings.setErrorMessage(`页面加载失败: ${String(e)}`);
     } finally {
       if (isCurrent()) {
-        setLoading(false);
+        settings.setLoading(false);
       }
     }
   };
 
+  // ── clearCurrentDocument — resets all document-related state ───────────────
   const clearCurrentDocument = () => {
     setDocumentPath("");
     setPreviewSrc("");
@@ -1520,33 +326,28 @@ function App() {
     setSelectedParagraph(null);
     setSelectedFigure(null);
     setFigureImageDataUrl("");
-    setAiResult("");
-    setAiAction("");
+    aiChat.setAiResult("");
+    aiChat.setAiAction("");
     setImageSize({ width: 0, height: 0 });
-    setDisplaySize({ width: 0, height: 0 });
+    zoom.setDisplaySize({ width: 0, height: 0 });
     setPdfPageIndex(0);
     setPdfPageCount(0);
-    setErrorMessage("");
-    setThumbnails([]);
-    setOutlineItems([]);
-    setSidebarOpen(false);
-    setRefSidebarOpen(false);
+    settings.setErrorMessage("");
+    sidebar.setThumbnails([]);
+    sidebar.setOutlineItems([]);
+    sidebar.setSidebarOpen(false);
+    sidebar.setRefSidebarOpen(false);
     // Clear grobid state
-    grobidCancelledRef.current = true;
-    setGrobidDocument(null);
-    setGrobidError("");
-    setGrobidLoading(false);
-    grobidParsedPathRef.current = "";
+    grobid.grobidCancelledRef.current = true;
+    grobid.setGrobidDocument(null);
+    grobid.setGrobidError("");
+    grobid.setGrobidLoading(false);
+    grobid.grobidParsedPathRef.current = "";
     // Clear annotation state
-    setAnnotationMode(null);
-    setAnnotations([]);
-    setAnnotationHistory([]);
-    setAnnotationRedoStack([]);
-    pageAnnotationsRef.current.clear();
-    annotationPageRef.current = 0;
+    annotations.clearAnnotationState();
     // Clear select mode state
     setSelectMode("box");
-    setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
     // Clean up pdfjs document
     if (pdfJsDocRef.current) {
       try {
@@ -1558,15 +359,9 @@ function App() {
     }
   };
 
-  const applyScoreThreshold = async (nextThreshold: number) => {
-    setScoreThreshold(nextThreshold);
-    if (documentPath && modelLoaded) {
-      await runModel(isPdfSelected ? pdfPageIndex : 0, documentPath, nextThreshold);
-    }
-  };
-
+  // ── selectDocument — open file dialog and load a document ──────────────────
   const selectDocument = async () => {
-    setErrorMessage("");
+    settings.setErrorMessage("");
     const selected = await open({
       multiple: false,
       filters: [{ name: "Documents", extensions: ["pdf", "png", "jpg", "jpeg", "bmp", "webp"] }],
@@ -1580,34 +375,32 @@ function App() {
       setSelectedParagraph(null);
       setSelectedFigure(null);
       setFigureImageDataUrl("");
-      setAiResult("");
-      setAiAction("");
+      aiChat.setAiResult("");
+      aiChat.setAiAction("");
       setImageSize({ width: 0, height: 0 });
-      setDisplaySize({ width: 0, height: 0 });
+      zoom.setDisplaySize({ width: 0, height: 0 });
       setPdfPageIndex(0);
       setPdfPageCount(0);
 
       if (selected.toLowerCase().endsWith(".pdf")) {
          await loadPageData(selected, 0);
-         // Aggressive prefetch: fire background sweep of all remaining pages
-         if (modelLoaded) {
+         if (settings.modelLoaded) {
            invoke("prefetch_document", {
              filePath: selected,
              currentPage: 0,
-             scoreThreshold,
+             scoreThreshold: settings.scoreThreshold,
            }).catch(() => { /* best-effort */ });
          }
-         // Auto-trigger Grobid parse (async, non-blocking)
-         triggerGrobidParse(selected);
-      } else if (modelLoaded) {
+         grobid.triggerGrobidParse(selected);
+      } else if (settings.modelLoaded) {
          await runModel(0, selected);
       } else {
-         // Image without layout model — show placeholder message
-         setErrorMessage("布局模型未安装，无法分析图片文件。可先安装布局模型或打开 PDF 文档。");
+         settings.setErrorMessage("布局模型未安装，无法分析图片文件。可先安装布局模型或打开 PDF 文档。");
       }
     }
   };
 
+  // ── Menu handlers ──────────────────────────────────────────────────────────
   const handleMenuOpenChange = (menuKey: Exclude<TopMenuKey, null>, nextOpen: boolean) => {
     setOpenMenu(nextOpen ? menuKey : null);
   };
@@ -1618,268 +411,53 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    if (!environmentReady) return;
-    (async () => {
-      // ── Read everything from the C:\xDoc\settings.db cache via Tauri commands ──
-      // The Tauri side will fall back to exe dir if the C drive is unavailable.
-      type DbEntry = { key: string; value: string };
-      let rows: DbEntry[] = [];
-      try {
-        rows = await invoke<DbEntry[]>("db_get_all_settings");
-      } catch (e) {
-        console.warn("[settings] db_get_all_settings failed, falling back to defaults:", e);
-      }
-      const map: Record<string, string> = {};
-      for (const r of rows) map[r.key] = r.value;
+  // ── Grobid cross-validate wrapper (updates papers list) ───────────────────
+  const crossValidateAndUpdate = useCallback((path: string, doc: import("./types").GrobidDocumentOutput) => {
+    const updated = grobid.crossValidateGrobidMeta(path, doc, papers.papersList);
+    papers.setPapersList(updated);
+  }, [grobid.crossValidateGrobidMeta, papers.papersList]);
 
-      const readNum = (key: string): number | null => {
-        const v = map[key];
-        if (v === undefined) return null;
-        const n = Number(v);
-        return Number.isNaN(n) ? null : n;
-      };
-      const readBool = (key: string, def: boolean): boolean => {
-        const v = map[key];
-        return v === undefined ? def : v === "true";
-      };
-      const readStr = (key: string, def: string): string => {
-        const v = map[key];
-        return v === undefined || v === null ? def : v;
-      };
-
-      const savedThreshold = readNum("ui.scoreThreshold");
-      if (savedThreshold !== null) {
-        setScoreThreshold(Math.min(1, Math.max(0, savedThreshold)));
-      }
-
-      setPdfTextExtractionEnabled(readBool("ui.pdfTextExtractionEnabled", true));
-
-      const savedZoom = readStr("ui.zoomMode", "") as ZoomMode;
-      if (savedZoom && ["fit_page", "fit_width", "fit_height", "actual", "custom"].includes(savedZoom)) {
-        setZoomMode(savedZoom);
-      }
-
-      const savedModelPath = readStr("ui.modelPath", "") || "model/PP-DocLayoutV3.onnx";
-      setModelPath(savedModelPath);
-      setLoading(true);
-      invoke("load_model", { modelPath: savedModelPath })
-        .then(() => {
-          setModelLoaded(true);
-        })
-        .catch((e) => {
-          setModelLoaded(false);
-          setErrorMessage(`自动加载模型失败: ${String(e)}`);
-        })
-        .finally(() => {
-          setLoading(false);
-        });
-
-      // OCR settings
-      setOcrEnabled(readBool("ocr.enabled", true));
-      setOcrModelPath(readStr("ocr.modelPath", "") || "model/GLM-OCR-GGUF");
-
-      // Font size settings
-      const savedTextFontSize = readNum("ui.textFontSize");
-      if (savedTextFontSize !== null) {
-        setTextFontSize(Math.max(10, Math.min(40, savedTextFontSize)));
-      }
-      const savedAiFontSize = readNum("ui.aiFontSize");
-      if (savedAiFontSize !== null) {
-        setAiFontSize(Math.max(10, Math.min(40, savedAiFontSize)));
-      }
-
-      // Font family settings
-      const savedTextFontFamily = readStr("ui.textFontFamily", "");
-      if (savedTextFontFamily) setTextFontFamily(savedTextFontFamily);
-      const savedAiFontFamily = readStr("ui.aiFontFamily", "");
-      if (savedAiFontFamily) setAiFontFamily(savedAiFontFamily);
-
-      // LLM settings — bootstrap with the JSON helper, then fall back to presets.
-      const savedLlmVendor = readStr("llm.vendor", "deepseek");
-      let savedVendorApiKeys: Record<string, string> = {};
-      try {
-        const raw = map["llm.vendorApiKeys"];
-        if (raw) savedVendorApiKeys = JSON.parse(raw);
-      } catch { /* ignore parse errors */ }
-      const savedLlmBaseUrl = readStr("llm.baseUrl", "")
-        || VENDOR_PRESETS[savedLlmVendor]?.baseUrl
-        || VENDOR_PRESETS.deepseek.baseUrl;
-      const savedLlmModel = readStr("llm.model", "")
-        || VENDOR_PRESETS[savedLlmVendor]?.models?.[0]
-        || VENDOR_PRESETS.deepseek.models[0];
-      setLlmSettings({
-        vendor: savedLlmVendor,
-        vendorApiKeys: savedVendorApiKeys,
-        baseUrl: savedLlmBaseUrl,
-        model: savedLlmModel,
-      });
-
-      // ── Load papers from database ──
-      try {
-        const records = await listPapers();
-        const papers = records.map(recordToPaperInfo);
-        // Backfill fileSize for papers that don't have it
-        const needsBackfill = papers.filter(p => !p.fileSize);
-        console.log(`[App] backfill: ${needsBackfill.length} papers need fileSize`);
-        if (needsBackfill.length > 0) {
-          for (const p of needsBackfill) {
-            const target = p.managedPath || p.path;
-            try {
-              const size = await invoke<number>("paper_file_size", { filePath: target });
-              p.fileSize = size;
-              console.log(`[App] backfill: ${p.name} -> ${size} bytes (path=${target})`);
-            } catch (err) {
-              console.warn(`[App] backfill: FAILED for ${p.name} path=${target}`, err);
-            }
-          }
-          // Persist backfilled sizes
-          for (const p of needsBackfill) {
-            if (p.fileSize) {
-              try {
-                await savePaper(paperInfoToRecord(p));
-                console.log(`[App] backfill: saved ${p.name} fileSize=${p.fileSize}`);
-              } catch (err) {
-                console.warn(`[App] backfill: save FAILED for ${p.name}`, err);
-              }
-            }
-          }
-        }
-        setPapersList(papers);
-        console.log(`[App] loaded ${papers.length} papers from database`);
-      } catch (e) {
-        console.warn("[App] failed to load papers from DB:", e);
-      }
-    })();
-  }, [environmentReady]);
-
-  // Persist individual scalar UI settings to the C:\xDoc\settings.db cache.
-  // Failures are non-fatal: the user can still use the app with in-memory state.
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.scoreThreshold", value: String(scoreThreshold) })
-      .catch((e) => console.warn("[settings] persist ui.scoreThreshold failed:", e));
-  }, [scoreThreshold, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.pdfTextExtractionEnabled", value: String(pdfTextExtractionEnabled) })
-      .catch((e) => console.warn("[settings] persist ui.pdfTextExtractionEnabled failed:", e));
-  }, [pdfTextExtractionEnabled, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.zoomMode", value: zoomMode })
-      .catch((e) => console.warn("[settings] persist ui.zoomMode failed:", e));
-  }, [zoomMode, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    const op = modelPath
-      ? invoke("db_set_setting", { key: "ui.modelPath", value: modelPath })
-      : invoke("db_delete_setting", { key: "ui.modelPath" });
-    void op.catch((e) => console.warn("[settings] persist ui.modelPath failed:", e));
-  }, [modelPath, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ocr.enabled", value: String(ocrEnabled) })
-      .catch((e) => console.warn("[settings] persist ocr.enabled failed:", e));
-  }, [ocrEnabled, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ocr.modelPath", value: ocrModelPath })
-      .catch((e) => console.warn("[settings] persist ocr.modelPath failed:", e));
-  }, [ocrModelPath, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    // Use the convenience command so vendor_api_keys (a map) is serialized as JSON.
-    void invoke("db_set_ai_config", {
-      config: {
-        vendor: llmSettings.vendor,
-        vendor_api_keys: llmSettings.vendorApiKeys,
-        base_url: llmSettings.baseUrl,
-        model: llmSettings.model,
-      },
-    }).catch((e) => console.warn("[settings] persist llm config failed:", e));
-  }, [llmSettings, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.textFontSize", value: String(textFontSize) })
-      .catch((e) => console.warn("[settings] persist ui.textFontSize failed:", e));
-  }, [textFontSize, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.aiFontSize", value: String(aiFontSize) })
-      .catch((e) => console.warn("[settings] persist ui.aiFontSize failed:", e));
-  }, [aiFontSize, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.textFontFamily", value: textFontFamily })
-      .catch((e) => console.warn("[settings] persist ui.textFontFamily failed:", e));
-  }, [textFontFamily, environmentReady]);
-
-  useEffect(() => {
-    if (!environmentReady) return;
-    void invoke("db_set_setting", { key: "ui.aiFontFamily", value: aiFontFamily })
-      .catch((e) => console.warn("[settings] persist ui.aiFontFamily failed:", e));
-  }, [aiFontFamily, environmentReady]);
-
-  // ── Grobid: event listener for async parse progress ────────────────────────
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    listen<{
-      status: string;
-      message: string;
-      result: GrobidDocumentOutput | null;
-      error: string | null;
-    }>("grobid-parse-event", (event) => {
-      if (cancelled) return;
-      const { status, result, error } = event.payload;
-      if (status === "initializing" || status === "parsing") {
-        setGrobidLoading(true);
-        setGrobidError("");
-      } else if (status === "completed") {
-        setGrobidLoading(false);
-        if (result) setGrobidDocument(result);
-      } else if (status === "error") {
-        setGrobidLoading(false);
-        setGrobidError(error || "未知错误");
-      }
-    }).then((fn) => {
-      if (cancelled) { fn(); return; }
-      unlisten = fn;
+  // ── Grobid batch with engine init ─────────────────────────────────────────
+  const batchParseWithInit = useCallback((papersList: PaperInfo[]) => {
+    invoke("grobid_ensure_ready").then(() => {
+      grobid.startGrobidBatch(papersList, crossValidateAndUpdate);
+    }).catch(e => {
+      console.error("[Grobid] engine init failed:", e);
     });
-    return () => {
-      cancelled = true;
-      if (unlisten) unlisten();
-    };
-  }, []);
+  }, [grobid.startGrobidBatch, crossValidateAndUpdate]);
 
-  // Initialize OCR backend when enabled and model path is set
+  // ── Priority parse with engine init ───────────────────────────────────────
+  const _priorityParseWithInit = useCallback((path: string) => {
+    invoke("grobid_ensure_ready").then(() => {
+      grobid.priorityGrobidParse(path, papers.papersList, crossValidateAndUpdate);
+    }).catch(e => {
+      console.error("[Grobid] engine init failed:", e);
+    });
+  }, [grobid.priorityGrobidParse, papers.papersList, crossValidateAndUpdate]);
+  void _priorityParseWithInit;
+
+  // ── Auto-start batch parsing when papers list changes ─────────────────────
   useEffect(() => {
-    if (ocrEnabled && ocrModelPath) {
-      setOcrError("");
-      invoke<string>("init_ocr", { ocrModelPath })
-        .then((msg) => {
-          console.log("[OCR] initialized:", msg);
-          setOcrInitialized(true);
-        })
-        .catch((e) => {
-          console.error("[OCR] init failed:", e);
-          setOcrError(`OCR 初始化失败: ${String(e)}`);
-          setOcrInitialized(false);
-        });
-    } else {
-      setOcrInitialized(false);
+    if (papers.papersList.length > 0) {
+      const timer = setTimeout(() => batchParseWithInit(papers.papersList), 2000);
+      return () => clearTimeout(timer);
     }
-  }, [ocrEnabled, ocrModelPath]);
+  }, [papers.papersList.length]);
+
+  // ── Grobid auto-trigger when activeTabId changes ───────────────────────────
+  useEffect(() => {
+    const activeTab = tabs.tabs.find(t => t.id === tabs.activeTabId);
+    if (activeTab?.type === "reader" && activeTab.documentPath) {
+      grobid.triggerGrobidParse(activeTab.documentPath);
+    }
+  }, [tabs.activeTabId]);
+
+  // ── Load papers from DB on init ────────────────────────────────────────────
+  useEffect(() => {
+    if (environmentReady) {
+      papers.loadPapersFromDb();
+    }
+  }, [environmentReady]);
 
   // ── Load pdfjs document when a PDF file is opened ──────────────────────────
   useEffect(() => {
@@ -1919,7 +497,7 @@ function App() {
   // ── Render pdfjs TextLayer when in text mode ──────────────────────────────
   useEffect(() => {
     if (selectMode !== "text" || !isPdfSelected || !pdfJsDocRef.current ||
-        !textLayerRef.current || displaySize.width === 0 || displaySize.height === 0) {
+        !textLayerRef.current || zoom.displaySize.width === 0 || zoom.displaySize.height === 0) {
       return;
     }
 
@@ -1940,10 +518,9 @@ function App() {
         if (cancelled) return;
 
         const baseViewport = page.getViewport({ scale: 1 });
-        const scale = displaySize.width / baseViewport.width;
+        const scale = zoom.displaySize.width / baseViewport.width;
         const viewport = page.getViewport({ scale });
 
-        // Set CSS variables required by pdfjs v6 TextLayer span sizing
         container.style.setProperty("--total-scale-factor", String(scale));
         container.style.setProperty("--scale-round-x", "1px");
         container.style.setProperty("--scale-round-y", "1px");
@@ -1965,647 +542,11 @@ function App() {
       cancelled = true;
       textLayerInstanceRef.current = null;
     };
-  }, [selectMode, pdfPageIndex, displaySize.width, displaySize.height, isPdfSelected]);
+  }, [selectMode, pdfPageIndex, zoom.displaySize.width, zoom.displaySize.height, isPdfSelected]);
 
-  // Run OCR when a paragraph is selected and OCR is enabled
+  // ── Drag-to-pan (move mode) ────────────────────────────────────────────────
   useEffect(() => {
-    if (!selectedParagraph || !ocrEnabled || !ocrInitialized || !documentPath) {
-      setOcrText("");
-      return;
-    }
-
-    // If the selected paragraph is from a different page (page was switched),
-    // don't re-run OCR — keep the existing OCR text displayed
-    if (selectedParagraphPageRef.current !== pdfPageIndex) {
-      return;
-    }
-
-    let cancelled = false;
-    setOcrLoading(true);
-    setOcrError("");
-    setOcrText("");
-
-    const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
-      if (!cancelled) {
-        setOcrText(prev => prev + event.payload.piece);
-      }
-    });
-
-    invoke<{ text: string }>("run_ocr_region", {
-      filePath: documentPath,
-      pageIndex: pdfPageIndex,
-      xmin: selectedParagraph.xmin,
-      ymin: selectedParagraph.ymin,
-      xmax: selectedParagraph.xmax,
-      ymax: selectedParagraph.ymax,
-    })
-      .then((result) => {
-        if (!cancelled) {
-          setOcrText(result.text);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setOcrError(`OCR 识别失败: ${String(e)}`);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setOcrLoading(false);
-        }
-        unlistenPromise.then(unlisten => unlisten());
-      });
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then(unlisten => unlisten());
-    };
-  }, [selectedParagraph, ocrEnabled, ocrInitialized, documentPath, pdfPageIndex]);
-
-  useEffect(() => {
-    if (!imgRef.current) return;
-
-    const updateDisplaySize = () => {
-      if (imgRef.current) {
-        setDisplaySize({
-          width: imgRef.current.clientWidth,
-          height: imgRef.current.clientHeight,
-        });
-      }
-    };
-
-    const observer = new ResizeObserver(updateDisplaySize);
-    if (stageRef.current) observer.observe(stageRef.current);
-    observer.observe(imgRef.current);
-
-    updateDisplaySize();
-    return () => observer.disconnect();
-  }, [previewSrc, zoomMode, customScale]);
-
-  const zoomModeRef = useRef(zoomMode);
-  const customScaleRef = useRef(customScale);
-  const currentVisScaleRef = useRef(1);
-
-  useEffect(() => { zoomModeRef.current = zoomMode; }, [zoomMode]);
-  useEffect(() => { customScaleRef.current = customScale; }, [customScale]);
-
-  useEffect(() => {
-    if (imageSize.width > 0 && displaySize.width > 0) {
-      // Calculate what internal scale is mapped equivalent currently giving the display vs natural size
-      currentVisScaleRef.current = displaySize.width / imageSize.width;
-    }
-  }, [displaySize.width, imageSize.width]);
-
-  useEffect(() => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    
-    const handleWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) {
-        e.preventDefault(); 
-        const delta = e.deltaY > 0 ? -0.15 : 0.15;
-        const factor = 1 + delta;
-
-        // Current visual scale
-        const oldScale = currentVisScaleRef.current || 1;
-        let baseScale = zoomModeRef.current === "custom"
-          ? customScaleRef.current
-          : oldScale;
-        const newScale = Math.max(0.1, Math.min(baseScale * factor, 8.0));
-        const ratio = newScale / oldScale;
-
-        // Cursor position relative to the stage viewport
-        const rect = stage.getBoundingClientRect();
-        const cursorX = e.clientX - rect.left;
-        const cursorY = e.clientY - rect.top;
-        const oldScrollLeft = stage.scrollLeft;
-        const oldScrollTop = stage.scrollTop;
-
-        // Apply size change directly to DOM — avoids a paint frame with wrong scroll
-        const img = imgRef.current;
-        const wrap = img?.parentElement;
-        if (img && imageSize.width > 0 && imageSize.height > 0) {
-          const newW = imageSize.width * newScale;
-          const newH = imageSize.height * newScale;
-          img.style.width = `${newW}px`;
-          img.style.height = `${newH}px`;
-          img.style.maxWidth = "none";
-          img.style.maxHeight = "none";
-          if (wrap) {
-            wrap.style.width = `${newW}px`;
-            wrap.style.height = `${newH}px`;
-          }
-        }
-
-        // Adjust scroll to keep the point under the cursor fixed (same synchronous frame)
-        stage.scrollLeft = (oldScrollLeft + cursorX) * ratio - cursorX;
-        stage.scrollTop = (oldScrollTop + cursorY) * ratio - cursorY;
-
-        // Update React state for consistency — next render uses the same values, no visual change
-        zoomModeRef.current = "custom";
-        setZoomMode("custom");
-        setCustomScale(newScale);
-      }
-    };
-
-    stage.addEventListener("wheel", handleWheel, { passive: false });
-    return () => stage.removeEventListener("wheel", handleWheel);
-  }, [activeTabId, imageSize.width, imageSize.height]);
-
-  // Zoom helper functions
-  const handleZoomIn = useCallback(() => {
-    setZoomMode("custom");
-    setCustomScale((prev) => {
-      const base = zoomModeRef.current === "custom" ? prev : (currentVisScaleRef.current || 1);
-      return Math.min(base * 1.25, 8.0);
-    });
-  }, []);
-
-  const handleZoomOut = useCallback(() => {
-    setZoomMode("custom");
-    setCustomScale((prev) => {
-      const base = zoomModeRef.current === "custom" ? prev : (currentVisScaleRef.current || 1);
-      return Math.max(base / 1.25, 0.1);
-    });
-  }, []);
-
-  const handleZoomPreset = useCallback((scale: number) => {
-    setZoomMode("custom");
-    setCustomScale(scale);
-  }, []);
-
-  const effectiveZoomPercent = useMemo(() => {
-    if (imageSize.width === 0 || displaySize.width === 0) return 100;
-    return Math.round((displaySize.width / imageSize.width) * 100);
-  }, [displaySize.width, imageSize.width]);
-
-  // Reset sidebar when document changes
-  useEffect(() => {
-    setThumbnails([]);
-    setOutlineItems([]);
-  }, [documentPath]);
-
-  // Sidebar data loading
-  const loadSidebarData = useCallback(async (mode: "thumbnails" | "outline") => {
-    if (!documentPath || !isPdfSelected) return;
-    setSidebarLoading(true);
-    try {
-      if (mode === "thumbnails" && thumbnails.length === 0) {
-        const res = await invoke<{ thumbnails: string[]; page_count: number }>("render_pdf_thumbnails", { filePath: documentPath });
-        setThumbnails(res.thumbnails);
-      } else if (mode === "outline" && outlineItems.length === 0) {
-        const res = await invoke<{ items: { title: string; page_index: number; depth: number }[]; page_count: number }>("extract_pdf_outline", { filePath: documentPath });
-        setOutlineItems(res.items);
-      }
-    } catch (e) {
-      console.error("Failed to load sidebar data:", e);
-    } finally {
-      setSidebarLoading(false);
-    }
-  }, [documentPath, isPdfSelected, thumbnails.length, outlineItems.length]);
-
-  const toggleSidebar = useCallback(() => {
-    setSidebarOpen((prev) => {
-      const next = !prev;
-      if (next) loadSidebarData(sidebarMode);
-      return next;
-    });
-  }, [sidebarMode, loadSidebarData]);
-
-  const switchSidebarMode = useCallback((mode: "thumbnails" | "outline") => {
-    setSidebarMode(mode);
-    loadSidebarData(mode);
-  }, [loadSidebarData]);
-
-  // Sidebar drag resize handlers
-  const handleSidebarDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    sidebarDragRef.current = { startX: e.clientX, startWidth: sidebarWidth };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-
-    const onMouseMove = (ev: MouseEvent) => {
-      if (!sidebarDragRef.current) return;
-      const delta = ev.clientX - sidebarDragRef.current.startX;
-      const newWidth = Math.max(140, Math.min(500, sidebarDragRef.current.startWidth + delta));
-      setSidebarWidth(newWidth);
-    };
-
-    const onMouseUp = () => {
-      sidebarDragRef.current = null;
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  }, [sidebarWidth]);
-
-  // ── Annotation Handlers ────────────────────────────────────────────────────
-  const pushAnnotationState = useCallback((newAnnotations: AnnotationShape[]) => {
-    setAnnotationHistory(prev => [...prev.slice(-100), annotations]);
-    setAnnotationRedoStack([]);
-    setAnnotations(newAnnotations);
-    pageAnnotationsRef.current.set(annotationPageRef.current, newAnnotations);
-  }, [annotations]);
-
-  const handleAnnotationUndo = useCallback(() => {
-    setAnnotationHistory(prev => {
-      if (prev.length === 0) return prev;
-      const newHistory = [...prev];
-      const lastState = newHistory.pop()!;
-      setAnnotationRedoStack(r => [...r, annotations]);
-      setAnnotations(lastState);
-      pageAnnotationsRef.current.set(annotationPageRef.current, lastState);
-      return newHistory;
-    });
-  }, [annotations]);
-
-  const handleAnnotationRedo = useCallback(() => {
-    setAnnotationRedoStack(prev => {
-      if (prev.length === 0) return prev;
-      const newStack = [...prev];
-      const nextState = newStack.pop()!;
-      setAnnotationHistory(h => [...h, annotations]);
-      setAnnotations(nextState);
-      pageAnnotationsRef.current.set(annotationPageRef.current, nextState);
-      return newStack;
-    });
-  }, [annotations]);
-
-  const handleAnnotationModeChange = useCallback((mode: AnnotationTool) => {
-    // Cancel any in-progress drawing before switching tool
-    annotationDrawingRef.current = false;
-    annotationCurrentShapeRef.current = null;
-    setAnnotationMode(prev => prev === mode ? null : mode);
-  }, []);
-
-  // ── Annotation Auto-save (debounced) ──────────────────────────────────────
-  useEffect(() => {
-    if (!documentPath) return;
-    // Cancel previous timer
-    if (annotationSaveTimerRef.current) {
-      clearTimeout(annotationSaveTimerRef.current);
-    }
-    annotationSaveTimerRef.current = setTimeout(() => {
-      if (documentPath) {
-        annotationSave(documentPath, pdfPageIndex, JSON.stringify(annotations)).catch(e =>
-          console.error("Failed to save annotations:", e)
-        );
-      }
-    }, 800);
-    return () => {
-      if (annotationSaveTimerRef.current) clearTimeout(annotationSaveTimerRef.current);
-    };
-  }, [annotations, documentPath, pdfPageIndex]);
-
-  // ── Load annotations when document opens ──────────────────────────────────
-  useEffect(() => {
-    if (!documentPath) return;
-    annotationLoad(documentPath)
-      .then(records => {
-        const map = new Map<number, AnnotationShape[]>();
-        for (const rec of records) {
-          try {
-            map.set(rec.page_index, JSON.parse(rec.shapes_json));
-          } catch { /* skip bad records */ }
-        }
-        pageAnnotationsRef.current = map;
-        annotationPageRef.current = pdfPageIndex;
-        setAnnotations(map.get(pdfPageIndex) ?? []);
-      })
-      .catch(e => console.error("Failed to load annotations:", e));
-  }, [documentPath]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Clear all annotations ─────────────────────────────────────────────────
-  const handleClearAnnotations = useCallback(() => {
-    if (!documentPath) return;
-    setAnnotations([]);
-    setAnnotationHistory([]);
-    setAnnotationRedoStack([]);
-    pageAnnotationsRef.current.clear();
-    annotationDelete(documentPath).catch(e =>
-      console.error("Failed to delete annotations:", e)
-    );
-  }, [documentPath]);
-
-  // ── Export annotations to PDF ─────────────────────────────────────────────
-  const [exporting, setExporting] = useState(false);
-  const handleExportAnnotations = useCallback(async () => {
-    if (!documentPath || exporting) return;
-    setExporting(true);
-    try {
-      // Build PageAnnotations array from the ref map
-      const pageAnns: PageAnnotations[] = [];
-      pageAnnotationsRef.current.forEach((shapes, pageIdx) => {
-        if (shapes.length > 0) {
-          pageAnns.push({
-            page_index: pageIdx,
-            shapes: shapes.map(s => ({
-              type: s.type,
-              points: s.points,
-              color: s.color,
-              size: s.size,
-              text: s.text,
-            })),
-          });
-        }
-      });
-      if (pageAnns.length === 0) {
-        setErrorMessage("没有标注可导出");
-        return;
-      }
-      // Ask user for save location via Tauri dialog
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const dest = await save({
-        defaultPath: documentPath.replace(/\.pdf$/i, "_annotated.pdf"),
-        filters: [{ name: "PDF", extensions: ["pdf"] }],
-      });
-      if (!dest) return;
-      await exportAnnotatedPdf(documentPath, dest, pageAnns);
-      setErrorMessage("");
-    } catch (e) {
-      setErrorMessage(`导出失败: ${e}`);
-    } finally {
-      setExporting(false);
-    }
-  }, [documentPath, exporting]);
-
-  // ── Stroke eraser: click to remove an entire stroke ───────────────────────
-  const handleStrokeErase = useCallback((nx: number, ny: number) => {
-    const threshold = 0.02; // ~2% of image size
-
-    // Minimum distance from point (px,py) to line segment (ax,ay)-(bx,by)
-    const segDist = (px: number, py: number, ax: number, ay: number, bx: number, by: number) => {
-      const dx = bx - ax, dy = by - ay;
-      const lenSq = dx * dx + dy * dy;
-      if (lenSq === 0) return Math.hypot(px - ax, py - ay);
-      const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
-      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-    };
-
-    for (let i = annotations.length - 1; i >= 0; i--) {
-      const shape = annotations[i];
-      if (shape.type === "text" || shape.type === "rect" || shape.type === "ellipse" || shape.type === "line") continue;
-
-      let hit = false;
-      // Check distance to each point
-      for (const pt of shape.points) {
-        if (Math.hypot(pt.x - nx, pt.y - ny) < threshold) { hit = true; break; }
-      }
-      // Check distance to line segments between consecutive points
-      if (!hit) {
-        for (let j = 1; j < shape.points.length; j++) {
-          const a = shape.points[j - 1], b = shape.points[j];
-          if (segDist(nx, ny, a.x, a.y, b.x, b.y) < threshold) { hit = true; break; }
-        }
-      }
-      if (hit) {
-        const newAnnotations = annotations.filter((_, idx) => idx !== i);
-        pushAnnotationState(newAnnotations);
-        return;
-      }
-    }
-  }, [annotations, pushAnnotationState]);
-
-  // ── Annotation Canvas Setup ────────────────────────────────────────────────
-  const setupAnnotationCanvas = useCallback(() => {
-    const canvas = annotationCanvasRef.current;
-    if (!canvas || displaySize.width === 0 || displaySize.height === 0) return;
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = displaySize.width * dpr;
-    canvas.height = displaySize.height * dpr;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-    // Redraw all annotations (stored in normalized 0–1 coordinates)
-    annotations.forEach(shape => drawAnnotationShape(ctx, shape, displaySize));
-
-    function drawAnnotationShape(c: CanvasRenderingContext2D, s: AnnotationShape, ds: { width: number; height: number }) {
-      c.strokeStyle = s.color;
-      c.fillStyle = s.color;
-      c.lineWidth = s.size;
-      c.lineCap = "round";
-      c.lineJoin = "round";
-      if (s.type === "eraser") {
-        c.globalCompositeOperation = "destination-out";
-        c.strokeStyle = "rgba(0,0,0,1)";
-      } else {
-        c.globalCompositeOperation = "source-over";
-      }
-      if ((s.type === "freehand" || s.type === "eraser") && s.points.length > 0) {
-        c.beginPath();
-        c.moveTo(s.points[0].x * ds.width, s.points[0].y * ds.height);
-        for (let i = 1; i < s.points.length; i++) {
-          c.lineTo(s.points[i].x * ds.width, s.points[i].y * ds.height);
-        }
-        c.stroke();
-      } else if (s.type === "rect" && s.points.length >= 2) {
-        const x = s.points[0].x * ds.width;
-        const y = s.points[0].y * ds.height;
-        const w = (s.points[1].x - s.points[0].x) * ds.width;
-        const h = (s.points[1].y - s.points[0].y) * ds.height;
-        c.strokeRect(x, y, w, h);
-      } else if (s.type === "ellipse" && s.points.length >= 2) {
-        const cx = ((s.points[0].x + s.points[1].x) / 2) * ds.width;
-        const cy = ((s.points[0].y + s.points[1].y) / 2) * ds.height;
-        const rx = Math.abs(s.points[1].x - s.points[0].x) / 2 * ds.width;
-        const ry = Math.abs(s.points[1].y - s.points[0].y) / 2 * ds.height;
-        c.beginPath();
-        c.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
-        c.stroke();
-      } else if (s.type === "line" && s.points.length >= 2) {
-        c.beginPath();
-        c.moveTo(s.points[0].x * ds.width, s.points[0].y * ds.height);
-        c.lineTo(s.points[1].x * ds.width, s.points[1].y * ds.height);
-        c.stroke();
-      } else if (s.type === "text" && s.text) {
-        c.globalCompositeOperation = "source-over";
-        c.font = `${s.size * 8}px sans-serif`;
-        c.textBaseline = "top";
-        c.fillText(s.text, s.points[0].x * ds.width, s.points[0].y * ds.height);
-      }
-      c.globalCompositeOperation = "source-over";
-    }
-  }, [annotations, displaySize]);
-
-  // Redraw canvas whenever displaySize or annotations change
-  useEffect(() => { setupAnnotationCanvas(); }, [setupAnnotationCanvas]);
-
-  // Save annotations when switching away from current page
-  useEffect(() => {
-    pageAnnotationsRef.current.set(annotationPageRef.current, annotations);
-    annotationPageRef.current = pdfPageIndex;
-    setAnnotations(pageAnnotationsRef.current.get(pdfPageIndex) ?? []);
-    setAnnotationHistory([]);
-    setAnnotationRedoStack([]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pdfPageIndex]);
-
-  // Canvas pointer handlers for annotation drawing
-  const handleAnnotationPointerDown = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!annotationMode) return;
-    const canvas = e.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    const nx = (e.clientX - rect.left) / rect.width;
-    const ny = (e.clientY - rect.top) / rect.height;
-
-    // Stroke eraser: click to remove an entire stroke
-    if (annotationMode === "eraser" && eraserMode === "stroke") {
-      handleStrokeErase(nx, ny);
-      return;
-    }
-
-    annotationDrawingRef.current = true;
-    canvas.setPointerCapture(e.pointerId);
-
-    if (annotationMode === "text") {
-      annotationDrawingRef.current = false;
-      canvas.releasePointerCapture(e.pointerId);
-      // Prevent duplicate textareas
-      if (canvas.parentElement?.querySelector("textarea[data-ann-text]")) return;
-      const textarea = document.createElement("textarea");
-      textarea.setAttribute("data-ann-text", "");
-      Object.assign(textarea.style, {
-        position: "absolute",
-        left: `${nx * 100}%`,
-        top: `${ny * 100}%`,
-        color: annotationColor,
-        fontSize: `${annotationSize * 8}px`,
-        fontFamily: "sans-serif",
-        background: "transparent",
-        border: "1px solid #000",
-        outline: "none",
-        zIndex: "20",
-        minWidth: "120px",
-        minHeight: "28px",
-        resize: "both",
-        overflow: "hidden",
-        padding: "2px",
-      });
-      canvas.parentElement?.appendChild(textarea);
-      // Defer focus to next frame so pointer capture release takes effect
-      requestAnimationFrame(() => textarea.focus());
-      const finish = () => {
-        const text = textarea.value.trim();
-        if (text) {
-          const shape: AnnotationShape = {
-            id: `a-${Date.now()}`,
-            type: "text",
-            points: [{ x: nx, y: ny }],
-            color: annotationColor,
-            size: annotationSize,
-            text,
-          };
-          pushAnnotationState([...annotations, shape]);
-        }
-        textarea.remove();
-      };
-      textarea.addEventListener("blur", finish, { once: true });
-      return;
-    }
-
-    const typeMap = { pen: "freehand" as const, eraser: "eraser" as const, rect: "rect" as const, ellipse: "ellipse" as const, line: "line" as const };
-    annotationCurrentShapeRef.current = {
-      id: `a-${Date.now()}`,
-      type: typeMap[annotationMode],
-      points: [{ x: nx, y: ny }],
-      color: annotationColor,
-      size: annotationSize,
-    };
-  }, [annotationMode, annotationColor, annotationSize, annotations, pushAnnotationState, eraserMode, handleStrokeErase]);
-
-  const handleAnnotationPointerMove = useCallback((e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!annotationDrawingRef.current || !annotationCurrentShapeRef.current || !annotationMode) return;
-    const canvas = e.currentTarget;
-    const rect = canvas.getBoundingClientRect();
-    const nx = (e.clientX - rect.left) / rect.width;
-    const ny = (e.clientY - rect.top) / rect.height;
-    const shape = annotationCurrentShapeRef.current;
-
-    if (shape.type === "freehand" || shape.type === "eraser") {
-      shape.points.push({ x: nx, y: ny });
-    } else {
-      shape.points = [shape.points[0], { x: nx, y: ny }];
-    }
-
-    // Live preview: redraw committed annotations + current stroke
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const all = [...annotations, shape];
-    all.forEach(s => {
-      ctx.strokeStyle = s.color;
-      ctx.fillStyle = s.color;
-      ctx.lineWidth = s.size;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      if (s.type === "eraser") {
-        ctx.globalCompositeOperation = "destination-out";
-        ctx.strokeStyle = "rgba(0,0,0,1)";
-      } else {
-        ctx.globalCompositeOperation = "source-over";
-      }
-      if ((s.type === "freehand" || s.type === "eraser") && s.points.length > 0) {
-        ctx.beginPath();
-        ctx.moveTo(s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
-        for (let i = 1; i < s.points.length; i++) {
-          ctx.lineTo(s.points[i].x * displaySize.width, s.points[i].y * displaySize.height);
-        }
-        ctx.stroke();
-      } else if (s.type === "rect" && s.points.length >= 2) {
-        const x = s.points[0].x * displaySize.width;
-        const y = s.points[0].y * displaySize.height;
-        const w = (s.points[1].x - s.points[0].x) * displaySize.width;
-        const h = (s.points[1].y - s.points[0].y) * displaySize.height;
-        ctx.strokeRect(x, y, w, h);
-      } else if (s.type === "ellipse" && s.points.length >= 2) {
-        const cx = ((s.points[0].x + s.points[1].x) / 2) * displaySize.width;
-        const cy = ((s.points[0].y + s.points[1].y) / 2) * displaySize.height;
-        const rx = Math.abs(s.points[1].x - s.points[0].x) / 2 * displaySize.width;
-        const ry = Math.abs(s.points[1].y - s.points[0].y) / 2 * displaySize.height;
-        ctx.beginPath();
-        ctx.ellipse(cx, cy, Math.max(rx, 1), Math.max(ry, 1), 0, 0, Math.PI * 2);
-        ctx.stroke();
-      } else if (s.type === "line" && s.points.length >= 2) {
-        ctx.beginPath();
-        ctx.moveTo(s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
-        ctx.lineTo(s.points[1].x * displaySize.width, s.points[1].y * displaySize.height);
-        ctx.stroke();
-      } else if (s.type === "text" && s.text) {
-        ctx.globalCompositeOperation = "source-over";
-        ctx.font = `${s.size * 8}px sans-serif`;
-        ctx.textBaseline = "top";
-        ctx.fillText(s.text, s.points[0].x * displaySize.width, s.points[0].y * displaySize.height);
-      }
-      ctx.globalCompositeOperation = "source-over";
-    });
-  }, [annotationMode, annotations, displaySize]);
-
-  const handleAnnotationPointerUp = useCallback(() => {
-    if (!annotationDrawingRef.current || !annotationCurrentShapeRef.current) return;
-    annotationDrawingRef.current = false;
-    const shape = annotationCurrentShapeRef.current;
-    annotationCurrentShapeRef.current = null;
-    // Skip empty shapes: freehand/eraser with <2 points, or rect/ellipse/line with zero area
-    if ((shape.type === "freehand" || shape.type === "eraser") && shape.points.length < 2) return;
-    if ((shape.type === "rect" || shape.type === "ellipse" || shape.type === "line") && shape.points.length >= 2) {
-      const dx = Math.abs(shape.points[1].x - shape.points[0].x);
-      const dy = Math.abs(shape.points[1].y - shape.points[0].y);
-      if (dx < 0.001 && dy < 0.001) return;
-    }
-    pushAnnotationState([...annotations, shape]);
-  }, [annotations, pushAnnotationState]);
-
-  // Drag-to-pan (move mode) — uses Pointer Events + setPointerCapture for reliability
-  useEffect(() => {
-    const stage = stageRef.current;
+    const stage = zoom.stageRef.current;
     if (!stage || dragMode !== "move") return;
 
     let capturedPointerId: number | null = null;
@@ -2613,16 +554,13 @@ function App() {
     const onPointerDown = (e: PointerEvent) => {
       const target = e.target as HTMLElement;
       if (target.closest(".pdf-toolbar") || target.closest(".page-arrow")) return;
-      // Don't pan when annotating
-      if (annotationMode) return;
+      if (annotations.annotationMode) return;
 
-      // Prevent browser default image drag behavior from stealing mouseup
       e.preventDefault();
 
-      isDraggingRef.current = true;
+      zoom.isDraggingRef.current = true;
       stage.classList.add("visual-stage-dragging");
 
-      // Capture all subsequent pointer events to this element
       stage.setPointerCapture(e.pointerId);
       capturedPointerId = e.pointerId;
 
@@ -2632,7 +570,7 @@ function App() {
       const startScrollTop = stage.scrollTop;
 
       const onPointerMove = (e: PointerEvent) => {
-        if (!isDraggingRef.current) return;
+        if (!zoom.isDraggingRef.current) return;
         const dx = e.clientX - startX;
         const dy = e.clientY - startY;
         stage.scrollLeft = startScrollLeft - dx;
@@ -2640,8 +578,8 @@ function App() {
       };
 
       const onPointerUp = () => {
-        isDraggingRef.current = false;
-        justDraggedRef.current = true;
+        zoom.isDraggingRef.current = false;
+        zoom.justDraggedRef.current = true;
         stage.classList.remove("visual-stage-dragging");
         if (capturedPointerId !== null) {
           try { stage.releasePointerCapture(capturedPointerId); } catch { /* already released */ }
@@ -2650,7 +588,7 @@ function App() {
         stage.removeEventListener("pointermove", onPointerMove);
         stage.removeEventListener("pointerup", onPointerUp);
         stage.removeEventListener("pointercancel", onPointerUp);
-        setTimeout(() => { justDraggedRef.current = false; }, 150);
+        setTimeout(() => { zoom.justDraggedRef.current = false; }, 150);
       };
 
       stage.addEventListener("pointermove", onPointerMove);
@@ -2667,200 +605,102 @@ function App() {
         capturedPointerId = null;
       }
     };
-  }, [dragMode, activeTabId, annotationMode]);
+  }, [dragMode, tabs.activeTabId, annotations.annotationMode]);
 
-  const scale = useMemo(() => {
-    if (imageSize.width === 0 || imageSize.height === 0) {
-      return { x: 1, y: 1 };
-    }
-    return {
-      x: displaySize.width / imageSize.width,
-      y: displaySize.height / imageSize.height,
-    };
-  }, [displaySize.height, displaySize.width, imageSize.height, imageSize.width]);
+  // ── Floating menu dismiss listeners ────────────────────────────────────────
+  const dismissFloatingMenu = () => {
+    aiChat.setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+  };
 
-  const imageWrapSx = useMemo(() => {
-    if (zoomMode === "custom") {
-      return { width: imageSize.width * customScale, height: imageSize.height * customScale } as const;
-    }
-    if (zoomMode === "fit_width") {
-      return { width: "100%" } as const;
-    }
-    if (zoomMode === "fit_height") {
-      return { width: "max-content", height: "100%" } as const;
-    }
-    return { width: "max-content" } as const;
-  }, [zoomMode, customScale, imageSize.width, imageSize.height]);
-
-  const previewImageSx = useMemo(() => {
-    if (zoomMode === "custom") {
-      return { width: imageSize.width * customScale, height: imageSize.height * customScale, maxWidth: "none", maxHeight: "none" } as const;
-    }
-    if (zoomMode === "fit_width") {
-      return { width: "100%", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
-    }
-    if (zoomMode === "fit_height") {
-      return { width: "auto", height: "100%", maxWidth: "none", maxHeight: "none" } as const;
-    }
-    if (zoomMode === "fit_page") {
-      return { width: "auto", height: "auto", maxWidth: "100%", maxHeight: "100%" } as const;
-    }
-    return { width: "auto", height: "auto", maxWidth: "none", maxHeight: "none" } as const;
-  }, [zoomMode, customScale, imageSize.width, imageSize.height]);
-
-  const requestAiDescription = async (text: string, action: string = "解读", imageDataUrl?: string): Promise<string> => {
-    if (!text.trim() && !imageDataUrl) {
-      setAiResult("");
-      return "";
-    }
-    setAiResult(`正在请求 AI ${action}...`);
-    setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
-    // Reset Q&A state for new action
-    setQaHistory([]);
-    setQaInput("");
-    setQaLoading(false);
-    qaSourceTextRef.current = text;
-
-    // Capture current paragraph key for caching AI result
-    const aiCacheKey = selectedParagraph
-      ? `${selectedParagraphPageRef.current}:${selectedParagraph.text}`
-      : null;
-    const saveAiResultToCache = (finalResult: string) => {
-      if (aiCacheKey && finalResult) {
-        paragraphAiCacheRef.current.set(aiCacheKey, {
-          aiAction: action,
-          aiResult: finalResult,
-          qaHistory: [],
-          qaSourceText: text,
-        });
+  useEffect(() => {
+    if (!aiChat.floatingMenu.visible) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".floating-ai-menu")) {
+        dismissFloatingMenu();
       }
     };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") dismissFloatingMenu();
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [aiChat.floatingMenu.visible]);
 
-    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
-    if (!apiKey || !llmSettings.baseUrl) {
-      setAiResult("");
-      return "";
+  useEffect(() => {
+    if (!aiChat.pdfFloatingMenu.visible) return;
+    const handleClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".pdf-floating-ai-menu")) {
+        aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    };
+    document.addEventListener("mousedown", handleClick);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClick);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [aiChat.pdfFloatingMenu.visible]);
+
+  // ── selectFigure — extracts a figure image from the preview ────────────────
+  const selectFigure = async (box: LayoutBox) => {
+    if (selectedParagraph && aiChat.aiResult) {
+      const currentKey = `${aiChat.selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+      aiChat.paragraphAiCacheRef.current.set(currentKey, {
+        aiAction: aiChat.aiAction,
+        aiResult: aiChat.aiResult,
+        qaHistory: aiChat.qaHistory,
+        qaSourceText: aiChat.qaSourceTextRef.current,
+      });
     }
+    aiChat.selectedFigurePageRef.current = pdfPageIndex;
+    setSelectedParagraph(null);
+    setSelectedFigure(box);
+    aiChat.setAiResult("");
+    aiChat.setAiAction("");
+
+    const naturalW = imageSize.width;
+    const naturalH = imageSize.height;
+    if (naturalW === 0 || naturalH === 0 || !previewSrc) return;
 
     try {
-      const systemPrompts: Record<string, string> = {
-        "解读": "简洁明了地解读以下文本，抓住核心要点，不要展开冗长分析。用中文回复。",
-        "翻译": "将以下文本翻译成中文。如果原文已是中文，则翻译成英文。只输出翻译结果。",
-        "摘要": "用一两句话摘要以下文本的核心内容。用中文回复。",
-        "全文解读": "你是一位专业的文档分析专家。以下是从一份PDF文档中按页面顺序提取的全文内容。请提供全面深入的解读分析，包括：\n1. 文档主题和核心观点概述\n2. 主要内容结构梳理\n3. 关键论点和重要发现\n4. 总结评价\n请用中文回复，使用 Markdown 格式组织内容。",
-      };
+      const sx = box.xmin;
+      const sy = box.ymin;
+      const sw = box.xmax - box.xmin;
+      const sh = box.ymax - box.ymin;
 
-      const systemPrompt = systemPrompts[action] || systemPrompts["解读"];
-      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, sw);
+      canvas.height = Math.max(1, sh);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
 
-      // Build user message: multimodal if image is provided
-      const userContent: unknown = imageDataUrl
-        ? [
-            { type: "text", text },
-            { type: "image_url", image_url: { url: imageDataUrl } },
-          ]
-        : text;
-
-      const requestBody: Record<string, unknown> = {
-        model: llmSettings.model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userContent },
-        ],
-        temperature: 0.7,
-        max_tokens: action === "全文解读" ? 8192 : 2048,
-        stream: true,
-      };
-
-      // Volcengine Ark: disable thinking mode for seed models
-      if (llmSettings.vendor === "volcengine") {
-        requestBody.thinking = { type: "disabled" };
-      }
-
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(requestBody),
+      const fullImg = new Image();
+      fullImg.src = previewSrc;
+      await new Promise<void>((resolve, reject) => {
+        fullImg.onload = () => resolve();
+        fullImg.onerror = () => reject(new Error("image load failed"));
       });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`API 请求失败 (${response.status}): ${errText}`);
-      }
-
-      // Try streaming via SSE
-      const reader = response.body?.getReader();
-      if (reader) {
-        const decoder = new TextDecoder();
-        let result = "";
-        let buffer = "";
-
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            buffer += decoder.decode(value, { stream: true });
-            const lines = buffer.split("\n");
-            buffer = lines.pop() || "";
-
-            for (const line of lines) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith("data: ")) continue;
-              const data = trimmed.slice(6);
-              if (data === "[DONE]") continue;
-              try {
-                const parsed = JSON.parse(data);
-                const delta = parsed.choices?.[0]?.delta?.content;
-                if (delta) {
-                  result += delta;
-                  setAiResult(result);
-                }
-              } catch {
-                // skip unparseable chunks
-              }
-            }
-          }
-        } catch {
-          if (result) {
-            const interrupted = result + "\n\n[流式输出中断]";
-            setAiResult(interrupted);
-            return interrupted;
-          } else {
-            throw new Error("流式读取失败");
-          }
-        }
-        saveAiResultToCache(result);
-        return result;
-      }
-
-      // Fallback: non-streaming response
-      const data = await response.json();
-      const content = data.choices?.[0]?.message?.content;
-      if (content) {
-        setAiResult(content);
-        saveAiResultToCache(content);
-        return content;
-      } else {
-        setAiResult("AI 返回了空内容");
-        saveAiResultToCache("AI 返回了空内容");
-        return "AI 返回了空内容";
-      }
-    } catch (e) {
-      const errMsg = `请求失败: ${String(e)}`;
-      setAiResult(errMsg);
-      return errMsg;
+      ctx.drawImage(fullImg, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      setFigureImageDataUrl(canvas.toDataURL("image/png"));
+    } catch {
+      setFigureImageDataUrl("");
     }
   };
 
+  // ── Text selection handlers ────────────────────────────────────────────────
   const handleTextSelection = (_e: React.MouseEvent) => {
     const selection = window.getSelection();
     if (!selection || !selection.toString().trim()) {
-      // Close floating menu if no selection
-      setFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+      aiChat.setFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
       return;
     }
 
@@ -2868,35 +708,27 @@ function App() {
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
 
-    // Get right pane bounds to constrain floating menu
-    const paneEl = rightPaneRef.current;
+    const paneEl = aiChat.rightPaneRef.current;
     const paneRect = paneEl?.getBoundingClientRect();
-    const menuW = 260; // estimated menu width
-    const menuH = 40;  // estimated menu height
+    const menuW = 260;
+    const menuH = 40;
 
-    // Default: position above-right of selection end
     let menuX = rect.right + 6;
     let menuY = rect.top - menuH - 4;
 
-    // Constrain within right pane horizontally
     if (paneRect) {
-      // If menu would overflow right edge, flip to left of selection
       if (menuX + menuW > paneRect.right - 4) {
         menuX = rect.left - menuW - 6;
       }
-      // If still overflowing left edge, clamp
       menuX = Math.max(menuX, paneRect.left + 4);
       menuX = Math.min(menuX, paneRect.right - menuW - 4);
 
-      // Vertically: if not enough space above, show below the selection
       if (menuY < paneRect.top) {
         menuY = rect.bottom + 4;
       }
-      // Clamp vertically within pane
       menuY = Math.max(menuY, paneRect.top + 4);
       menuY = Math.min(menuY, paneRect.bottom - menuH - 4);
     } else {
-      // Fallback to window constraints
       if (menuX + menuW > window.innerWidth - 4) {
         menuX = rect.left - menuW - 6;
       }
@@ -2907,7 +739,7 @@ function App() {
       menuY = Math.max(4, Math.min(menuY, window.innerHeight - menuH - 4));
     }
 
-    setFloatingMenu({
+    aiChat.setFloatingMenu({
       visible: true,
       x: menuX,
       y: menuY,
@@ -2918,7 +750,7 @@ function App() {
   const handlePdfTextSelection = (_e: React.MouseEvent) => {
     const selection = window.getSelection();
     if (!selection || !selection.toString().trim()) {
-      setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+      aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
       return;
     }
 
@@ -2926,7 +758,6 @@ function App() {
     const range = selection.getRangeAt(0);
     const rect = range.getBoundingClientRect();
 
-    // Get image-wrap bounds for relative positioning
     const wrapEl = textLayerRef.current?.parentElement;
     if (!wrapEl) return;
     const wrapRect = wrapEl.getBoundingClientRect();
@@ -2937,26 +768,25 @@ function App() {
     let menuX = rect.left - wrapRect.left + rect.width / 2 - menuW / 2;
     let menuY = rect.top - wrapRect.top - menuH - 4;
 
-    // Constrain within wrap bounds
     menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
     if (menuY < 4) menuY = rect.bottom - wrapRect.top + 4;
     menuY = Math.max(4, menuY);
 
-    setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText });
+    aiChat.setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText });
   };
 
   const handlePdfFloatingAction = (action: string) => {
-    if (pdfFloatingMenu.selectedText) {
-      setAiAction(actionLabels[action] || action);
-      requestAiDescription(pdfFloatingMenu.selectedText, action);
+    if (aiChat.pdfFloatingMenu.selectedText) {
+      aiChat.setAiAction(actionLabels[action] || action);
+      aiChat.requestAiDescription(aiChat.pdfFloatingMenu.selectedText, action);
     }
-    setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+    aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
   };
 
   const showFloatingMenu = (text: string, x: number, y: number) => {
     const menuW = 260;
     const menuH = 40;
-    const paneEl = rightPaneRef.current;
+    const paneEl = aiChat.rightPaneRef.current;
     const paneRect = paneEl?.getBoundingClientRect();
 
     let menuX = x + 6;
@@ -2974,31 +804,24 @@ function App() {
       menuY = Math.max(4, Math.min(menuY, window.innerHeight - menuH - 4));
     }
 
-    setFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
-  };
-
-  const actionLabels: Record<string, string> = {
-    "解读": "解读文字",
-    "翻译": "翻译文字",
-    "摘要": "摘要文字",
-    "全文解读": "全文解读",
+    aiChat.setFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
   };
 
   const handleFloatingAction = (action: string) => {
-    if (floatingMenu.selectedText) {
-      setAiAction(actionLabels[action] || action);
-      requestAiDescription(floatingMenu.selectedText, action);
+    if (aiChat.floatingMenu.selectedText) {
+      aiChat.setAiAction(actionLabels[action] || action);
+      aiChat.requestAiDescription(aiChat.floatingMenu.selectedText, action);
     }
   };
 
-  // Gather all visible text in the text-pane for batch AI actions
+  // ── getPaneFullText — gather all visible text for batch AI ─────────────────
   const getPaneFullText = (): string => {
     let parts: string[] = [];
-    if (selectedParagraph?.text && splitParagraphWords.length > 0) {
-      parts.push(splitParagraphWords.join(""));
+    if (selectedParagraph?.text && ocr.splitParagraphWords.length > 0) {
+      parts.push(ocr.splitParagraphWords.join(""));
     }
-    if (ocrText && splitOcrText) {
-      parts.push(splitOcrText);
+    if (ocr.ocrText && ocr.splitOcrText) {
+      parts.push(ocr.splitOcrText);
     }
     return parts.join("\n---\n");
   };
@@ -3006,331 +829,11 @@ function App() {
   const handleBatchAiAction = (action: string) => {
     const text = getPaneFullText();
     if (!text.trim()) return;
-    setAiAction(actionLabels[action] || action);
-    requestAiDescription(text, action);
+    aiChat.setAiAction(actionLabels[action] || action);
+    aiChat.requestAiDescription(text, action);
   };
 
-  const handleImageAiAction = () => {
-    if (!figureImageDataUrl) return;
-    setAiAction("解读图片");
-    requestAiDescription("请解读这张图片的内容", "解读", figureImageDataUrl);
-  };
-
-  const handleFulltextAiAction = async () => {
-    if (!isPdfSelected || !documentPath || fulltextExtracting) return;
-
-    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
-    if (!apiKey || !llmSettings.baseUrl) {
-      setErrorMessage("请先在设置中配置 LLM API Key");
-      return;
-    }
-    if (!modelLoaded) {
-      setErrorMessage("请先加载模型后再使用全文解读");
-      return;
-    }
-
-    setFulltextExtracting(true);
-    fulltextCancelRef.current = false;
-    setFulltextProgress({ current: 0, total: pdfPageCount });
-    setAiAction("全文解读");
-    setAiResult(`正在提取全文内容 (0/${pdfPageCount} 页)...`);
-
-    try {
-      const allTextParts: string[] = [];
-
-      for (let page = 0; page < pdfPageCount; page++) {
-        if (fulltextCancelRef.current) {
-          setAiResult("已取消全文提取");
-          return;
-        }
-
-        setFulltextProgress({ current: page + 1, total: pdfPageCount });
-        setAiResult(`正在提取全文内容 (${page + 1}/${pdfPageCount} 页)...`);
-
-        const result = await invoke<ExtractContentResponse>("get_pdf_paragraphs", {
-          filePath: documentPath,
-          pageIndex: page,
-          scoreThreshold,
-        });
-
-        if (fulltextCancelRef.current) {
-          setAiResult("已取消全文提取");
-          return;
-        }
-
-        // Use per-page layout boxes for visual filtering (hits inference cache)
-        const layoutResult = await invoke<DetectionResponse>("run_doclayout", {
-          filePath: documentPath,
-          scoreThreshold,
-          pageIndex: page,
-        });
-        const pageBoxes = layoutResult.boxes;
-
-        const textSegments = result.segments.filter(
-          (seg) => !isSegmentGarbage(seg, pageBoxes) && seg.text.trim()
-        );
-
-        if (textSegments.length > 0) {
-          const pageText = textSegments.map((s) => s.text.trim()).join("\n");
-          allTextParts.push(pageText);
-        }
-      }
-
-      if (fulltextCancelRef.current) {
-        setAiResult("已取消全文提取");
-        return;
-      }
-
-      const fullText = allTextParts.join("\n\n");
-      if (!fullText.trim()) {
-        setAiResult("未提取到文本内容");
-        return;
-      }
-
-      // Save fulltext to temp file for debugging
-      try {
-        const savedPath = await invoke<string>("save_fulltext_debug", { text: fullText });
-        console.log("Fulltext saved to:", savedPath);
-      } catch {
-        // non-critical, ignore
-      }
-
-      setAiResult("正在请求 AI 全文解读...");
-      const aiText = await requestAiDescription(fullText, "全文解读");
-      // Persist fulltext content in memory
-      fulltextAiResultRef.current = aiText;
-      fulltextQaHistoryRef.current = [];
-      fulltextSourceTextRef.current = fullText;
-    } catch (e) {
-      setErrorMessage(`全文提取失败: ${String(e)}`);
-      setAiResult("");
-    } finally {
-      setFulltextExtracting(false);
-      setFulltextProgress({ current: 0, total: 0 });
-    }
-  };
-
-  const handleFulltextCancel = () => {
-    fulltextCancelRef.current = true;
-  };
-
-  const handleQaSubmit = async () => {
-    const question = qaInput.trim();
-    if (!question || qaLoading) return;
-
-    const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
-    if (!apiKey || !llmSettings.baseUrl) return;
-
-    setQaInput("");
-    setQaLoading(true);
-
-    // Add question with empty answer immediately
-    setQaHistory(prev => [...prev, { question, answer: "" }]);
-
-    try {
-      const systemPrompt = "你是一位专业的文档分析助手。以下是文档的原文内容以及之前的AI解读。请根据用户的问题进行回答，用中文回复，简洁准确。";
-      const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
-
-      // Build conversation messages (snapshot current history before this question)
-      const messages: { role: string; content: string }[] = [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: qaSourceTextRef.current },
-        { role: "assistant", content: aiResult },
-      ];
-      for (const qa of qaHistory) {
-        messages.push({ role: "user", content: qa.question });
-        messages.push({ role: "assistant", content: qa.answer });
-      }
-      messages.push({ role: "user", content: question });
-
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          model: llmSettings.model,
-          messages,
-          temperature: 0.7,
-          max_tokens: 2048,
-          stream: true,
-        }),
-      });
-
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`API 请求失败 (${response.status}): ${errText}`);
-      }
-
-      // Stream the answer
-      const reader = response.body?.getReader();
-      if (reader) {
-        const decoder = new TextDecoder();
-        let result = "";
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data: ")) continue;
-            const data = trimmed.slice(6);
-            if (data === "[DONE]") continue;
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta?.content;
-              if (delta) {
-                result += delta;
-                setQaHistory(prev => {
-                  const updated = [...prev];
-                  updated[updated.length - 1] = { question, answer: result };
-                  return updated;
-                });
-              }
-            } catch {
-              // skip unparseable chunks
-            }
-          }
-        }
-      } else {
-        const data = await response.json();
-        const content = data.choices?.[0]?.message?.content;
-        setQaHistory(prev => {
-          const updated = [...prev];
-          updated[updated.length - 1] = { question, answer: content || "AI 返回了空内容" };
-          return updated;
-        });
-      }
-    } catch (e) {
-      setQaHistory(prev => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { question, answer: `请求失败: ${String(e)}` };
-        return updated;
-      });
-    } finally {
-      setQaLoading(false);
-    }
-  };
-
-  // Auto-scroll AI pane to bottom
-  useEffect(() => {
-    if (aiScrollRef.current) {
-      aiScrollRef.current.scrollTop = aiScrollRef.current.scrollHeight;
-    }
-  }, [aiResult, qaHistory]);
-
-  // Sync fulltext Q&A memory when in fulltext mode
-  useEffect(() => {
-    if (aiAction === "全文解读") {
-      fulltextQaHistoryRef.current = qaHistory;
-    }
-  }, [qaHistory, aiAction]);
-
-  const dismissFloatingMenu = () => {
-    setFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
-  };
-
-  // Global click listener to dismiss floating menu
-  useEffect(() => {
-    if (!floatingMenu.visible) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(".floating-ai-menu")) {
-        dismissFloatingMenu();
-      }
-    };
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") dismissFloatingMenu();
-    };
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [floatingMenu.visible]);
-
-  // Global click listener to dismiss PDF floating menu
-  useEffect(() => {
-    if (!pdfFloatingMenu.visible) return;
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest(".pdf-floating-ai-menu")) {
-        setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
-      }
-    };
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
-    };
-    document.addEventListener("mousedown", handleClick);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("mousedown", handleClick);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [pdfFloatingMenu.visible]);
-
-  // Async sentence splitting for PDF paragraph text using Rust sentencex crate
-  useEffect(() => {
-    let cancelled = false;
-    if (!selectedParagraph?.text) {
-      setSplitParagraphWords([]);
-      return;
-    }
-    const rawText = selectedParagraph.text.replace(/[\r\n]+/g, "");
-    invoke<string[]>("split_sentences", { text: rawText, language: "en" })
-      .then((sentences) => {
-        if (cancelled) return;
-        const formattedText = sentences.join("\n");
-        try {
-          // @ts-ignore
-          const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-          // @ts-ignore
-          setSplitParagraphWords(Array.from(segmenter.segment(formattedText)).map((s: any) => s.segment));
-        } catch {
-          setSplitParagraphWords(formattedText.split(/(?=[\u4e00-\u9fa5])/));
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        try {
-          // @ts-ignore
-          const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
-          // @ts-ignore
-          setSplitParagraphWords(Array.from(segmenter.segment(rawText)).map((s: any) => s.segment));
-        } catch {
-          setSplitParagraphWords(rawText.split(/(?=[\u4e00-\u9fa5])/));
-        }
-      });
-    return () => { cancelled = true; };
-  }, [selectedParagraph?.text]);
-
-  // Async sentence splitting for OCR text using Rust sentencex crate
-  useEffect(() => {
-    let cancelled = false;
-    if (!ocrText) {
-      setSplitOcrText("");
-      return;
-    }
-    const rawText = ocrText.replace(/[\r\n]+/g, "");
-    invoke<string[]>("split_sentences", { text: rawText, language: "en" })
-      .then((sentences) => {
-        if (!cancelled) setSplitOcrText(sentences.join("\n"));
-      })
-      .catch(() => {
-        if (!cancelled) setSplitOcrText(rawText);
-      });
-    return () => { cancelled = true; };
-  }, [ocrText]);
-
-  // LaTeX renderer: converts text to clickable words and $...$, $$...$$ math to HTML nodes
+  // ── renderOcrNodes — local version with word-click floating menu ───────────
   const renderOcrNodes = useCallback((text: string): React.ReactNode[] => {
     if (!text) return [];
 
@@ -3368,7 +871,6 @@ function App() {
       tokenIndex++;
     };
 
-    // 1. Split on display math $$...$$
     const displayParts = text.split(/(\$\$[\s\S]*?\$\$)/);
     for (let i = 0; i < displayParts.length; i++) {
       const part = displayParts[i];
@@ -3381,7 +883,6 @@ function App() {
           pushText(part);
         }
       } else {
-        // 2. Split on inline math $...$
         const inlineParts = part.split(/(\$(?!\$)[\s\S]*?[^\\]\$)/);
         for (let j = 0; j < inlineParts.length; j++) {
           const inPart = inlineParts[j];
@@ -3403,135 +904,10 @@ function App() {
     return nodes;
   }, []);
 
-  // Markdown + LaTeX renderer for AI response
-  const renderAiContent = useCallback((text: string): React.ReactNode => {
-    if (!text) return null;
+  // ── Redraw annotation canvas when displaySize/annotations change ───────────
+  useEffect(() => { annotations.setupAnnotationCanvas(); }, [annotations.setupAnnotationCanvas]);
 
-    // Escape user text for safe HTML injection after markdown rendering
-    const parts: { type: "md" | "math_d" | "math_i"; content: string }[] = [];
-    let remaining = text;
-
-    // 1. Extract display math $$...$$
-    const displayRe = /\$\$([\s\S]*?)\$\$/g;
-    let lastIdx = 0;
-    let match: RegExpExecArray | null;
-    while ((match = displayRe.exec(remaining)) !== null) {
-      if (match.index > lastIdx) {
-        parts.push({ type: "md", content: remaining.slice(lastIdx, match.index) });
-      }
-      parts.push({ type: "math_d", content: match[1] });
-      lastIdx = displayRe.lastIndex;
-    }
-    if (lastIdx < remaining.length) {
-      remaining = remaining.slice(lastIdx);
-    } else {
-      remaining = "";
-    }
-
-    // 2. Extract inline math $...$ from remaining
-    const inlineRe = /\$(?!\$)([\s\S]*?[^\\])\$/g;
-    const mdParts: { type: "md" | "math_i"; content: string }[] = [];
-    lastIdx = 0;
-    while ((match = inlineRe.exec(remaining)) !== null) {
-      if (match.index > lastIdx) {
-        mdParts.push({ type: "md", content: remaining.slice(lastIdx, match.index) });
-      }
-      mdParts.push({ type: "math_i", content: match[1] });
-      lastIdx = inlineRe.lastIndex;
-    }
-    if (lastIdx < remaining.length) {
-      mdParts.push({ type: "md", content: remaining.slice(lastIdx) });
-    }
-    parts.push(...mdParts);
-
-    // 3. Render each part
-    const nodes: React.ReactNode[] = [];
-    let key = 0;
-    for (const part of parts) {
-      if (part.type === "math_d") {
-        try {
-          const html = katex.renderToString(part.content, { displayMode: true, throwOnError: false });
-          nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: html }} />);
-        } catch {
-          nodes.push(<span key={key++} className="math-fallback">{`$$${part.content}$$`}</span>);
-        }
-      } else if (part.type === "math_i") {
-        try {
-          const html = katex.renderToString(part.content, { displayMode: false, throwOnError: false });
-          nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: html }} />);
-        } catch {
-          nodes.push(<span key={key++} className="math-fallback">{`$${part.content}$`}</span>);
-        }
-      } else {
-        const mdHtml = marked.parse(part.content, { async: false }) as string;
-        nodes.push(<span key={key++} dangerouslySetInnerHTML={{ __html: mdHtml }} />);
-      }
-    }
-    return <div className="ai-markdown-content">{nodes}</div>;
-  }, []);
-
-  const handleMouseDownV = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const target = e.currentTarget as HTMLElement;
-    const prevSibling = target.previousElementSibling as HTMLElement;
-    const startWidth = prevSibling?.offsetWidth || 0;
-    
-    const onMouseMove = (moveEvent: MouseEvent) => {
-       const delta = moveEvent.clientX - startX;
-       if (startWidth > 0) {
-         setLeftPaneWidth(`${Math.max(200, startWidth + delta)}px`);
-       }
-    };
-    
-    const onMouseUp = () => {
-       document.removeEventListener("mousemove", onMouseMove);
-       document.removeEventListener("mouseup", onMouseUp);
-    };
-    
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  };
-
-  const handleRefSidebarResize = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
-    const startW = refSidebarWidth;
-    const onMouseMove = (ev: MouseEvent) => {
-      const delta = startX - ev.clientX;
-      setRefSidebarWidth(Math.max(260, Math.min(600, startW + delta)));
-    };
-    const onMouseUp = () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
-    };
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  };
-
-  const handleMouseDownH = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startY = e.clientY;
-    const target = e.currentTarget as HTMLElement;
-    const prevSibling = target.previousElementSibling as HTMLElement;
-    const startHeight = prevSibling?.offsetHeight || 0;
-    
-    const onMouseMove = (moveEvent: MouseEvent) => {
-       const delta = moveEvent.clientY - startY;
-       if (startHeight > 0) {
-         setTopPaneHeight(`${Math.max(100, startHeight + delta)}px`);
-       }
-    };
-    
-    const onMouseUp = () => {
-       document.removeEventListener("mousemove", onMouseMove);
-       document.removeEventListener("mouseup", onMouseUp);
-    };
-    
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
-  };
-
+  // ── Render ─────────────────────────────────────────────────────────────────
   if (!environmentReady) {
     return <EnvironmentCheck onAllChecksPassed={() => setEnvironmentReady(true)} />;
   }
@@ -3540,6 +916,7 @@ function App() {
     <div className="app-root">
       <div className="app-shell">
         <div className="top-menu-bar">
+          {/* ── 文件菜单 ── */}
           <Menu
             positioning="below-start"
             open={openMenu === "file"}
@@ -3557,26 +934,137 @@ function App() {
             <MenuPopover className="menu-popover-smooth">
               <MenuList>
                 <MenuItem onClick={() => {
-                  // Close all reader tabs and go home
-                  setTabs([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
-                  setActiveTabId(HOME_TAB_ID);
+                  tabs.setTabs([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
+                  tabs.setActiveTabId(HOME_TAB_ID);
                   clearCurrentDocument();
                 }}>新建</MenuItem>
                 <MenuItem onClick={() => void selectDocument()}>打开</MenuItem>
-                <MenuItem onClick={() => void handleImportPapers()}>导入文件</MenuItem>
+                <MenuItem onClick={() => void papers.handleImportPapers()}>导入文件</MenuItem>
+                <div className="menu-divider" />
                 <MenuItem onClick={() => setShowReadingReport(true)}>阅读报告</MenuItem>
+                <div className="menu-divider" />
+                <MenuItem onClick={() => setSettingsOpen(true)}>设置</MenuItem>
               </MenuList>
             </MenuPopover>
           </Menu>
 
-          <Button
-            appearance="transparent"
-            className="menu-btn menu-btn-no-icon"
-            onClick={() => setSettingsOpen(true)}
+          {/* ── 编辑菜单 ── */}
+          <Menu
+            positioning="below-start"
+            open={openMenu === "edit"}
+            onOpenChange={(_, data) => handleMenuOpenChange("edit", data.open)}
           >
-            设置
-          </Button>
+            <MenuTrigger>
+              <MenuButton
+                appearance="transparent"
+                className="menu-btn menu-btn-no-icon"
+                onMouseEnter={() => handleMenuHoverSwitch("edit")}
+              >
+                编辑
+              </MenuButton>
+            </MenuTrigger>
+            <MenuPopover className="menu-popover-smooth">
+              <MenuList>
+                <MenuItem
+                  onClick={annotations.handleAnnotationUndo}
+                  disabled={!isPdfSelected || annotations.annotationHistory.length === 0}
+                >撤销</MenuItem>
+                <MenuItem
+                  onClick={annotations.handleAnnotationRedo}
+                  disabled={!isPdfSelected || annotations.annotationRedoStack.length === 0}
+                >重做</MenuItem>
+                <div className="menu-divider" />
+                <MenuItem
+                  onClick={annotations.handleClearAnnotations}
+                  disabled={!isPdfSelected}
+                >清除标注</MenuItem>
+                <MenuItem
+                  onClick={() => void annotations.handleExportAnnotations()}
+                  disabled={!isPdfSelected || annotations.exporting}
+                >导出标注 PDF</MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
 
+          {/* ── 视图菜单 ── */}
+          <Menu
+            positioning="below-start"
+            open={openMenu === "view"}
+            onOpenChange={(_, data) => handleMenuOpenChange("view", data.open)}
+          >
+            <MenuTrigger>
+              <MenuButton
+                appearance="transparent"
+                className="menu-btn menu-btn-no-icon"
+                onMouseEnter={() => handleMenuHoverSwitch("view")}
+              >
+                视图
+              </MenuButton>
+            </MenuTrigger>
+            <MenuPopover className="menu-popover-smooth">
+              <MenuList>
+                <MenuItem
+                  onClick={zoom.handleZoomIn}
+                  disabled={!isPdfSelected}
+                >放大</MenuItem>
+                <MenuItem
+                  onClick={zoom.handleZoomOut}
+                  disabled={!isPdfSelected}
+                >缩小</MenuItem>
+                <MenuItem
+                  onClick={() => zoom.handleZoomPreset(1.0)}
+                  disabled={!isPdfSelected}
+                >重置缩放</MenuItem>
+                <div className="menu-divider" />
+                <MenuItem
+                  onClick={() => sidebar.setSidebarOpen(v => !v)}
+                  disabled={!isPdfSelected}
+                >{sidebar.sidebarOpen ? "隐藏侧边栏" : "显示侧边栏"}</MenuItem>
+                <MenuItem
+                  onClick={() => sidebar.setRefSidebarOpen(v => !v)}
+                  disabled={!isPdfSelected}
+                >{sidebar.refSidebarOpen ? "隐藏参考文献栏" : "显示参考文献栏"}</MenuItem>
+                <div className="menu-divider" />
+                <MenuItem onClick={() => setCommandPaletteOpen(v => !v)}>命令面板</MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
+
+          {/* ── 工具菜单 ── */}
+          <Menu
+            positioning="below-start"
+            open={openMenu === "tools"}
+            onOpenChange={(_, data) => handleMenuOpenChange("tools", data.open)}
+          >
+            <MenuTrigger>
+              <MenuButton
+                appearance="transparent"
+                className="menu-btn menu-btn-no-icon"
+                onMouseEnter={() => handleMenuHoverSwitch("tools")}
+              >
+                工具
+              </MenuButton>
+            </MenuTrigger>
+            <MenuPopover className="menu-popover-smooth">
+              <MenuList>
+                <MenuItem
+                  onClick={() => void aiChat.handleFulltextAiAction()}
+                  disabled={!documentPath || !settings.modelLoaded || settings.loading || aiChat.fulltextExtracting}
+                >全文解读</MenuItem>
+                <div className="menu-divider" />
+                <MenuItem
+                  onClick={() => annotations.handleAnnotationModeChange(annotations.annotationMode === "pen" ? null : "pen")}
+                  disabled={!isPdfSelected}
+                >{annotations.annotationMode === "pen" ? "退出标注" : "画笔标注"}</MenuItem>
+                <MenuItem
+                  onClick={() => annotations.handleAnnotationModeChange(annotations.annotationMode === "eraser" ? null : "eraser")}
+                  disabled={!isPdfSelected}
+                >{annotations.annotationMode === "eraser" ? "退出橡皮擦" : "橡皮擦"}</MenuItem>
+              </MenuList>
+            </MenuPopover>
+          </Menu>
+
+          {/* ── 帮助菜单 ── */}
           <Menu
             positioning="below-start"
             open={openMenu === "help"}
@@ -3593,31 +1081,31 @@ function App() {
             </MenuTrigger>
             <MenuPopover className="menu-popover-smooth">
               <MenuList>
-                <MenuItem>关于 xDoc</MenuItem>
+                <MenuItem onClick={() => setShowAbout(true)}>关于 xDoc</MenuItem>
               </MenuList>
             </MenuPopover>
           </Menu>
 
           <div className="menu-spacer" />
-          {loading && <Spinner size="tiny" />}
+          {settings.loading && <Spinner size="tiny" />}
           {isPdfSelected && (
-            fulltextExtracting ? (
+            aiChat.fulltextExtracting ? (
               <Button
                 appearance="transparent"
                 className="menu-btn"
-                onClick={handleFulltextCancel}
+                onClick={aiChat.handleFulltextCancel}
                 title="取消全文提取"
               >
                 <Spinner size="tiny" style={{ marginRight: 4 }} />
-                取消 ({fulltextProgress.current}/{fulltextProgress.total})
+                取消 ({aiChat.fulltextProgress.current}/{aiChat.fulltextProgress.total})
               </Button>
             ) : (
               <Button
                 appearance="transparent"
                 className="menu-btn"
-                onClick={() => void handleFulltextAiAction()}
-                disabled={!documentPath || !modelLoaded || loading}
-                title={modelLoaded ? "提取所有页面文本并进行 AI 解读" : "请先加载模型"}
+                onClick={() => void aiChat.handleFulltextAiAction()}
+                disabled={!documentPath || !settings.modelLoaded || settings.loading}
+                title={settings.modelLoaded ? "提取所有页面文本并进行 AI 解读" : "请先加载模型"}
               >
                 全文解读
               </Button>
@@ -3628,29 +1116,29 @@ function App() {
         {/* ── Tab Bar ── */}
         <div
           className="tab-bar"
-          ref={tabBarRef}
+          ref={tabs.tabBarRef}
           onPointerMove={(e) => {
-            if (!dragStartRef.current) return;
-            const { x, y, tabId } = dragStartRef.current;
-            if (!dragTabId && (Math.abs(e.clientX - x) > 5 || Math.abs(e.clientY - y) > 5)) {
-              setDragTabId(tabId);
+            if (!tabs.dragStartRef.current) return;
+            const { x, y, tabId } = tabs.dragStartRef.current;
+            if (!tabs.dragTabId && (Math.abs(e.clientX - x) > 5 || Math.abs(e.clientY - y) > 5)) {
+              tabs.setDragTabId(tabId);
             }
-            if (dragTabId) {
+            if (tabs.dragTabId) {
               const el = document.elementFromPoint(e.clientX, e.clientY);
               const tabEl = el?.closest("[data-tab-id]") as HTMLElement | null;
               const overId = tabEl?.dataset.tabId ?? null;
-              if (overId && overId !== dragTabId) {
-                setDragOverTabId(overId);
+              if (overId && overId !== tabs.dragTabId) {
+                tabs.setDragOverTabId(overId);
               } else {
-                setDragOverTabId(null);
+                tabs.setDragOverTabId(null);
               }
             }
           }}
           onPointerUp={() => {
-            if (dragTabId && dragOverTabId && dragTabId !== dragOverTabId) {
-              setTabs(prev => {
-                const fromIdx = prev.findIndex(t => t.id === dragTabId);
-                const toIdx = prev.findIndex(t => t.id === dragOverTabId);
+            if (tabs.dragTabId && tabs.dragOverTabId && tabs.dragTabId !== tabs.dragOverTabId) {
+              tabs.setTabs(prev => {
+                const fromIdx = prev.findIndex(t => t.id === tabs.dragTabId);
+                const toIdx = prev.findIndex(t => t.id === tabs.dragOverTabId);
                 if (fromIdx === -1 || toIdx === -1) return prev;
                 const newTabs = [...prev];
                 const [moved] = newTabs.splice(fromIdx, 1);
@@ -3658,20 +1146,20 @@ function App() {
                 return newTabs;
               });
             }
-            dragStartRef.current = null;
-            setDragTabId(null);
-            setDragOverTabId(null);
+            tabs.dragStartRef.current = null;
+            tabs.setDragTabId(null);
+            tabs.setDragOverTabId(null);
           }}
         >
-          {tabs.map((tab) => (
+          {tabs.tabs.map((tab) => (
             <div
               key={tab.id}
               data-tab-id={tab.id}
-              className={`tab-item ${activeTabId === tab.id ? "active" : ""} ${dragTabId === tab.id ? "dragging" : ""} ${dragOverTabId === tab.id && dragTabId !== tab.id ? "drag-over" : ""}`}
-              onClick={() => { if (!dragTabId) switchToTab(tab.id); }}
+              className={`tab-item ${tabs.activeTabId === tab.id ? "active" : ""} ${tabs.dragTabId === tab.id ? "dragging" : ""} ${tabs.dragOverTabId === tab.id && tabs.dragTabId !== tab.id ? "drag-over" : ""}`}
+              onClick={() => { if (!tabs.dragTabId) tabs.switchToTab(tab.id, clearCurrentDocument, loadPageData, grobid.triggerGrobidParse); }}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
-                dragStartRef.current = { x: e.clientX, y: e.clientY, tabId: tab.id };
+                tabs.dragStartRef.current = { x: e.clientX, y: e.clientY, tabId: tab.id };
               }}
             >
               <span className="tab-title">{tab.title}</span>
@@ -3680,7 +1168,7 @@ function App() {
                   className="tab-close-btn"
                   onClick={(e) => {
                     e.stopPropagation();
-                    closeTab(tab.id);
+                    tabs.closeTab(tab.id, clearCurrentDocument, loadPageData, grobid.triggerGrobidParse, settings.modelLoaded, settings.scoreThreshold);
                   }}
                   onPointerDown={(e) => e.stopPropagation()}
                   title="关闭标签"
@@ -3693,42 +1181,36 @@ function App() {
           <button
             className="tab-add-btn"
             onClick={() => {
-              setTabs(prev => {
-                const homeTab: TabInfo = { id: HOME_TAB_ID, title: "主页", type: "home" };
-                const withoutHome = prev.filter(t => t.id !== HOME_TAB_ID);
-                return [...withoutHome, homeTab];
-              });
-              setActiveTabId(HOME_TAB_ID);
-              clearCurrentDocument();
+              tabs.addHomeTab(clearCurrentDocument);
             }}
             title="返回主页"
           >
             +
           </button>
-          {activeTabId !== HOME_TAB_ID && isPdfSelected && (
+          {tabs.activeTabId !== HOME_TAB_ID && isPdfSelected && (
             <button
-              className={`tab-ref-toggle-btn ${refSidebarOpen ? "active" : ""}`}
-              onClick={() => setRefSidebarOpen(v => !v)}
+              className={`tab-ref-toggle-btn ${sidebar.refSidebarOpen ? "active" : ""}`}
+              onClick={() => sidebar.setRefSidebarOpen(v => !v)}
               title="文献信息 & 参考文献"
-              style={refSidebarOpen ? { color: "#00D4BB", background: "rgba(0,212,187,0.12)" } : {}}
+              style={sidebar.refSidebarOpen ? { color: "#00D4BB", background: "rgba(0,212,187,0.12)" } : {}}
             ><BookOpen size={14} /></button>
           )}
         </div>
 
-        {activeTabId === HOME_TAB_ID ? (
+        {tabs.activeTabId === HOME_TAB_ID ? (
           <Card className="panel-card">
             <HomePage
-              papers={papersList}
-              onOpenPaper={openPaperTab}
-              onImportPapers={handleImportPapers}
-              onDeletePaper={handleDeletePaper}
-              onDropImport={handleDropImport}
-              onExtractMetadata={handleExtractMetadata}
-              extractingPaperId={extractingPaperId}
-              grobidStatusMap={grobidStatusMap}
-              llmSettings={llmSettings}
-              onUpdateTitleTranslation={handleUpdateTitleTranslation}
-              onUpdateAbstractTranslation={handleUpdateAbstractTranslation}
+              papers={papers.papersList}
+              onOpenPaper={(paper) => tabs.openPaperTab(paper, loadPageData, grobid.triggerGrobidParse, settings.modelLoaded, settings.scoreThreshold)}
+              onImportPapers={papers.handleImportPapers}
+              onDeletePaper={papers.handleDeletePaper}
+              onDropImport={papers.handleDropImport}
+              onExtractMetadata={papers.handleExtractMetadata}
+              extractingPaperId={papers.extractingPaperId}
+              grobidStatusMap={grobid.grobidStatusMap}
+              llmSettings={settings.llmSettings}
+              onUpdateTitleTranslation={papers.handleUpdateTitleTranslation}
+              onUpdateAbstractTranslation={papers.handleUpdateAbstractTranslation}
               onSelectPaper={handleHomeSelectPaper}
             />
           </Card>
@@ -3736,24 +1218,24 @@ function App() {
         <Card className="panel-card visual-card">
           <div className="main-layout" ref={mainLayoutRef}>
             <div className="pdf-pane" style={{ 
-              width: leftPaneWidth, 
-              flex: typeof leftPaneWidth === "string" ? `0 0 ${leftPaneWidth}` : "none" 
+              width: zoom.leftPaneWidth, 
+              flex: typeof zoom.leftPaneWidth === "string" ? `0 0 ${zoom.leftPaneWidth}` : "none" 
             }}>
               <div className="visual-body">
-                {errorMessage && (
+                {settings.errorMessage && (
                   <MessageBar intent="error" className="error-bar">
-                    <MessageBarBody>{errorMessage}</MessageBarBody>
+                    <MessageBarBody>{settings.errorMessage}</MessageBarBody>
                   </MessageBar>
                 )}
 
                 {isPdfSelected && previewSrc && (
                   <div className="pdf-toolbar">
                     <Button
-                      appearance={sidebarOpen ? "subtle" : "transparent"}
+                      appearance={sidebar.sidebarOpen ? "subtle" : "transparent"}
                       size="small"
-                      className={`toolbar-btn ${sidebarOpen ? "toolbar-btn-active" : ""}`}
+                      className={`toolbar-btn ${sidebar.sidebarOpen ? "toolbar-btn-active" : ""}`}
                       icon={<LayoutPanelLeft size={15} />}
-                      onClick={toggleSidebar}
+                      onClick={sidebar.toggleSidebar}
                       title="文献大纲"
                     />
                     <div className="pdf-toolbar-separator" />
@@ -3763,7 +1245,7 @@ function App() {
                         size="small"
                         className="toolbar-btn"
                         icon={<ZoomOut size={15} />}
-                        onClick={handleZoomOut}
+                        onClick={zoom.handleZoomOut}
                         title="缩小"
                       />
                       <Menu positioning="below-end">
@@ -3774,22 +1256,22 @@ function App() {
                             className="toolbar-btn zoom-label-btn"
                             title="缩放比例"
                           >
-                            <span className="zoom-label">{effectiveZoomPercent}%</span>
+                            <span className="zoom-label">{zoom.effectiveZoomPercent}%</span>
                             <ChevronDown size={12} />
                           </Button>
                         </MenuTrigger>
                         <MenuPopover className="menu-popover-smooth">
                           <MenuList>
-                            <MenuItem onClick={() => handleZoomPreset(0.5)}>50%</MenuItem>
-                            <MenuItem onClick={() => handleZoomPreset(0.75)}>75%</MenuItem>
-                            <MenuItem onClick={() => handleZoomPreset(1.0)}>100%</MenuItem>
-                            <MenuItem onClick={() => handleZoomPreset(1.25)}>125%</MenuItem>
-                            <MenuItem onClick={() => handleZoomPreset(1.5)}>150%</MenuItem>
-                            <MenuItem onClick={() => handleZoomPreset(2.0)}>200%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(0.5)}>50%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(0.75)}>75%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(1.0)}>100%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(1.25)}>125%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(1.5)}>150%</MenuItem>
+                            <MenuItem onClick={() => zoom.handleZoomPreset(2.0)}>200%</MenuItem>
                             <div className="toolbar-menu-divider" />
-                            <MenuItem onClick={() => setZoomMode("fit_page")}>适应页面</MenuItem>
-                            <MenuItem onClick={() => setZoomMode("fit_width")}>适应宽度</MenuItem>
-                            <MenuItem onClick={() => setZoomMode("fit_height")}>适应高度</MenuItem>
+                            <MenuItem onClick={() => settings.setZoomMode("fit_page")}>适应页面</MenuItem>
+                            <MenuItem onClick={() => settings.setZoomMode("fit_width")}>适应宽度</MenuItem>
+                            <MenuItem onClick={() => settings.setZoomMode("fit_height")}>适应高度</MenuItem>
                           </MenuList>
                         </MenuPopover>
                       </Menu>
@@ -3798,7 +1280,7 @@ function App() {
                         size="small"
                         className="toolbar-btn"
                         icon={<ZoomIn size={15} />}
-                        onClick={handleZoomIn}
+                        onClick={zoom.handleZoomIn}
                         title="放大"
                       />
                     </div>
@@ -3830,7 +1312,7 @@ function App() {
                         icon={<Type size={15} />}
                         onClick={() => {
                           setSelectMode("text");
-                          setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+                          aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
                           window.getSelection()?.removeAllRanges();
                         }}
                         title="文字选择模式"
@@ -3838,102 +1320,102 @@ function App() {
                       <Button
                         appearance={selectMode === "box" ? "subtle" : "transparent"}
                         size="small"
-                        disabled={!modelLoaded}
-                        className={`toolbar-btn ${selectMode === "box" && modelLoaded ? "toolbar-btn-active" : ""}`}
+                        disabled={!settings.modelLoaded}
+                        className={`toolbar-btn ${selectMode === "box" && settings.modelLoaded ? "toolbar-btn-active" : ""}`}
                         icon={<Square size={15} />}
                         onClick={() => {
                           setSelectMode("box");
-                          setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+                          aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
                           window.getSelection()?.removeAllRanges();
                         }}
-                        title={modelLoaded ? "框选模式" : "需安装布局模型"}
+                        title={settings.modelLoaded ? "框选模式" : "需安装布局模型"}
                       />
                     </div>
                     <div className="pdf-toolbar-separator" />
                     <div className="pdf-toolbar-group">
                       <Button
-                        appearance={annotationMode === "pen" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "pen" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "pen" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "pen" ? "toolbar-btn-active" : ""}`}
                         icon={<Pencil size={15} />}
-                        onClick={() => handleAnnotationModeChange("pen")}
+                        onClick={() => annotations.handleAnnotationModeChange("pen")}
                         title="画笔"
                       />
                       <Button
-                        appearance={annotationMode === "rect" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "rect" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "rect" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "rect" ? "toolbar-btn-active" : ""}`}
                         icon={<Square size={15} />}
-                        onClick={() => handleAnnotationModeChange("rect")}
+                        onClick={() => annotations.handleAnnotationModeChange("rect")}
                         title="矩形"
                       />
                       <Button
-                        appearance={annotationMode === "ellipse" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "ellipse" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "ellipse" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "ellipse" ? "toolbar-btn-active" : ""}`}
                         icon={<Circle size={15} />}
-                        onClick={() => handleAnnotationModeChange("ellipse")}
+                        onClick={() => annotations.handleAnnotationModeChange("ellipse")}
                         title="椭圆"
                       />
                       <Button
-                        appearance={annotationMode === "line" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "line" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "line" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "line" ? "toolbar-btn-active" : ""}`}
                         icon={<Minus size={15} />}
-                        onClick={() => handleAnnotationModeChange("line")}
+                        onClick={() => annotations.handleAnnotationModeChange("line")}
                         title="直线"
                       />
                       <Button
-                        appearance={annotationMode === "text" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "text" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "text" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "text" ? "toolbar-btn-active" : ""}`}
                         icon={<Type size={15} />}
-                        onClick={() => handleAnnotationModeChange("text")}
+                        onClick={() => annotations.handleAnnotationModeChange("text")}
                         title="文字标注"
                       />
                       <Button
-                        appearance={annotationMode === "eraser" ? "subtle" : "transparent"}
+                        appearance={annotations.annotationMode === "eraser" ? "subtle" : "transparent"}
                         size="small"
-                        className={`toolbar-btn ${annotationMode === "eraser" ? "toolbar-btn-active" : ""}`}
+                        className={`toolbar-btn ${annotations.annotationMode === "eraser" ? "toolbar-btn-active" : ""}`}
                         icon={<Eraser size={15} />}
-                        onClick={() => handleAnnotationModeChange("eraser")}
+                        onClick={() => annotations.handleAnnotationModeChange("eraser")}
                         title="橡皮擦"
                       />
-                      {annotationMode === "eraser" && (
+                      {annotations.annotationMode === "eraser" && (
                         <div className="eraser-mode-toggle">
                           <button
-                            className={`eraser-mode-btn ${eraserMode === "free" ? "active" : ""}`}
-                            onClick={() => setEraserMode("free")}
+                            className={`eraser-mode-btn ${annotations.eraserMode === "free" ? "active" : ""}`}
+                            onClick={() => annotations.setEraserMode("free")}
                             title="自由擦除 — 按轨迹擦除"
                           >自由</button>
                           <button
-                            className={`eraser-mode-btn ${eraserMode === "stroke" ? "active" : ""}`}
-                            onClick={() => setEraserMode("stroke")}
+                            className={`eraser-mode-btn ${annotations.eraserMode === "stroke" ? "active" : ""}`}
+                            onClick={() => annotations.setEraserMode("stroke")}
                             title="整条擦除 — 点击删除整条笔画"
                           >整条</button>
                         </div>
                       )}
                     </div>
-                    {annotationMode && (
+                    {annotations.annotationMode && (
                       <>
                         <div className="pdf-toolbar-separator" />
                         <div className="pdf-toolbar-group annotation-controls">
-                          {annotationMode !== "eraser" && (
+                          {annotations.annotationMode !== "eraser" && (
                             <>
                               <div className="annotation-color-swatches">
                                 {["#FF3838", "#4D96FF", "#48F90A", "#FFB21D", "#C084FC", "#FFFFFF", "#000000"].map(c => (
                                   <div
                                     key={c}
-                                    className={`annotation-swatch ${annotationColor === c ? "annotation-swatch-active" : ""}`}
+                                    className={`annotation-swatch ${annotations.annotationColor === c ? "annotation-swatch-active" : ""}`}
                                     style={{ background: c }}
-                                    onClick={() => setAnnotationColor(c)}
+                                    onClick={() => annotations.setAnnotationColor(c)}
                                   />
                                 ))}
                               </div>
                               <select
                                 className="annotation-size-select"
-                                value={annotationSize}
-                                onChange={e => setAnnotationSize(Number(e.target.value))}
+                                value={annotations.annotationSize}
+                                onChange={e => annotations.setAnnotationSize(Number(e.target.value))}
                               >
                                 <option value={1}>细</option>
                                 <option value={2}>中</option>
@@ -3950,8 +1432,8 @@ function App() {
                             size="small"
                             className="toolbar-btn"
                             icon={<Undo2 size={15} />}
-                            onClick={handleAnnotationUndo}
-                            disabled={annotationHistory.length === 0}
+                            onClick={annotations.handleAnnotationUndo}
+                            disabled={annotations.annotationHistory.length === 0}
                             title="撤销"
                           />
                           <Button
@@ -3959,8 +1441,8 @@ function App() {
                             size="small"
                             className="toolbar-btn"
                             icon={<Redo2 size={15} />}
-                            onClick={handleAnnotationRedo}
-                            disabled={annotationRedoStack.length === 0}
+                            onClick={annotations.handleAnnotationRedo}
+                            disabled={annotations.annotationRedoStack.length === 0}
                             title="重做"
                           />
                         </div>
@@ -3971,7 +1453,7 @@ function App() {
                             size="small"
                             className="toolbar-btn"
                             icon={<Trash2 size={15} />}
-                            onClick={handleClearAnnotations}
+                            onClick={annotations.handleClearAnnotations}
                             title="清空所有标注"
                           />
                           <Button
@@ -3979,8 +1461,8 @@ function App() {
                             size="small"
                             className="toolbar-btn"
                             icon={<Download size={15} />}
-                            onClick={handleExportAnnotations}
-                            disabled={exporting}
+                            onClick={annotations.handleExportAnnotations}
+                            disabled={annotations.exporting}
                             title="导出标注到新 PDF"
                           />
                         </div>
@@ -4020,30 +1502,30 @@ function App() {
                 )}
 
                 <div className="pdf-view-row">
-                {isPdfSelected && previewSrc && sidebarOpen && (
-                  <div className="pdf-sidebar" style={{ width: sidebarWidth }}>
+                {isPdfSelected && previewSrc && sidebar.sidebarOpen && (
+                  <div className="pdf-sidebar" style={{ width: sidebar.sidebarWidth }}>
                     <div className="pdf-sidebar-tabs">
                       <button
-                        className={`pdf-sidebar-tab ${sidebarMode === "thumbnails" ? "active" : ""}`}
-                        onClick={() => switchSidebarMode("thumbnails")}
+                        className={`pdf-sidebar-tab ${sidebar.sidebarMode === "thumbnails" ? "active" : ""}`}
+                        onClick={() => sidebar.switchSidebarMode("thumbnails")}
                       >
                         <Images size={13} />
                         <span>缩略图</span>
                       </button>
                       <button
-                        className={`pdf-sidebar-tab ${sidebarMode === "outline" ? "active" : ""}`}
-                        onClick={() => switchSidebarMode("outline")}
+                        className={`pdf-sidebar-tab ${sidebar.sidebarMode === "outline" ? "active" : ""}`}
+                        onClick={() => sidebar.switchSidebarMode("outline")}
                       >
                         <ListTree size={13} />
                         <span>大纲</span>
                       </button>
                     </div>
                     <div className="pdf-sidebar-content">
-                      {sidebarLoading ? (
+                      {sidebar.sidebarLoading ? (
                         <div className="pdf-sidebar-loading"><Spinner size="small" /></div>
-                      ) : sidebarMode === "thumbnails" ? (
+                      ) : sidebar.sidebarMode === "thumbnails" ? (
                         <div className="pdf-sidebar-thumbnails">
-                          {thumbnails.map((thumb, idx) => (
+                          {sidebar.thumbnails.map((thumb, idx) => (
                             <div
                               key={idx}
                               className={`pdf-thumbnail ${idx === pdfPageIndex ? "active" : ""}`}
@@ -4058,10 +1540,10 @@ function App() {
                         </div>
                       ) : (
                         <div className="pdf-sidebar-outline">
-                          {outlineItems.length === 0 ? (
+                          {sidebar.outlineItems.length === 0 ? (
                             <div className="pdf-sidebar-empty">此文档无大纲</div>
                           ) : (
-                            outlineItems.map((item, idx) => (
+                            sidebar.outlineItems.map((item, idx) => (
                               <div
                                 key={idx}
                                 className={`pdf-outline-item ${item.page_index === pdfPageIndex ? "active" : ""}`}
@@ -4080,10 +1562,10 @@ function App() {
                     </div>
                   </div>
                 )}
-                {isPdfSelected && previewSrc && sidebarOpen && (
+                {isPdfSelected && previewSrc && sidebar.sidebarOpen && (
                   <div
                     className="resizer-v"
-                    onMouseDown={handleSidebarDragStart}
+                    onMouseDown={sidebar.handleSidebarDragStart}
                   />
                 )}
 
@@ -4116,64 +1598,61 @@ function App() {
 
                 <div className="pdf-stage-column">
                 <div
-                  ref={stageRef}
+                  ref={zoom.stageRef}
                   className={`visual-stage ${!previewSrc ? "visual-stage-empty" : ""} ${dragMode === "move" && previewSrc ? "visual-stage-move" : ""}`}
                   onClick={(e) => {
-                    if (justDraggedRef.current) return;
-                    // Don't clear selection when annotating
-                    if (annotationMode) return;
-                    // Only trigger on clicks directly on the stage or image-wrap (blank area)
+                    if (zoom.justDraggedRef.current) return;
+                    if (annotations.annotationMode) return;
                     const target = e.target as HTMLElement;
                     if (target.closest(".bbox")) return;
-                    // Save current AI result to cache before clearing
-                    if (selectedParagraph && aiResult) {
-                      const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
-                      paragraphAiCacheRef.current.set(currentKey, {
-                        aiAction: aiAction,
-                        aiResult: aiResult,
-                        qaHistory: qaHistory,
-                        qaSourceText: qaSourceTextRef.current,
+                    if (selectedParagraph && aiChat.aiResult) {
+                      const currentKey = `${aiChat.selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+                      aiChat.paragraphAiCacheRef.current.set(currentKey, {
+                        aiAction: aiChat.aiAction,
+                        aiResult: aiChat.aiResult,
+                        qaHistory: aiChat.qaHistory,
+                        qaSourceText: aiChat.qaSourceTextRef.current,
                       });
                     }
                     setSelectedParagraph(null);
                     setSelectedFigure(null);
                     setFigureImageDataUrl("");
-                    if (fulltextAiResultRef.current) {
-                      setAiAction("全文解读");
-                      setAiResult(fulltextAiResultRef.current);
-                      setQaHistory(fulltextQaHistoryRef.current);
-                      qaSourceTextRef.current = fulltextSourceTextRef.current;
+                    if (aiChat.fulltextAiResultRef.current) {
+                      aiChat.setAiAction("全文解读");
+                      aiChat.setAiResult(aiChat.fulltextAiResultRef.current);
+                      aiChat.setQaHistory(aiChat.fulltextQaHistoryRef.current);
+                      aiChat.qaSourceTextRef.current = aiChat.fulltextSourceTextRef.current;
                     } else {
-                      setAiAction("");
-                      setAiResult("");
-                      setQaHistory([]);
+                      aiChat.setAiAction("");
+                      aiChat.setAiResult("");
+                      aiChat.setQaHistory([]);
                     }
                   }}
                 >
                   {previewSrc ? (
-                    <div className="image-wrap" style={imageWrapSx}>
+                    <div className="image-wrap" style={zoom.imageWrapSx}>
                       <img
-                        ref={imgRef}
+                        ref={zoom.imgRef}
                         src={previewSrc}
                         alt="Document Preview"
                         className="preview-image"
-                        style={previewImageSx}
+                        style={zoom.previewImageSx}
                         onLoad={() => {
-                          if (imgRef.current) {
-                            setDisplaySize({
-                              width: imgRef.current.clientWidth,
-                              height: imgRef.current.clientHeight,
+                          if (zoom.imgRef.current) {
+                            zoom.setDisplaySize({
+                              width: zoom.imgRef.current.clientWidth,
+                              height: zoom.imgRef.current.clientHeight,
                             });
                           }
                         }}
                       />
 
-                      <div className="overlay-layer" style={{ width: displaySize.width, height: displaySize.height, display: selectMode === "text" ? "none" : undefined }}>
+                      <div className="overlay-layer" style={{ width: zoom.displaySize.width, height: zoom.displaySize.height, display: selectMode === "text" ? "none" : undefined }}>
                         {segments.map((seg, idx) => {
-                          const left = Math.max(0, seg.xmin * scale.x);
-                          const top = Math.max(0, seg.ymin * scale.y);
-                          const width = Math.max(1, (seg.xmax - seg.xmin) * scale.x);
-                          const height = Math.max(1, (seg.ymax - seg.ymin) * scale.y);
+                          const left = Math.max(0, seg.xmin * zoom.scale.x);
+                          const top = Math.max(0, seg.ymin * zoom.scale.y);
+                          const width = Math.max(1, (seg.xmax - seg.xmin) * zoom.scale.x);
+                          const height = Math.max(1, (seg.ymax - seg.ymin) * zoom.scale.y);
 
                           const isSelected = selectedParagraph === seg;
                           return (
@@ -4191,33 +1670,31 @@ function App() {
                                 pointerEvents: dragMode === "move" ? "none" : "auto",
                               }}
                               onClick={() => {
-                                // Save current paragraph's AI result to cache before switching
-                                if (selectedParagraph && selectedParagraph !== seg && aiResult) {
-                                  const currentKey = `${selectedParagraphPageRef.current}:${selectedParagraph.text}`;
-                                  paragraphAiCacheRef.current.set(currentKey, {
-                                    aiAction: aiAction,
-                                    aiResult: aiResult,
-                                    qaHistory: qaHistory,
-                                    qaSourceText: qaSourceTextRef.current,
+                                if (selectedParagraph && selectedParagraph !== seg && aiChat.aiResult) {
+                                  const currentKey = `${aiChat.selectedParagraphPageRef.current}:${selectedParagraph.text}`;
+                                  aiChat.paragraphAiCacheRef.current.set(currentKey, {
+                                    aiAction: aiChat.aiAction,
+                                    aiResult: aiChat.aiResult,
+                                    qaHistory: aiChat.qaHistory,
+                                    qaSourceText: aiChat.qaSourceTextRef.current,
                                   });
                                 }
-                                // Check if new paragraph has cached AI result
                                 const newKey = `${pdfPageIndex}:${seg.text}`;
-                                const cached = paragraphAiCacheRef.current.get(newKey);
-                                selectedParagraphPageRef.current = pdfPageIndex;
+                                const cached = aiChat.paragraphAiCacheRef.current.get(newKey);
+                                aiChat.selectedParagraphPageRef.current = pdfPageIndex;
                                 setSelectedFigure(null);
                                 setFigureImageDataUrl("");
                                 setSelectedParagraph(seg);
                                 if (cached) {
-                                  setAiAction(cached.aiAction);
-                                  setAiResult(cached.aiResult);
-                                  setQaHistory(cached.qaHistory);
-                                  qaSourceTextRef.current = cached.qaSourceText;
+                                  aiChat.setAiAction(cached.aiAction);
+                                  aiChat.setAiResult(cached.aiResult);
+                                  aiChat.setQaHistory(cached.qaHistory);
+                                  aiChat.qaSourceTextRef.current = cached.qaSourceText;
                                 } else {
-                                  setAiAction("");
-                                  setAiResult("");
-                                  setQaHistory([]);
-                                  qaSourceTextRef.current = "";
+                                  aiChat.setAiAction("");
+                                  aiChat.setAiResult("");
+                                  aiChat.setQaHistory([]);
+                                  aiChat.qaSourceTextRef.current = "";
                                 }
                               }}
                               onMouseEnter={(e) => {
@@ -4236,10 +1713,10 @@ function App() {
 
                         {boxes.map((box, idx) => {
                           const color = COLORS[box.cls_id % COLORS.length];
-                          const left = Math.max(0, box.xmin * scale.x);
-                          const top = Math.max(0, box.ymin * scale.y);
-                          const width = Math.max(1, (box.xmax - box.xmin) * scale.x);
-                          const height = Math.max(1, (box.ymax - box.ymin) * scale.y);
+                          const left = Math.max(0, box.xmin * zoom.scale.x);
+                          const top = Math.max(0, box.ymin * zoom.scale.y);
+                          const width = Math.max(1, (box.xmax - box.xmin) * zoom.scale.x);
+                          const height = Math.max(1, (box.ymax - box.ymin) * zoom.scale.y);
                           const clickable = isVisualBox(box.cls_id);
                           const isFigSelected = selectedFigure === box;
 
@@ -4268,39 +1745,39 @@ function App() {
                         <div
                           ref={textLayerRef}
                           className="pdf-text-layer"
-                          style={{ width: displaySize.width, height: displaySize.height }}
+                          style={{ width: zoom.displaySize.width, height: zoom.displaySize.height }}
                           onMouseUp={handlePdfTextSelection}
                         />
                       )}
                       {/* Annotation canvas overlay — sits above bboxes */}
                       <canvas
-                        ref={annotationCanvasRef}
+                        ref={annotations.annotationCanvasRef}
                         className="annotation-canvas"
                         style={{
-                          width: displaySize.width,
-                          height: displaySize.height,
-                          pointerEvents: annotationMode ? "auto" : "none",
-                          cursor: annotationMode
-                            ? annotationMode === "text"
+                          width: zoom.displaySize.width,
+                          height: zoom.displaySize.height,
+                          pointerEvents: annotations.annotationMode ? "auto" : "none",
+                          cursor: annotations.annotationMode
+                            ? annotations.annotationMode === "text"
                               ? "text"
-                              : annotationMode === "eraser"
+                              : annotations.annotationMode === "eraser"
                                 ? ERASER_CURSOR
                                 : "crosshair"
                             : undefined,
                         }}
-                        onPointerDown={handleAnnotationPointerDown}
-                        onPointerMove={handleAnnotationPointerMove}
-                        onPointerUp={handleAnnotationPointerUp}
+                        onPointerDown={annotations.handleAnnotationPointerDown}
+                        onPointerMove={annotations.handleAnnotationPointerMove}
+                        onPointerUp={annotations.handleAnnotationPointerUp}
                         onPointerCancel={() => {
-                          annotationDrawingRef.current = false;
-                          annotationCurrentShapeRef.current = null;
+                          annotations.annotationDrawingRef.current = false;
+                          annotations.annotationCurrentShapeRef.current = null;
                         }}
                       />
                       {/* PDF text selection floating AI menu */}
-                      {pdfFloatingMenu.visible && (
+                      {aiChat.pdfFloatingMenu.visible && (
                         <div
                           className="pdf-floating-ai-menu"
-                          style={{ left: pdfFloatingMenu.x, top: pdfFloatingMenu.y }}
+                          style={{ left: aiChat.pdfFloatingMenu.x, top: aiChat.pdfFloatingMenu.y }}
                         >
                           <button
                             className="floating-ai-btn"
@@ -4325,7 +1802,7 @@ function App() {
                     </div>
                   ) : (
                     <div className="empty-state">
-                      <Button className="empty-open-btn" appearance="primary" onClick={() => void selectDocument()} disabled={loading}>
+                      <Button className="empty-open-btn" appearance="primary" onClick={() => void selectDocument()} disabled={settings.loading}>
                         选择文件
                       </Button>
                       <Text className="empty-hint">请选择 PDF 或图片开始</Text>
@@ -4343,15 +1820,15 @@ function App() {
               </div>
             </div>
 
-            <div className="resizer-v" onMouseDown={handleMouseDownV} />
+            <div className="resizer-v" onMouseDown={zoom.handleMouseDownV} />
 
-            <div className="right-pane" ref={rightPaneRef}>
+            <div className="right-pane" ref={aiChat.rightPaneRef}>
               {selectMode === "box" && (
                 <>
               <div className="text-pane" onMouseUp={handleTextSelection} style={{
-                height: topPaneHeight,
-                flex: typeof topPaneHeight === "string" ? `0 0 ${topPaneHeight}` : "none",
-                fontFamily: textFontFamily
+                height: zoom.topPaneHeight,
+                flex: typeof zoom.topPaneHeight === "string" ? `0 0 ${zoom.topPaneHeight}` : "none",
+                fontFamily: settings.textFontFamily
               }}>
                 {/* ── Panel header ── */}
                 <div className="pane-header">
@@ -4359,21 +1836,21 @@ function App() {
                   <div className="pane-header-actions">
                     <button
                       className="font-size-btn"
-                      onClick={() => setTextFontSize(s => Math.max(10, s - 1))}
+                      onClick={() => settings.setTextFontSize(s => Math.max(10, s - 1))}
                       title="缩小字号"
                     >A-</button>
-                    <span className="font-size-label">{textFontSize}</span>
+                    <span className="font-size-label">{settings.textFontSize}</span>
                     <button
                       className="font-size-btn"
-                      onClick={() => setTextFontSize(s => Math.min(40, s + 1))}
+                      onClick={() => settings.setTextFontSize(s => Math.min(40, s + 1))}
                       title="放大字号"
                     >A+</button>
                   </div>
                   {selectedFigure ? (
-                    <button className="batch-ai-btn" onClick={handleImageAiAction}>
+                    <button className="batch-ai-btn" onClick={aiChat.handleImageAiAction}>
                       <Bot size={13} /> 解读图片
                     </button>
-                  ) : (selectedParagraph || ocrText) ? (
+                  ) : (selectedParagraph || ocr.ocrText) ? (
                     <>
                       <button className="batch-ai-btn" onClick={() => handleBatchAiAction("解读")}>
                         <Bot size={13} /> 解读
@@ -4409,11 +1886,11 @@ function App() {
                   ) : selectedParagraph ? (
                     <>
                       {/* PDF-extracted text with word segmentation */}
-                      {pdfTextExtractionEnabled && (
+                      {settings.pdfTextExtractionEnabled && (
                         <div className="pane-section-card">
                           <div className="pane-section-label">PDF 原文</div>
-                          <div className="ocr-latex-content pane-text-content" style={{ fontSize: textFontSize }}>
-                            {splitParagraphWords.map((word, idx) => (
+                          <div className="ocr-latex-content pane-text-content" style={{ fontSize: settings.textFontSize }}>
+                            {ocr.splitParagraphWords.map((word, idx) => (
                               <span
                                 key={idx}
                                 className="word-span"
@@ -4430,22 +1907,22 @@ function App() {
                       )}
 
                       {/* OCR result with LaTeX rendering */}
-                      {ocrEnabled && (
+                      {settings.ocrEnabled && (
                         <div className="pane-section-card">
                           <div className="pane-section-label">OCR 识别结果</div>
-                          {ocrLoading ? (
+                          {ocr.ocrLoading ? (
                             <div className="pane-placeholder">
                               <Spinner size="tiny" />
                               <span>OCR 识别中...</span>
                             </div>
-                          ) : ocrError ? (
-                            <div className="pane-placeholder pane-error">{ocrError}</div>
-                          ) : ocrText ? (
+                          ) : ocr.ocrError ? (
+                            <div className="pane-placeholder pane-error">{ocr.ocrError}</div>
+                          ) : ocr.ocrText ? (
                             <div
                               className="ocr-latex-content pane-text-content"
-                              style={{ fontSize: textFontSize }}
+                              style={{ fontSize: settings.textFontSize }}
                             >
-                              {renderOcrNodes(splitOcrText)}
+                              {renderOcrNodes(ocr.splitOcrText)}
                             </div>
                           ) : (
                             <div className="pane-placeholder">点击段落以进行 OCR 识别</div>
@@ -4462,36 +1939,36 @@ function App() {
                 </div>
               </div>
 
-              <div className="resizer-h" onMouseDown={handleMouseDownH} />
+              <div className="resizer-h" onMouseDown={zoom.handleMouseDownH} />
                 </>
               )}
 
-              <div className="ai-pane" style={selectMode === "text" ? { flex: 1, fontFamily: aiFontFamily } : { fontFamily: aiFontFamily }}>
+              <div className="ai-pane" style={selectMode === "text" ? { flex: 1, fontFamily: settings.aiFontFamily } : { fontFamily: settings.aiFontFamily }}>
                 {/* ── Panel header ── */}
                 <div className="pane-header">
-                  <h3 className="pane-title">{aiAction || "AI 解读"}</h3>
+                  <h3 className="pane-title">{aiChat.aiAction || "AI 解读"}</h3>
                   <div className="pane-header-actions">
                     <button
                       className="font-size-btn"
-                      onClick={() => setAiFontSize(s => Math.max(10, s - 1))}
+                      onClick={() => settings.setAiFontSize(s => Math.max(10, s - 1))}
                       title="缩小字号"
                     >A-</button>
-                    <span className="font-size-label">{aiFontSize}</span>
+                    <span className="font-size-label">{settings.aiFontSize}</span>
                     <button
                       className="font-size-btn"
-                      onClick={() => setAiFontSize(s => Math.min(40, s + 1))}
+                      onClick={() => settings.setAiFontSize(s => Math.min(40, s + 1))}
                       title="放大字号"
                     >A+</button>
                   </div>
                 </div>
 
                 {/* ── Scrollable content ── */}
-                <div className="ai-pane-scroll" ref={aiScrollRef}>
-                  <div className="ai-content" style={{ fontSize: aiFontSize }}>
-                    {aiResult
-                      ? renderAiContent(aiResult)
-                      : fulltextAiResultRef.current
-                        ? renderAiContent(fulltextAiResultRef.current)
+                <div className="ai-pane-scroll" ref={aiChat.aiScrollRef}>
+                  <div className="ai-content" style={{ fontSize: settings.aiFontSize }}>
+                    {aiChat.aiResult
+                      ? aiChat.renderAiContent(aiChat.aiResult)
+                      : aiChat.fulltextAiResultRef.current
+                        ? aiChat.renderAiContent(aiChat.fulltextAiResultRef.current)
                         : (
                           <div className="pane-empty">
                             <Bot size={24} style={{ opacity: 0.25 }} />
@@ -4501,13 +1978,13 @@ function App() {
                   </div>
 
                   {/* Q&A follow-up history */}
-                  {qaHistory.length > 0 && (
-                    <div className="qa-history" style={{ fontSize: aiFontSize }}>
-                      {qaHistory.map((qa, idx) => (
+                  {aiChat.qaHistory.length > 0 && (
+                    <div className="qa-history" style={{ fontSize: settings.aiFontSize }}>
+                      {aiChat.qaHistory.map((qa, idx) => (
                         <div key={idx} className="qa-pair">
                           <div className="qa-question">Q: {qa.question}</div>
                           <div className="qa-answer">
-                            {qa.answer ? renderAiContent(qa.answer) : <Spinner size="tiny" />}
+                            {qa.answer ? aiChat.renderAiContent(qa.answer) : <Spinner size="tiny" />}
                           </div>
                         </div>
                       ))}
@@ -4516,33 +1993,33 @@ function App() {
                 </div>
 
                 {/* Q&A input - pinned to bottom */}
-                {(aiResult || fulltextAiResultRef.current) && (
+                {(aiChat.aiResult || aiChat.fulltextAiResultRef.current) && (
                   <div className="qa-input-row">
                     <input
                       className="qa-input"
                       type="text"
                       placeholder="输入追问..."
-                      value={qaInput}
-                      onChange={e => setQaInput(e.target.value)}
-                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleQaSubmit(); } }}
-                      disabled={qaLoading}
+                      value={aiChat.qaInput}
+                      onChange={e => aiChat.setQaInput(e.target.value)}
+                      onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void aiChat.handleQaSubmit(); } }}
+                      disabled={aiChat.qaLoading}
                     />
                     <button
                       className="qa-send-btn"
-                      onClick={() => void handleQaSubmit()}
-                      disabled={qaLoading || !qaInput.trim()}
+                      onClick={() => void aiChat.handleQaSubmit()}
+                      disabled={aiChat.qaLoading || !aiChat.qaInput.trim()}
                     >
-                      {qaLoading ? <Spinner size="tiny" /> : "发送"}
+                      {aiChat.qaLoading ? <Spinner size="tiny" /> : "发送"}
                     </button>
                   </div>
                 )}
               </div>
 
               {/* Floating AI Action Menu */}
-              {floatingMenu.visible && (
+              {aiChat.floatingMenu.visible && (
                 <div
                   className="floating-ai-menu"
-                  style={{ left: floatingMenu.x, top: floatingMenu.y }}
+                  style={{ left: aiChat.floatingMenu.x, top: aiChat.floatingMenu.y }}
                 >
                   <button
                     className="floating-ai-btn"
@@ -4566,20 +2043,20 @@ function App() {
               )}
             </div>
 
-            {refSidebarOpen && (
+            {sidebar.refSidebarOpen && (
               <>
-                <div className="resizer-v" onMouseDown={handleRefSidebarResize} />
+                <div className="resizer-v" onMouseDown={sidebar.handleRefSidebarResize} />
                 <ReferenceSidebar
                   paper={currentPaper}
                   documentPath={documentPath}
-                  width={refSidebarWidth}
-                  grobidDocument={grobidDocument}
-                  grobidLoading={grobidLoading}
-                  grobidError={grobidError}
-                  onReparse={() => triggerGrobidParse(documentPath, true)}
-                  onReparseStructure={triggerGrobidStructureOnly}
-                  onClearCacheAndReparse={handleClearGrobidCacheAndReparse}
-                  onClearMetadata={handleClearMetadataAndReparse}
+                  width={sidebar.refSidebarWidth}
+                  grobidDocument={grobid.grobidDocument}
+                  grobidLoading={grobid.grobidLoading}
+                  grobidError={grobid.grobidError}
+                  onReparse={() => grobid.triggerGrobidParse(documentPath, true)}
+                  onReparseStructure={grobid.triggerGrobidStructureOnly}
+                  onClearCacheAndReparse={grobid.handleClearGrobidCacheAndReparse}
+                  onClearMetadata={() => grobid.handleClearMetadataAndReparse(() => undefined, async () => {})}
                 />
               </>
             )}
@@ -4591,33 +2068,37 @@ function App() {
       <SettingsDialog
         open={settingsOpen}
         onClose={() => setSettingsOpen(false)}
-        modelPath={modelPath}
-        modelLoaded={modelLoaded}
-        scoreThreshold={scoreThreshold}
-        zoomMode={zoomMode}
-        pdfTextExtractionEnabled={pdfTextExtractionEnabled}
-        onSelectModel={selectModel}
-        onScoreThresholdChange={applyScoreThreshold}
-        onZoomModeChange={setZoomMode}
-        onPdfTextExtractionEnabledChange={setPdfTextExtractionEnabled}
-        textFontFamily={textFontFamily}
-        onTextFontFamilyChange={setTextFontFamily}
-        textFontSize={textFontSize}
-        onTextFontSizeChange={setTextFontSize}
-        aiFontFamily={aiFontFamily}
-        onAiFontFamilyChange={setAiFontFamily}
-        aiFontSize={aiFontSize}
-        onAiFontSizeChange={setAiFontSize}
-        ocrEnabled={ocrEnabled}
-        onOcrEnabledChange={setOcrEnabled}
-        ocrModelPath={ocrModelPath}
-        onOcrModelPathChange={setOcrModelPath}
-        llmSettings={llmSettings}
-        onLlmSettingsChange={setLlmSettings}
+        modelPath={settings.modelPath}
+        modelLoaded={settings.modelLoaded}
+        scoreThreshold={settings.scoreThreshold}
+        zoomMode={settings.zoomMode}
+        pdfTextExtractionEnabled={settings.pdfTextExtractionEnabled}
+        onSelectModel={settings.selectModel}
+        onScoreThresholdChange={settings.applyScoreThreshold}
+        onZoomModeChange={settings.setZoomMode}
+        onPdfTextExtractionEnabledChange={settings.setPdfTextExtractionEnabled}
+        textFontFamily={settings.textFontFamily}
+        onTextFontFamilyChange={settings.setTextFontFamily}
+        textFontSize={settings.textFontSize}
+        onTextFontSizeChange={settings.setTextFontSize}
+        aiFontFamily={settings.aiFontFamily}
+        onAiFontFamilyChange={settings.setAiFontFamily}
+        aiFontSize={settings.aiFontSize}
+        onAiFontSizeChange={settings.setAiFontSize}
+        ocrEnabled={settings.ocrEnabled}
+        onOcrEnabledChange={settings.setOcrEnabled}
+        ocrModelPath={settings.ocrModelPath}
+        onOcrModelPathChange={settings.setOcrModelPath}
+        llmSettings={settings.llmSettings}
+        onLlmSettingsChange={settings.setLlmSettings}
       />
       <ReadingReportDialog
         open={showReadingReport}
         onClose={() => setShowReadingReport(false)}
+      />
+      <AboutDialog
+        open={showAbout}
+        onClose={() => setShowAbout(false)}
       />
 
       {/* Plugin UI extensions */}

@@ -238,7 +238,7 @@ pub async fn plugin_get_full_pdf_text(
     state: State<'_, PluginState>,
 ) -> Result<String, String> {
     require_permission(&state, &plugin_id, "pdf:read")?;
-    crate::get_full_pdf_text(&file_path)
+    crate::commands::misc::get_full_pdf_text(&file_path)
 }
 
 /// Extract embedded images from PDF
@@ -250,7 +250,7 @@ pub async fn plugin_extract_pdf_images(
     state: State<'_, PluginState>,
 ) -> Result<Vec<PdfImageInfo>, String> {
     require_permission(&state, &plugin_id, "pdf:read")?;
-    crate::extract_pdf_images(&file_path, page_indices.as_deref())
+    crate::commands::pdf::extract_pdf_images(&file_path, page_indices.as_deref())
 }
 
 /// Extract images via lopdf (fallback)
@@ -262,7 +262,7 @@ pub async fn plugin_extract_pdf_images_lopdf(
     state: State<'_, PluginState>,
 ) -> Result<Vec<PdfImageInfo>, String> {
     require_permission(&state, &plugin_id, "pdf:read")?;
-    crate::extract_pdf_images_with_lopdf(&file_path, page_indices.as_deref())
+    crate::commands::pdf::extract_pdf_images_with_lopdf(&file_path, page_indices.as_deref())
 }
 
 /// Get PDF page count
@@ -278,7 +278,7 @@ pub async fn plugin_pdf_page_count(
         return Err("File not found".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<u32, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path, None)
@@ -303,7 +303,7 @@ pub async fn plugin_pdf_page_text(
         return Err("File not found".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path, None)
@@ -340,7 +340,7 @@ pub async fn plugin_pdf_outline(
         return Err("File not found".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<PluginPdfOutlineItem>, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path, None)
@@ -400,7 +400,7 @@ pub async fn plugin_pdf_search(
     let q = if cs { query.clone() } else { query.to_lowercase() };
 
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<PluginPdfSearchResult>, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path, None)
@@ -460,7 +460,7 @@ pub async fn plugin_pdf_info(
     let file_size = fs::metadata(&path_buf).ok().map(|m| m.len());
 
     tauri::async_runtime::spawn_blocking(move || -> Result<PluginPdfInfo, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path_buf, None)
@@ -548,7 +548,7 @@ pub async fn plugin_extract_first_page_metadata(
         return Err("File not found".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let bindings = crate::bind_pdfium_with_candidates()?;
+        let bindings = crate::commands::bind_pdfium_with_candidates()?;
         let pdfium = Pdfium::new(bindings);
         let document = pdfium
             .load_pdf_from_file(&path, None)

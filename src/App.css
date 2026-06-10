@@ -65,6 +65,48 @@
   }
 }
 
+/* ── Dark theme for Fluent UI Menu popovers ── */
+.menu-popover-smooth .fui-MenuPopover__surface {
+  background: rgb(42, 42, 42) !important;
+  border: 1px solid rgba(255, 255, 255, 0.10) !important;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.5) !important;
+  border-radius: 8px !important;
+  padding: 4px 0 !important;
+  min-width: 160px !important;
+}
+
+.menu-popover-smooth .fui-MenuItem {
+  color: rgba(255, 255, 255, 0.82) !important;
+  font-size: 12.5px !important;
+  padding: 6px 14px !important;
+  border-radius: 0 !important;
+  min-height: auto !important;
+  transition: background 0.1s !important;
+}
+
+.menu-popover-smooth .fui-MenuItem:hover {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #fff !important;
+}
+
+.menu-popover-smooth .fui-MenuItem[aria-disabled="true"],
+.menu-popover-smooth .fui-MenuItem.fui-MenuItem__disabled {
+  color: rgba(255, 255, 255, 0.3) !important;
+  cursor: not-allowed !important;
+}
+
+.menu-popover-smooth .fui-MenuDivider {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  margin: 3px 10px !important;
+}
+
+/* Custom menu divider (used instead of fluentui MenuDivider) */
+.menu-divider {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  margin: 3px 10px;
+}
+
 .menu-spacer {
   flex: 1;
 }
