@@ -99,6 +99,8 @@ interface Props {
   onOcrEnabledChange: (v: boolean) => void;
   ocrModelPath: string;
   onOcrModelPathChange: (v: string) => void;
+  ocrModelId: string;
+  onOcrModelIdChange: (v: string) => void;
   /* llm */
   llmSettings: LlmSettings;
   onLlmSettingsChange: (v: LlmSettings) => void;
@@ -135,6 +137,7 @@ function SettingsDialog(props: Props) {
     aiFontSize, onAiFontSizeChange,
     ocrEnabled, onOcrEnabledChange,
     ocrModelPath, onOcrModelPathChange,
+    ocrModelId, onOcrModelIdChange,
     llmSettings, onLlmSettingsChange,
   } = props;
 
@@ -148,6 +151,11 @@ function SettingsDialog(props: Props) {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [fetchModelsError, setFetchModelsError] = useState("");
 
+  // OCR model catalog
+  const [ocrModelList, setOcrModelList] = useState<Array<{
+    id: string; label: string; engine: string; description: string; params: string; downloaded: boolean;
+  }>>([]);
+
   // Check if OCR model files actually exist on disk
   const [ocrModelExists, setOcrModelExists] = useState<boolean | null>(null);
   const checkOcrModelExists = useCallback(async () => {
@@ -159,6 +167,13 @@ function SettingsDialog(props: Props) {
   }, [ocrModelPath]);
 
   useEffect(() => { checkOcrModelExists(); }, [checkOcrModelExists]);
+
+  // Fetch OCR model list
+  useEffect(() => {
+    invoke<Array<{ id: string; label: string; engine: string; description: string; params: string; downloaded: boolean }>>("list_ocr_models")
+      .then(setOcrModelList)
+      .catch((e) => console.warn("[OCR] list_ocr_models failed:", e));
+  }, []);
 
   const unlistenRef = useRef<(() => void) | null>(null);
 
@@ -177,9 +192,13 @@ function SettingsDialog(props: Props) {
             status: p.status,
           });
           if (p.status === "completed") {
-            onOcrModelPathChange("model/GLM-OCR-GGUF");
-            // Re-check model existence after download
+            // Determine the model path based on current model ID (use static map, not async list)
+            const repoName = getRepoDirName({ id: ocrModelId, engine: "" });
+            const path = `model/${repoName}`;
+            onOcrModelPathChange(path);
             checkOcrModelExists();
+            // Refresh model list to update download status
+            invoke<typeof ocrModelList>("list_ocr_models").then(setOcrModelList).catch(() => {});
           }
         },
       );
@@ -197,7 +216,12 @@ function SettingsDialog(props: Props) {
   }, [llmSettings.vendor, llmSettings.baseUrl]);
 
   /* ── download handler ─────────────────────────────────── */
-  const handleDownload = useCallback(async () => {
+  const handleDownload = useCallback(async (modelId?: string) => {
+    const targetId = modelId || ocrModelId || "glm-ocr";
+    const repoName = getRepoDirName({ id: targetId, engine: "" });
+    const targetDir = `model/${repoName}`;
+    const isPpocrv6 = targetId.startsWith("ppocrv6");
+
     setDownload({
       downloading: true,
       progress: 0,
@@ -205,9 +229,17 @@ function SettingsDialog(props: Props) {
       status: "downloading",
     });
     try {
-      await invoke<string>("download_ocr_models", {
-        targetDir: "model/GLM-OCR-GGUF",
-      });
+      if (isPpocrv6) {
+        await invoke<string>("download_ppocrv6_models", {
+          ocrModelId: targetId,
+          targetDir,
+        });
+      } else {
+        await invoke<string>("download_ocr_models", {
+          ocrModelId: targetId,
+          targetDir,
+        });
+      }
     } catch (e) {
       setDownload({
         downloading: false,
@@ -216,7 +248,7 @@ function SettingsDialog(props: Props) {
         status: "error",
       });
     }
-  }, []);
+  }, [ocrModelId]);
 
   const currentApiKey = llmSettings.vendorApiKeys[llmSettings.vendor] || "";
 
@@ -545,14 +577,83 @@ function SettingsDialog(props: Props) {
                 <div className="sf-group">
                   <div className="sf-row">
                     <div className="sf-label">
+                      <Text weight="semibold">OCR 模型</Text>
+                      <Text size={100} className="settings-hint">选择 OCR 引擎和模型</Text>
+                    </div>
+                    <div className="sf-control">
+                      <Dropdown
+                        value={ocrModelList.find(m => m.id === ocrModelId)?.label || ocrModelId || "GLM-OCR"}
+                        selectedOptions={[ocrModelId]}
+                        onOptionSelect={(_, d) => {
+                          const id = d.optionValue as string;
+                          if (id) {
+                            onOcrModelIdChange(id);
+                            // Always update path using the static repo map (don't depend on async ocrModelList)
+                            const repoName = getRepoDirName({ id, engine: "" });
+                            onOcrModelPathChange(`model/${repoName}`);
+                          }
+                        }}
+                        className="settings-dropdown-full"
+                        size="small"
+                      >
+                        {ocrModelList.length > 0 ? (
+                          <>
+                            <Option key="__gguf_header" value="" text="── GGUF ──" disabled>
+                              <Text weight="semibold" size={100}>── GGUF 模型 (llama.cpp) ──</Text>
+                            </Option>
+                            {ocrModelList.filter(m => m.engine === "gguf").map(m => (
+                              <Option key={m.id} value={m.id} text={m.label}>
+                                {m.label} {m.downloaded ? "✅" : ""}
+                              </Option>
+                            ))}
+                            <Option key="__ppocr_header" value="" text="── PPOCRv6 ──" disabled>
+                              <Text weight="semibold" size={100}>── PPOCRv6 (ONNX) ──</Text>
+                            </Option>
+                            {ocrModelList.filter(m => m.engine === "ppocrv6").map(m => (
+                              <Option key={m.id} value={m.id} text={m.label}>
+                                {m.label} {m.downloaded ? "✅" : ""}
+                              </Option>
+                            ))}
+                          </>
+                        ) : (
+                          <Option key="glm-ocr" value="glm-ocr" text="GLM-OCR">GLM-OCR (智谱, 0.9B)</Option>
+                        )}
+                      </Dropdown>
+                    </div>
+                  </div>
+                </div>
+
+                {ocrModelId && (
+                  <div className="sf-group">
+                    <div className="sf-row">
+                      <div className="sf-label">
+                        <Text size={100} className="settings-hint">
+                          {ocrModelList.find(m => m.id === ocrModelId)?.description || ""}
+                        </Text>
+                      </div>
+                      <div className="sf-control">
+                        <Button
+                          appearance="primary"
+                          size="small"
+                          onClick={() => handleDownload(ocrModelId)}
+                          disabled={isDownloading}
+                        >
+                          {isDownloading ? "下载中..." :
+                            ocrModelList.find(m => m.id === ocrModelId)?.downloaded ? "重新下载" : "下载"}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="sf-group">
+                  <div className="sf-row">
+                    <div className="sf-label">
                       <Text weight="semibold">模型路径</Text>
-                      <Text size={100} className="settings-hint">从 ModelScope 下载</Text>
+                      <Text size={100} className="settings-hint">{ocrModelPath || "从 ModelScope 下载"}</Text>
                     </div>
                     <div className="sf-control compact">
-                      <Input value={ocrModelPath} readOnly placeholder="model/GLM-OCR-GGUF" className="settings-input-flex" />
-                      <Button appearance="primary" size="small" onClick={handleDownload} disabled={isDownloading}>
-                        {isDownloading ? "下载中..." : "下载"}
-                      </Button>
+                      <Input value={ocrModelPath} readOnly placeholder="model/..." className="settings-input-flex" />
                     </div>
                   </div>
                 </div>
@@ -748,3 +849,20 @@ function PluginManagerSection() {
 
 export default SettingsDialog;
 export { STORAGE_KEYS };
+
+/** Extract repo dir name from model info */
+function getRepoDirName(model: { engine: string; id: string }): string {
+  const repoMap: Record<string, string> = {
+    "glm-ocr": "GLM-OCR-GGUF",
+    "deepseek-ocr": "DeepSeek-OCR-GGUF",
+    "hunyuan-ocr": "HunyuanOCR-GGUF",
+    "dots-ocr": "dots.ocr-GGUF",
+    "qianfan-ocr": "Qianfan-OCR-GGUF",
+    "lighton-ocr-1b": "LightOnOCR-1B-1025-GGUF",
+    // PP-OCRv6 uses model ID as directory name (downloads from multiple repos)
+    "ppocrv6-medium": "ppocrv6-medium",
+    "ppocrv6-small": "ppocrv6-small",
+    "ppocrv6-tiny": "ppocrv6-tiny",
+  };
+  return repoMap[model.id] || "GLM-OCR-GGUF";
+}

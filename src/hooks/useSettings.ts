@@ -25,6 +25,7 @@ export function useSettings(environmentReady: boolean) {
   // ── OCR settings ─────────────────────────────────────────────────
   const [ocrEnabled, setOcrEnabled] = useState(true);
   const [ocrModelPath, setOcrModelPath] = useState("");
+  const [ocrModelId, setOcrModelId] = useState("glm-ocr");
 
   // ── Font settings ────────────────────────────────────────────────
   const [textFontSize, setTextFontSize] = useState(15);
@@ -122,6 +123,7 @@ export function useSettings(environmentReady: boolean) {
       // OCR settings
       setOcrEnabled(readBool("ocr.enabled", true));
       setOcrModelPath(readStr("ocr.modelPath", "") || "model/GLM-OCR-GGUF");
+      setOcrModelId(readStr("ocr.modelId", "") || "glm-ocr");
 
       // Font size settings
       const savedTextFontSize = readNum("ui.textFontSize");
@@ -198,6 +200,12 @@ export function useSettings(environmentReady: boolean) {
 
   useEffect(() => {
     if (!environmentReady) return;
+    void invoke("db_set_setting", { key: "ocr.modelId", value: ocrModelId })
+      .catch((e) => console.warn("[settings] persist ocr.modelId failed:", e));
+  }, [ocrModelId, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
     void invoke("db_set_ai_config", {
       config: {
         vendor: llmSettings.vendor,
@@ -245,6 +253,7 @@ export function useSettings(environmentReady: boolean) {
     // OCR
     ocrEnabled, setOcrEnabled,
     ocrModelPath, setOcrModelPath,
+    ocrModelId, setOcrModelId,
     // Font
     textFontSize, setTextFontSize,
     aiFontSize, setAiFontSize,

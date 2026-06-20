@@ -1,14 +1,23 @@
 /**
  * useOcr — OCR backend initialization, region recognition, and sentence splitting.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { TextSegment } from "../types";
 
+/** Strips LLM special tokens (e.g. <|endofassistant|>, <s>, [INST]) from text. */
+function cleanSpecialTokens(text: string): string {
+  return text
+    .replace(/<\|[^|]+\|>/g, "")   // <|endofassistant|>, <|im_end|>, etc.
+    .replace(/<\/?s>/g, "")         // <s>, </s>
+    .replace(/\[INST\]|\[\/INST\]/g, "");
+}
+
 export function useOcr(
   ocrEnabled: boolean,
   ocrModelPath: string,
+  ocrModelId: string,
   documentPath: string,
   pdfPageIndex: number,
   selectedParagraph: TextSegment | null,
@@ -25,7 +34,8 @@ export function useOcr(
   useEffect(() => {
     if (ocrEnabled && ocrModelPath) {
       setOcrError("");
-      invoke<string>("init_ocr", { ocrModelPath })
+      const modelId = ocrModelId || "glm-ocr";
+      invoke<string>("init_ocr", { ocrModelPath, ocrModelId: modelId })
         .then((msg) => {
           console.log("[OCR] initialized:", msg);
           setOcrInitialized(true);
@@ -38,7 +48,7 @@ export function useOcr(
     } else {
       setOcrInitialized(false);
     }
-  }, [ocrEnabled, ocrModelPath]);
+  }, [ocrEnabled, ocrModelPath, ocrModelId]);
 
   // ── Run OCR when a paragraph is selected ─────────────────────────
   useEffect(() => {
@@ -54,7 +64,10 @@ export function useOcr(
     setOcrText("");
 
     const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
-      if (!cancelled) setOcrText(prev => prev + event.payload.piece);
+      if (!cancelled) {
+        const cleaned = cleanSpecialTokens(event.payload.piece);
+        if (cleaned) setOcrText(prev => prev + cleaned);
+      }
     });
 
     invoke<{ text: string }>("run_ocr_region", {
@@ -65,7 +78,7 @@ export function useOcr(
       xmax: selectedParagraph.xmax,
       ymax: selectedParagraph.ymax,
     })
-      .then((result) => { if (!cancelled) setOcrText(result.text); })
+      .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
       .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
       .finally(() => {
         if (!cancelled) setOcrLoading(false);
@@ -121,6 +134,49 @@ export function useOcr(
     return () => { cancelled = true; };
   }, [ocrText]);
 
+  // ── Refresh OCR (ignore cache) ───────────────────────────────────
+  const selectedParagraphRef = useRef(selectedParagraph);
+  selectedParagraphRef.current = selectedParagraph;
+
+  const refreshOcr = useCallback(() => {
+    const para = selectedParagraphRef.current;
+    if (!para || !ocrEnabled || !ocrInitialized || !documentPath) return;
+    if (selectedParagraphPageRef.current !== pdfPageIndex) return;
+
+    let cancelled = false;
+    setOcrLoading(true);
+    setOcrError("");
+    setOcrText("");
+
+    const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
+      if (!cancelled) {
+        const cleaned = cleanSpecialTokens(event.payload.piece);
+        if (cleaned) setOcrText(prev => prev + cleaned);
+      }
+    });
+
+    invoke<{ text: string }>("run_ocr_region", {
+      filePath: documentPath,
+      pageIndex: pdfPageIndex,
+      xmin: para.xmin,
+      ymin: para.ymin,
+      xmax: para.xmax,
+      ymax: para.ymax,
+      forceRefresh: true,
+    })
+      .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
+      .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
+      .finally(() => {
+        if (!cancelled) setOcrLoading(false);
+        unlistenPromise.then(unlisten => unlisten());
+      });
+
+    return () => {
+      cancelled = true;
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, [ocrEnabled, ocrInitialized, documentPath, pdfPageIndex, selectedParagraphPageRef]);
+
   return {
     ocrText, setOcrText,
     ocrLoading,
@@ -128,5 +184,6 @@ export function useOcr(
     ocrError,
     splitParagraphWords,
     splitOcrText,
+    refreshOcr,
   };
 }

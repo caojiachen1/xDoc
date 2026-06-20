@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
 mod gguf_ocr;
+mod ocr_models;
+mod ppocrv6;
 mod settings_db;
 mod plugin_host;
 mod plugin_storage;
@@ -17,6 +19,7 @@ use commands::{
     pdf,
     ModelState,
 };
+use ocr_models::OcrEngine;
 use settings_db::SettingsDb;
 use plugin_host::PluginState;
 
@@ -119,7 +122,10 @@ pub fn run() {
             prefetch_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         })
         .manage(OcrState {
-            backend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            gguf_backend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            ppocrv6_backend: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            active_engine: std::sync::Arc::new(std::sync::Mutex::new(OcrEngine::Gguf)),
+            active_model_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
             model_root: std::sync::Arc::new(std::sync::Mutex::new(None)),
             ocr_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         })
@@ -154,6 +160,8 @@ pub fn run() {
             commands::ocr::init_ocr,
             commands::ocr::run_ocr_region,
             commands::ocr::download_ocr_models,
+            commands::ocr::download_ppocrv6_models,
+            commands::ocr::list_ocr_models,
             // Settings & DB
             commands::settings::db_get_all_settings,
             commands::settings::db_get_setting,

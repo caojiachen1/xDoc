@@ -10,6 +10,8 @@ use std::time::Instant;
 use anyhow::{anyhow, bail, Context, Result};
 use libloading::Library;
 
+use crate::ocr_models::GgufOcrModel;
+
 // ── Opaque types ──────────────────────────────────────────────────────────────
 
 pub(crate) enum LlamaModel {}
@@ -28,9 +30,6 @@ pub(crate) enum MtmdInputChunks {}
 type LlamaToken = i32;
 type LlamaPos = i32;
 type LlamaSeqId = i32;
-
-const EOS_TOKEN_IDS: [LlamaToken; 4] = [59246, 59253, 59252, 59251];
-const N_VOCAB: usize = 59392;
 
 // ── Enums ────────────────────────────────────────────────────────────────────
 
@@ -319,6 +318,11 @@ pub struct GgufBackend {
     vocab: *const LlamaVocab,
     mtmd_ctx: *mut MtmdContext,
     loaded_model_root: Option<PathBuf>,
+    loaded_model_id: Option<String>,
+    /// Cached model config for the currently loaded model.
+    current_eos: Vec<i32>,
+    current_n_vocab: usize,
+    current_prompt: String,
 }
 
 pub struct InferResult {
@@ -337,6 +341,10 @@ impl GgufBackend {
             vocab: std::ptr::null(),
             mtmd_ctx: std::ptr::null_mut(),
             loaded_model_root: None,
+            loaded_model_id: None,
+            current_eos: Vec::new(),
+            current_n_vocab: 0,
+            current_prompt: String::new(),
         }
     }
 
@@ -367,20 +375,25 @@ impl GgufBackend {
         self.vocab = std::ptr::null();
         self.mtmd_ctx = std::ptr::null_mut();
         self.loaded_model_root = None;
+        self.loaded_model_id = None;
+        self.current_eos.clear();
+        self.current_n_vocab = 0;
+        self.current_prompt.clear();
     }
 
-    fn ensure_loaded(&mut self, model_root: &Path) -> Result<()> {
+    fn ensure_loaded(&mut self, model_root: &Path, model_cfg: &GgufOcrModel) -> Result<()> {
         if self.loaded {
-            if self.loaded_model_root.as_deref() != Some(model_root) {
-                self.unload();
-            } else {
+            let same_root = self.loaded_model_root.as_deref() == Some(model_root);
+            let same_model = self.loaded_model_id.as_deref() == Some(model_cfg.id);
+            if same_root && same_model {
                 return Ok(());
             }
+            self.unload();
         }
 
         let lib = &self.lib;
-        let text_model = model_root.join("GLM-OCR-Q8_0.gguf");
-        let mmproj = model_root.join("mmproj-GLM-OCR-Q8_0.gguf");
+        let text_model = model_root.join(model_cfg.text_model_q8);
+        let mmproj = model_root.join(model_cfg.mmproj_q8);
 
         for p in [&text_model, &mmproj] {
             if !p.exists() {
@@ -411,7 +424,7 @@ impl GgufBackend {
 
         // Create context
         let mut cparams = unsafe { (lib.llama_context_default_params)() };
-        cparams.n_ctx = 8192;
+        cparams.n_ctx = model_cfg.n_ctx;
         cparams.n_batch = 512;
         cparams.n_ubatch = 512;
         cparams.n_threads = n_threads;
@@ -468,9 +481,14 @@ impl GgufBackend {
         self.mtmd_ctx = mtmd_ctx;
         self.loaded = true;
         self.loaded_model_root = Some(model_root.to_path_buf());
+        self.loaded_model_id = Some(model_cfg.id.to_string());
+        self.current_eos = model_cfg.eos_token_ids.to_vec();
+        self.current_n_vocab = model_cfg.n_vocab;
+        self.current_prompt = model_cfg.prompt_template.to_string();
 
         eprintln!(
-            "[OCR] model loaded ({:.2}s), will persist across calls",
+            "[OCR] model '{}' loaded ({:.2}s), will persist across calls",
+            model_cfg.id,
             total_t.elapsed().as_secs_f64()
         );
         Ok(())
@@ -479,11 +497,15 @@ impl GgufBackend {
     pub fn infer(
         &mut self,
         model_root: &Path,
+        model_cfg: &GgufOcrModel,
         image_path: &Path,
     ) -> Result<InferResult> {
         let total_t = Instant::now();
 
-        self.ensure_loaded(model_root)?;
+        self.ensure_loaded(model_root, model_cfg)?;
+        let eos_ids: Vec<LlamaToken> = self.current_eos.clone();
+        let n_vocab = self.current_n_vocab;
+        let prompt_template = self.current_prompt.clone();
         let lib = &self.lib;
         let ctx = self.ctx;
         let vocab = self.vocab;
@@ -506,10 +528,7 @@ impl GgufBackend {
         // Build prompt
         let marker = unsafe { CStr::from_ptr((lib.mtmd_default_marker)()) };
         let marker_str = marker.to_str().unwrap_or("<__media__>");
-        let prompt = format!(
-            "[gMASK]<sop><|user|>\n<|begin_of_image|>{}<|end_of_image|>\nText Recognition:\n<|assistant|>\n",
-            marker_str
-        );
+        let prompt = prompt_template.replace("{marker}", &marker_str);
 
         let prompt_c = CString::new(prompt.as_str()).map_err(|_| anyhow!("Invalid prompt"))?;
         let input_text = MtmdInputText {
@@ -554,7 +573,7 @@ impl GgufBackend {
         if logits_ptr.is_null() {
             bail!("llama_get_logits returned null");
         }
-        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
         let first_token = argmax(logits_slice);
 
         let max_new_tokens: usize = std::env::var("OCR_MAX_NEW_TOKENS")
@@ -567,7 +586,7 @@ impl GgufBackend {
 
         for _step in 0..max_new_tokens {
             let current_token = *generated.last().unwrap();
-            if EOS_TOKEN_IDS.contains(&current_token) {
+            if eos_ids.contains(&current_token) {
                 break;
             }
 
@@ -582,19 +601,21 @@ impl GgufBackend {
             if logits_ptr.is_null() {
                 bail!("llama_get_logits returned null");
             }
-            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
             let next_token = argmax(logits_slice);
             generated.push(next_token);
             n_past += 1;
         }
 
-        // Decode text
-        let mut output = String::new();
+        // Decode text: collect raw bytes from all tokens then decode as UTF-8
+        // (individual tokens may contain partial multi-byte UTF-8 sequences)
+        let mut raw_bytes: Vec<u8> = Vec::new();
         for &tok in &generated {
-            if EOS_TOKEN_IDS.contains(&tok) { break; }
-            let piece = token_to_string(lib, vocab, tok)?;
-            output.push_str(&piece);
+            if eos_ids.contains(&tok) { break; }
+            let piece = token_to_bytes(lib, vocab, tok)?;
+            raw_bytes.extend_from_slice(&piece);
         }
+        let output = bytes_to_string(&raw_bytes);
 
         eprintln!(
             "[OCR] inference: {:.1}s, {} tokens, {} chars",
@@ -613,12 +634,16 @@ impl GgufBackend {
     pub fn infer_streaming(
         &mut self,
         model_root: &Path,
+        model_cfg: &GgufOcrModel,
         image_path: &Path,
         on_token: &mut dyn FnMut(&str),
     ) -> Result<InferResult> {
         let total_t = Instant::now();
 
-        self.ensure_loaded(model_root)?;
+        self.ensure_loaded(model_root, model_cfg)?;
+        let eos_ids: Vec<LlamaToken> = self.current_eos.clone();
+        let n_vocab = self.current_n_vocab;
+        let prompt_template = self.current_prompt.clone();
         let lib = &self.lib;
         let ctx = self.ctx;
         let vocab = self.vocab;
@@ -641,10 +666,7 @@ impl GgufBackend {
         // Build prompt
         let marker = unsafe { CStr::from_ptr((lib.mtmd_default_marker)()) };
         let marker_str = marker.to_str().unwrap_or("<__media__>");
-        let prompt = format!(
-            "[gMASK]<sop><|user|>\n<|begin_of_image|>{}<|end_of_image|>\nText Recognition:\n<|assistant|>\n",
-            marker_str
-        );
+        let prompt = prompt_template.replace("{marker}", &marker_str);
 
         let prompt_c = CString::new(prompt.as_str()).map_err(|_| anyhow!("Invalid prompt"))?;
         let input_text = MtmdInputText {
@@ -689,7 +711,7 @@ impl GgufBackend {
         if logits_ptr.is_null() {
             bail!("llama_get_logits returned null");
         }
-        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+        let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
         let first_token = argmax(logits_slice);
 
         let max_new_tokens: usize = std::env::var("OCR_MAX_NEW_TOKENS")
@@ -697,12 +719,29 @@ impl GgufBackend {
             .and_then(|v| v.parse().ok())
             .unwrap_or(2048);
 
-        // Stream first token
-        if !EOS_TOKEN_IDS.contains(&first_token) {
-            let piece = token_to_string(lib, vocab, first_token)?;
-            if !piece.is_empty() {
-                on_token(&piece);
-            }
+        // Stream with byte buffering to handle partial multi-byte UTF-8 sequences
+        let mut raw_buffer: Vec<u8> = Vec::new();
+        let mut output = String::new();
+
+        // Helper: flush valid UTF-8 prefix from buffer, keeping partial bytes
+        macro_rules! flush_utf8 {
+            ($buf:expr, $out:expr, $callback:expr) => {{
+                let valid_len = valid_utf8_prefix_len(&$buf);
+                if valid_len > 0 {
+                    let valid_str = std::str::from_utf8(&$buf[..valid_len]).unwrap_or("");
+                    if !valid_str.is_empty() {
+                        $callback(valid_str);
+                        $out.push_str(valid_str);
+                    }
+                    $buf.drain(..valid_len);
+                }
+            }};
+        }
+
+        if !eos_ids.contains(&first_token) {
+            let piece = token_to_bytes(lib, vocab, first_token)?;
+            raw_buffer.extend_from_slice(&piece);
+            flush_utf8!(raw_buffer, output, on_token);
         }
 
         let mut generated: Vec<LlamaToken> = vec![first_token];
@@ -710,7 +749,7 @@ impl GgufBackend {
 
         for _step in 0..max_new_tokens {
             let current_token = *generated.last().unwrap();
-            if EOS_TOKEN_IDS.contains(&current_token) {
+            if eos_ids.contains(&current_token) {
                 break;
             }
 
@@ -725,27 +764,26 @@ impl GgufBackend {
             if logits_ptr.is_null() {
                 bail!("llama_get_logits returned null");
             }
-            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, N_VOCAB) };
+            let logits_slice = unsafe { std::slice::from_raw_parts(logits_ptr, n_vocab) };
             let next_token = argmax(logits_slice);
 
-            // Stream each token as it is generated
-            if !EOS_TOKEN_IDS.contains(&next_token) {
-                let piece = token_to_string(lib, vocab, next_token)?;
-                if !piece.is_empty() {
-                    on_token(&piece);
-                }
+            if !eos_ids.contains(&next_token) {
+                let piece = token_to_bytes(lib, vocab, next_token)?;
+                raw_buffer.extend_from_slice(&piece);
+                flush_utf8!(raw_buffer, output, on_token);
             }
 
             generated.push(next_token);
             n_past += 1;
         }
 
-        // Decode final text
-        let mut output = String::new();
-        for &tok in &generated {
-            if EOS_TOKEN_IDS.contains(&tok) { break; }
-            let piece = token_to_string(lib, vocab, tok)?;
-            output.push_str(&piece);
+        // Flush remaining bytes
+        if !raw_buffer.is_empty() {
+            let remaining = bytes_to_string(&raw_buffer);
+            if !remaining.is_empty() {
+                on_token(&remaining);
+                output.push_str(&remaining);
+            }
         }
 
         eprintln!(
@@ -776,10 +814,11 @@ fn argmax(logits: &[f32]) -> LlamaToken {
         .enumerate()
         .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
         .map(|(idx, _)| idx as LlamaToken)
-        .unwrap_or(EOS_TOKEN_IDS[0])
+        .unwrap_or(0)
 }
 
-fn token_to_string(lib: &CppLib, vocab: *const LlamaVocab, token: LlamaToken) -> Result<String> {
+/// Get raw bytes for a single token (may not be valid UTF-8 on its own).
+fn token_to_bytes(lib: &CppLib, vocab: *const LlamaVocab, token: LlamaToken) -> Result<Vec<u8>> {
     let mut buf = [0u8; 512];
     let n = unsafe {
         (lib.llama_token_to_piece)(vocab, token, buf.as_mut_ptr() as *mut c_char, buf.len() as c_int, 0, true)
@@ -788,12 +827,43 @@ fn token_to_string(lib: &CppLib, vocab: *const LlamaVocab, token: LlamaToken) ->
         bail!("Failed to convert token {token} to string (returned {n})");
     }
     if n == 0 {
-        return Ok(String::new());
+        return Ok(Vec::new());
     }
-    let n = n as usize;
-    let s = std::str::from_utf8(&buf[..n])
-        .with_context(|| format!("Non-UTF-8 token output for token {token}"))?;
-    Ok(s.to_string())
+    Ok(buf[..n as usize].to_vec())
+}
+
+/// Decode accumulated raw bytes from multiple tokens into a UTF-8 string.
+/// Handles partial multi-byte UTF-8 sequences that span across tokens.
+fn bytes_to_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Find the length of the longest valid UTF-8 prefix in the byte slice.
+/// This handles partial multi-byte sequences at the end of the buffer.
+fn valid_utf8_prefix_len(bytes: &[u8]) -> usize {
+    let mut end = bytes.len();
+    // Back up past any incomplete UTF-8 sequence at the end
+    while end > 0 {
+        match std::str::from_utf8(&bytes[..end]) {
+            Ok(_) => return end,
+            Err(e) => {
+                // If the error is at the end (incomplete sequence), trim and retry
+                let valid_up_to = e.valid_up_to();
+                if valid_up_to < end {
+                    end = valid_up_to;
+                } else {
+                    // error_len() gives the length of the invalid sequence
+                    if e.error_len().is_some() {
+                        end = valid_up_to; // skip the invalid bytes
+                    } else {
+                        // Incomplete sequence at the end — stop here
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    end
 }
 
 fn make_batch(lib: &CppLib, token: LlamaToken, pos: LlamaPos) -> LlamaBatch {

@@ -18,7 +18,7 @@ import {
   Text,
 } from "@fluentui/react-components";
 import { ChevronLeft24Regular, ChevronRight24Regular } from "@fluentui/react-icons";
-import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download, BookOpen } from "lucide-react";
+import { Bot, Languages, FileText, X, ZoomIn, ZoomOut, Hand, MousePointer, ChevronDown, LayoutPanelLeft, Images, ListTree, Pencil, Eraser, Type, Square, Circle, Minus, Undo2, Redo2, Trash2, Download, BookOpen, RefreshCw } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import SettingsDialog from "./components/SettingsDialog";
@@ -120,7 +120,7 @@ function App() {
     selectedParagraph, figureImageDataUrl, settings.setErrorMessage,
   );
   const ocr = useOcr(
-    settings.ocrEnabled, settings.ocrModelPath, documentPath,
+    settings.ocrEnabled, settings.ocrModelPath, settings.ocrModelId, documentPath,
     pdfPageIndex, selectedParagraph, aiChat.selectedParagraphPageRef,
   );
   const sidebar = useSidebar(documentPath, isPdfSelected);
@@ -834,8 +834,173 @@ function App() {
   };
 
   // ── renderOcrNodes — local version with word-click floating menu ───────────
+  // ── LaTeX preprocessing helpers ──────────────────────────────────
+  // Extract content of the first balanced brace group starting at s[i]=='}'
+  // Returns [content, endIndex] or null if no valid group.
+  const extractBraces = useCallback((s: string, start: number): [string, number] | null => {
+    if (s[start] !== '{') return null;
+    let depth = 0;
+    let i = start;
+    for (; i < s.length; i++) {
+      if (s[i] === '{') depth++;
+      else if (s[i] === '}') { depth--; if (depth === 0) break; }
+    }
+    if (depth !== 0) return null;
+    return [s.slice(start + 1, i), i + 1];
+  }, []);
+
+  // Convert inline LaTeX formatting commands to HTML in a text string.
+  // Handles \textbf{...}, \textit{...}, \textcolor{color}{...}, etc.
+  // Uses a simple recursive descent to handle nested braces.
+  const inlineLatexToHtml = useCallback((s: string): string => {
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      if (s[i] === '\\' && i + 1 < s.length) {
+        i++; // skip backslash
+        if (/[a-zA-Z]/.test(s[i])) {
+          let name = "";
+          while (i < s.length && /[a-zA-Z]/.test(s[i])) { name += s[i]; i++; }
+          // Skip optional [...]
+          if (s[i] === '[') { while (i < s.length && s[i] !== ']') i++; if (i < s.length) i++; }
+          // Check for mandatory {content} argument
+          if (s[i] === '{') {
+            const brace = extractBraces(s, i);
+            if (brace) {
+              const [content, end] = brace;
+              const inner = inlineLatexToHtml(content);
+              i = end;
+              switch (name) {
+                case "textbf":   out += `<b>${inner}</b>`; break;
+                case "textit":   out += `<i>${inner}</i>`; break;
+                case "underline": out += `<u>${inner}</u>`; break;
+                case "emph":     out += `<em>${inner}</em>`; break;
+                case "texttt":   out += `<code>${inner}</code>`; break;
+                case "textnormal": out += `<span>${inner}</span>`; break;
+                case "textsc":   out += `<span style="font-variant:small-caps">${inner}</span>`; break;
+                case "textsuperscript": out += `<sup>${inner}</sup>`; break;
+                case "textsubscript": out += `<sub>${inner}</sub>`; break;
+                case "textcolor": {
+                  // \textcolor{color} already consumed; now the second brace is the text
+                  if (s[i] === '{') {
+                    const brace2 = extractBraces(s, i);
+                    if (brace2) {
+                      const [txt, end2] = brace2;
+                      out += `<span style="color:${inner}">${inlineLatexToHtml(txt)}</span>`;
+                      i = end2;
+                    } else { out += inner; }
+                  } else { out += inner; }
+                  break;
+                }
+                case "mbox":     out += inner; break; // Just the content
+                default:         out += inner; break; // unknown → content only
+              }
+              continue;
+            }
+          }
+          // Command with no brace argument — skip it (remove unknown command)
+          // Eat following whitespace to avoid orphan spaces
+          out += "";
+          continue;
+        } else {
+          // Special character escapes
+          const esc: Record<string, string> = { '\\': '\\', '$': '$', '%': '%', '&': '&', '_': '_', '{': '{', '}': '}', '#': '#', '~': '\u00A0' };
+          if (esc[s[i]] !== undefined) { out += esc[s[i]]; i++; continue; }
+          // Unknown escape → drop it
+          out += "";
+          i++;
+          continue;
+        }
+      } else if (s[i] === '{') {
+        // Bare group — unwrap
+        const brace = extractBraces(s, i);
+        if (brace) { out += inlineLatexToHtml(brace[0]); i = brace[1]; continue; }
+      } else if (s[i] === '}') {
+        // Stray closing brace — skip
+        i++;
+        continue;
+      }
+      out += s[i];
+      i++;
+    }
+    return out;
+  }, [extractBraces]);
+
+  // Convert display LaTeX environments and tabular to intermediate HTML/KaTeX form.
+  const latexToHtmlPreprocess = useCallback((text: string): string => {
+    let result = text;
+
+    // 1. Math environments → $$...$$
+    const mathEnvs = ["equation", "equation*", "align", "align*", "gather", "gather*", "multline", "multline*"];
+    for (const env of mathEnvs) {
+      const re = new RegExp(`\\\\begin\\{${env}\\}([\\s\\S]*?)\\\\end\\{${env}\\}`, "g");
+      result = result.replace(re, (_, content) => `$$\n${content}\n$$`);
+    }
+    // \[ ... \]
+    result = result.replace(/\\\[([\s\S]*?)\\\]/g, "$$\n$1\n$$");
+
+    // 2. Tabular environments → <table>
+    result = result.replace(/\\begin\{tabular\}\{[^}]*\}([\s\S]*?)\\end\{tabular\}/g, (_, content: string) => {
+      // Strip leading } that comes from nested column spec e.g. {p{15cm}} → regex consumes {p{15cm} leaving }
+      content = content.replace(/^\}+/, "");
+      // Split rows by \\ (not inside braces)
+      const rows: string[] = [];
+      let depth = 0;
+      let cur = "";
+      for (let j = 0; j < content.length; j++) {
+        if (content[j] === '{') depth++;
+        else if (content[j] === '}') depth--;
+        else if (depth === 0 && content.startsWith("\\\\", j)) { rows.push(cur); cur = ""; j++; continue; }
+        cur += content[j];
+      }
+      const tail = cur.trim();
+      if (tail) rows.push(tail);
+
+      const rowHtml = rows.map((row) => {
+        let cleaned = row.replace(/\\hline\s*/g, "");
+        if (!cleaned.trim()) return '<tr class="table-hline"><td colspan="10" style="border-top:2px solid rgba(255,255,255,0.3);padding:0"></td></tr>';
+        // Split by &
+        const cells: string[] = [];
+        let cdepth = 0;
+        let ccur = "";
+        for (let j = 0; j < cleaned.length; j++) {
+          if (cleaned[j] === '{') cdepth++;
+          else if (cleaned[j] === '}') cdepth--;
+          else if (cdepth === 0 && cleaned[j] === '&') { cells.push(ccur); ccur = ""; continue; }
+          ccur += cleaned[j];
+        }
+        const ctail = ccur.trim();
+        if (ctail) cells.push(ctail);
+        const cellHtml = cells.map((c) => `<td>${inlineLatexToHtml(c.trim())}</td>`).join("");
+        return `<tr>${cellHtml || '<td></td>'}</tr>`;
+      }).join("");
+
+      return `<table class="latex-table"><tbody>${rowHtml}</tbody></table>`;
+    });
+
+    // 3. List environments → <ul>/<ol>
+    const listEnvs: [RegExp, string][] = [
+      [/\\begin\{itemize\}([\s\S]*?)\\end\{itemize\}/g, "ul"],
+      [/\\begin\{enumerate\}([\s\S]*?)\\end\{enumerate\}/g, "ol"],
+    ];
+    for (const [re, tag] of listEnvs) {
+      result = result.replace(re, (_, content: string) => {
+        const items = content.split(/\\item/).map((s: string) => s.trim()).filter(Boolean);
+        const lis = items.map((i: string) => `<li>${inlineLatexToHtml(i)}</li>`).join("");
+        return `<${tag}>${lis}</${tag}>`;
+      });
+    }
+
+    // 4. Inline commands in the remaining text
+    result = inlineLatexToHtml(result);
+    return result;
+  }, [inlineLatexToHtml]);
+
   const renderOcrNodes = useCallback((text: string): React.ReactNode[] => {
     if (!text) return [];
+
+    // Step 0: Preprocess LaTeX → HTML/KaTeX intermediate form
+    const processed = latexToHtmlPreprocess(text);
 
     const nodes: React.ReactNode[] = [];
     let tokenIndex = 0;
@@ -871,31 +1036,43 @@ function App() {
       tokenIndex++;
     };
 
-    const displayParts = text.split(/(\$\$[\s\S]*?\$\$)/);
-    for (let i = 0; i < displayParts.length; i++) {
-      const part = displayParts[i];
-      if (part.startsWith('$$') && part.endsWith('$$')) {
-        const math = part.slice(2, -2);
-        try {
-          const html = katex.renderToString(math, { displayMode: true, throwOnError: false });
-          nodes.push(<span key={`math-d-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
-        } catch {
-          pushText(part);
-        }
-      } else {
-        const inlineParts = part.split(/(\$(?!\$)[\s\S]*?[^\\]\$)/);
-        for (let j = 0; j < inlineParts.length; j++) {
-          const inPart = inlineParts[j];
-          if (inPart.startsWith('$') && inPart.endsWith('$') && !inPart.startsWith('$$')) {
-            const inMath = inPart.slice(1, -1);
-            try {
-              const html = katex.renderToString(inMath, { displayMode: false, throwOnError: false });
-              nodes.push(<span key={`math-i-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
-            } catch {
-              pushText(inPart);
-            }
-          } else {
-            pushText(inPart);
+    // Split by HTML table blocks (original + converted from LaTeX tabular)
+    const tableParts = processed.split(/(<table[\s\S]*?<\/table>)/);
+
+    for (const part of tableParts) {
+      if (/^<table[\s\S]*?<\/table>$/.test(part)) {
+        nodes.push(
+          <div
+            key={`table-${tokenIndex++}`}
+            className="ocr-html-table"
+            dangerouslySetInnerHTML={{ __html: part }}
+          />
+        );
+        continue;
+      }
+
+      // ── Display math ($$...$$) ──
+      const displayParts = part.split(/(\$\$[\s\S]*?\$\$)/);
+      for (let i = 0; i < displayParts.length; i++) {
+        const dPart = displayParts[i];
+        if (dPart.startsWith('$$') && dPart.endsWith('$$')) {
+          const math = dPart.slice(2, -2);
+          try {
+            const html = katex.renderToString(math, { displayMode: true, throwOnError: false });
+            nodes.push(<span key={`math-d-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
+          } catch { pushText(dPart); }
+        } else {
+          // ── Inline math ($...$) ──
+          const inlineParts = dPart.split(/(\$(?!\$)[\s\S]*?[^\\]\$)/);
+          for (let j = 0; j < inlineParts.length; j++) {
+            const inPart = inlineParts[j];
+            if (inPart.startsWith('$') && inPart.endsWith('$') && !inPart.startsWith('$$')) {
+              const inMath = inPart.slice(1, -1);
+              try {
+                const html = katex.renderToString(inMath, { displayMode: false, throwOnError: false });
+                nodes.push(<span key={`math-i-${tokenIndex++}`} dangerouslySetInnerHTML={{ __html: html }} />);
+              } catch { pushText(inPart); }
+            } else { pushText(inPart); }
           }
         }
       }
@@ -1909,7 +2086,21 @@ function App() {
                       {/* OCR result with LaTeX rendering */}
                       {settings.ocrEnabled && (
                         <div className="pane-section-card">
-                          <div className="pane-section-label">OCR 识别结果</div>
+                          <div className="pane-section-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <span>OCR 识别结果</span>
+                            {ocr.ocrText && (
+                              <button
+                                className="ref-reparse-btn"
+                                onClick={ocr.refreshOcr}
+                                disabled={ocr.ocrLoading}
+                                title="忽略缓存，重新识别当前区域"
+                                style={{ padding: "1px 5px", fontSize: 11 }}
+                              >
+                                <RefreshCw size={11} className={ocr.ocrLoading ? "spin" : ""} />
+                                刷新
+                              </button>
+                            )}
+                          </div>
                           {ocr.ocrLoading ? (
                             <div className="pane-placeholder">
                               <Spinner size="tiny" />
@@ -2089,6 +2280,8 @@ function App() {
         onOcrEnabledChange={settings.setOcrEnabled}
         ocrModelPath={settings.ocrModelPath}
         onOcrModelPathChange={settings.setOcrModelPath}
+        ocrModelId={settings.ocrModelId}
+        onOcrModelIdChange={settings.setOcrModelId}
         llmSettings={settings.llmSettings}
         onLlmSettingsChange={settings.setLlmSettings}
       />

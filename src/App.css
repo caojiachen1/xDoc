@@ -879,6 +879,71 @@
   font-size: 1.21em;
 }
 
+/* HTML tables rendered inside OCR output */
+.ocr-latex-content .ocr-html-table {
+  margin: 12px 0;
+  overflow-x: auto;
+}
+
+.ocr-latex-content .ocr-html-table table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9em;
+}
+
+.ocr-latex-content .ocr-html-table th,
+.ocr-latex-content .ocr-html-table td {
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 4px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.ocr-latex-content .ocr-html-table th {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  font-weight: 600;
+}
+
+.ocr-latex-content .ocr-html-table sup {
+  font-size: 0.75em;
+  color: #00D4BB;
+}
+
+/* LaTeX-converted lists, code, and inline formatting in OCR content */
+.ocr-latex-content ul,
+.ocr-latex-content ol {
+  margin: 8px 0;
+  padding-left: 24px;
+}
+
+.ocr-latex-content li {
+  margin: 2px 0;
+  line-height: 1.6;
+}
+
+.ocr-latex-content code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.9em;
+}
+
+.ocr-latex-content b, .ocr-latex-content strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.ocr-latex-content i, .ocr-latex-content em {
+  color: #e0e0e0;
+}
+
+.ocr-latex-content u {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 /* ── Floating AI Action Menu ────────────────────────────── */
 .floating-ai-menu {
   position: fixed;
