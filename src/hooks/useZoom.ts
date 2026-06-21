@@ -1,7 +1,7 @@
 /**
  * useZoom — Zoom, pan, display sizing, and pane resize.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ZoomMode } from "../types";
 
 export function useZoom(
@@ -27,12 +27,16 @@ export function useZoom(
   useEffect(() => { zoomModeRef.current = zoomMode; }, [zoomMode]);
   useEffect(() => { customScaleRef.current = customScale; }, [customScale]);
 
-  // ── Display size tracking ────────────────────────────────────────
-  useEffect(() => {
+  // ── Display size tracking (useLayoutEffect to stay in sync before paint) ──
+  useLayoutEffect(() => {
     if (!imgRef.current) return;
     const updateDisplaySize = () => {
       if (imgRef.current) {
-        setDisplaySize({ width: imgRef.current.clientWidth, height: imgRef.current.clientHeight });
+        const w = imgRef.current.clientWidth;
+        const h = imgRef.current.clientHeight;
+        if (w > 0 && h > 0) {
+          setDisplaySize({ width: w, height: h });
+        }
       }
     };
     const observer = new ResizeObserver(updateDisplaySize);

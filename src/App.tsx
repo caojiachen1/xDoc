@@ -1824,7 +1824,7 @@ function App() {
                         }}
                       />
 
-                      <div className="overlay-layer" style={{ width: zoom.displaySize.width, height: zoom.displaySize.height, display: selectMode === "text" ? "none" : undefined }}>
+                      <div className="overlay-layer" style={{ display: selectMode === "text" ? "none" : undefined }}>
                         {segments.map((seg, idx) => {
                           const left = Math.max(0, seg.xmin * zoom.scale.x);
                           const top = Math.max(0, seg.ymin * zoom.scale.y);
