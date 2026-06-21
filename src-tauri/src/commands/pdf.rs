@@ -502,7 +502,7 @@ pub(crate) fn spawn_prefetch_for_pdf(
     page_count: u32,
     requested_page: u32,
     threshold: f32,
-    session: Arc<Mutex<Option<ort::session::Session>>>,
+    session: Arc<tokio::sync::Mutex<Option<ort::session::Session>>>,
     inference_cache: Arc<Mutex<HashMap<String, CachedInference>>>,
     response_cache: Arc<Mutex<HashMap<String, ExtractContentResponse>>>,
     prefetch_tasks: Arc<Mutex<HashSet<String>>>,
@@ -516,6 +516,7 @@ pub(crate) fn spawn_prefetch_for_pdf(
         tasks.insert(task_key.clone());
     }
 
+    let handle = tokio::runtime::Handle::current();
     thread::spawn(move || {
         let mut page_order: Vec<u32> = (0..page_count)
             .filter(|&p| p != requested_page)
@@ -548,7 +549,7 @@ pub(crate) fn spawn_prefetch_for_pdf(
             let preview_data_url = image_to_data_url(&image).ok();
 
             let infer_res = {
-                let mut guard = session.lock().unwrap();
+                let mut guard = handle.block_on(session.lock());
                 let Some(session_ref) = guard.as_mut() else {
                     return;
                 };
@@ -648,7 +649,7 @@ pub(crate) async fn get_pdf_paragraphs(
     let layout_boxes = if let Some(boxes) = cached_boxes {
         Some(boxes)
     } else {
-        let mut session_guard = state.session.lock().unwrap();
+        let mut session_guard = state.session.lock().await;
         if let Some(ref mut session) = *session_guard {
             match infer_layout_boxes(session, &image, threshold) {
                 Ok(boxes) => {
@@ -997,7 +998,8 @@ pub(crate) async fn extract_first_page_metadata(
                     Some(boxes)
                 } else {
                     log("running ONNX inference...");
-                    let mut session_guard = session_arc.lock().unwrap();
+                    let handle = tokio::runtime::Handle::current();
+                    let mut session_guard = handle.block_on(session_arc.lock());
                     if let Some(ref mut session) = *session_guard {
                         match infer_layout_boxes(session, &image, threshold) {
                             Ok(boxes) => {

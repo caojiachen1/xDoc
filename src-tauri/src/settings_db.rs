@@ -256,6 +256,25 @@ impl SettingsDb {
             eprintln!("[db] papers_fts table ready");
         }
 
+        // OCR paragraph cache — persistent cache of OCR results per paragraph region.
+        // Used for both search indexing (OCR mode) and instant display when clicking paragraph boxes.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ocr_paragraph_cache (
+                paper_id    TEXT    NOT NULL,
+                page_index  INTEGER NOT NULL,
+                xmin        INTEGER NOT NULL,
+                ymin        INTEGER NOT NULL,
+                xmax        INTEGER NOT NULL,
+                ymax        INTEGER NOT NULL,
+                text        TEXT    NOT NULL,
+                model_id    TEXT,
+                created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (paper_id, page_index, xmin, ymin, xmax, ymax)
+             )",
+            [],
+        )
+        .map_err(|e| anyhow::anyhow!("创建 ocr_paragraph_cache 表失败: {e}"))?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -1096,6 +1115,101 @@ impl SettingsDb {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    // ────────────────────── OCR Paragraph Cache ──────────────────────
+
+    /// Get cached OCR text for a specific paragraph region.
+    /// Coordinates are rounded to integers for cache key matching.
+    pub fn get_ocr_cache(
+        &self,
+        paper_id: &str,
+        page_index: u32,
+        xmin: i32,
+        ymin: i32,
+        xmax: i32,
+        ymax: i32,
+    ) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT text FROM ocr_paragraph_cache
+             WHERE paper_id = ?1 AND page_index = ?2
+               AND xmin = ?3 AND ymin = ?4 AND xmax = ?5 AND ymax = ?6",
+        )?;
+        let mut rows = stmt.query(params![paper_id, page_index as i32, xmin, ymin, xmax, ymax])?;
+        if let Some(row) = rows.next()? {
+            Ok(Some(row.get(0)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Store OCR text for a specific paragraph region.
+    pub fn set_ocr_cache(
+        &self,
+        paper_id: &str,
+        page_index: u32,
+        xmin: i32,
+        ymin: i32,
+        xmax: i32,
+        ymax: i32,
+        text: &str,
+        model_id: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO ocr_paragraph_cache (paper_id, page_index, xmin, ymin, xmax, ymax, text, model_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(paper_id, page_index, xmin, ymin, xmax, ymax)
+             DO UPDATE SET text = excluded.text, model_id = excluded.model_id, created_at = datetime('now')",
+            params![paper_id, page_index as i32, xmin, ymin, xmax, ymax, text, model_id],
+        )?;
+        Ok(())
+    }
+
+    /// Get all cached OCR entries for a specific page.
+    /// Returns (xmin, ymin, xmax, ymax, text) sorted by vertical then horizontal position.
+    pub fn get_ocr_cache_page(
+        &self,
+        paper_id: &str,
+        page_index: u32,
+    ) -> Result<Vec<(i32, i32, i32, i32, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT xmin, ymin, xmax, ymax, text FROM ocr_paragraph_cache
+             WHERE paper_id = ?1 AND page_index = ?2
+             ORDER BY ymin ASC, xmin ASC",
+        )?;
+        let rows = stmt.query_map(params![paper_id, page_index as i32], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Check if a page has any OCR cache entries.
+    pub fn has_ocr_cache_page(&self, paper_id: &str, page_index: u32) -> Result<bool> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ocr_paragraph_cache
+             WHERE paper_id = ?1 AND page_index = ?2",
+            params![paper_id, page_index as i32],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Clear all OCR cache entries for a specific paper.
+    pub fn clear_ocr_cache(&self, paper_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM ocr_paragraph_cache WHERE paper_id = ?1",
+            params![paper_id],
+        )?;
+        Ok(())
     }
 }
 

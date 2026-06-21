@@ -18,6 +18,7 @@ import {
 
 export function usePapers(
   onPaperDeleted: (paper: PaperInfo) => void,
+  onPaperRenamed?: (paperId: string, oldPath: string, newPath: string) => void,
 ) {
   const [papersList, setPapersList] = useState<PaperInfo[]>([]);
   const [extractingPaperId, setExtractingPaperId] = useState<string | null>(null);
@@ -124,14 +125,19 @@ export function usePapers(
       const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
       const metadata = await extractMetadataEnhanced(paper.path, base64Data);
       let renamedPaper = { ...paper, metadata, metadataExtracted: true };
-      if (metadata.title && paper.managedPath) {
-        try {
-          const newPath = await renamePaper(paper.managedPath, metadata.title);
-          renamedPaper.path = newPath;
-          renamedPaper.managedPath = newPath;
-          renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
-        } catch (e) { console.warn("[App] rename failed:", e); }
-      }
+        if (metadata.title && paper.managedPath) {
+          try {
+            const hasChinese = /[\u4e00-\u9fff]/.test(metadata.title);
+            if (!hasChinese) {
+              const oldPath = paper.path;
+              const newPath = await renamePaper(paper.managedPath, metadata.title);
+              renamedPaper.path = newPath;
+              renamedPaper.managedPath = newPath;
+              renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
+              if (oldPath !== newPath) onPaperRenamed?.(paperId, oldPath, newPath);
+            }
+          } catch (e) { console.warn("[App] rename failed:", e); }
+        }
       setPapersList(prev => prev.map(p => p.id === paperId ? renamedPaper : p));
       try { await savePaper(paperInfoToRecord(renamedPaper)); } catch (e) { console.warn("[App] save metadata failed:", e); }
     } catch (e) {

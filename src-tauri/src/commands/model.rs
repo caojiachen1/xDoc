@@ -31,7 +31,7 @@ pub(crate) async fn load_model(
     let prefetch_arc = state.prefetch_tasks.clone();
     let response_cache_arc = state.response_cache.clone();
 
-    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+    let session = tauri::async_runtime::spawn_blocking(move || -> Result<Session, String> {
         let t0 = std::time::Instant::now();
         eprintln!("[model] loading ONNX model from {}...", resolved_str);
 
@@ -45,19 +45,18 @@ pub(crate) async fn load_model(
             t0.elapsed().as_millis()
         );
 
-        *session_arc.lock().unwrap() = Some(session);
-        inference_cache_arc.lock().unwrap().clear();
-        prefetch_arc.lock().unwrap().clear();
-        response_cache_arc.lock().unwrap().clear();
-
-        eprintln!(
-            "[model] model loaded successfully (+{}ms)",
-            t0.elapsed().as_millis()
-        );
-        Ok("Model loaded successfully".to_string())
+        Ok(session)
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    *session_arc.lock().await = Some(session);
+    inference_cache_arc.lock().unwrap().clear();
+    prefetch_arc.lock().unwrap().clear();
+    response_cache_arc.lock().unwrap().clear();
+
+    eprintln!("[model] model loaded successfully");
+    Ok("Model loaded successfully".to_string())
 }
 
 #[tauri::command]
@@ -112,7 +111,7 @@ pub(crate) async fn run_doclayout(
             )
         } else {
             let inferred_boxes = {
-                let mut guard = state.session.lock().unwrap();
+                let mut guard = state.session.lock().await;
                 let session = guard.as_mut().ok_or("Model not loaded")?;
                 infer_layout_boxes(session, &image, threshold)?
             };

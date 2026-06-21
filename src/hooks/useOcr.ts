@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { TextSegment } from "../types";
+import { getOcrCacheText } from "../utils/paperDb";
 
 /** Strips LLM special tokens (e.g. <|endofassistant|>, <s>, [INST]) from text. */
 function cleanSpecialTokens(text: string): string {
@@ -22,6 +23,7 @@ export function useOcr(
   pdfPageIndex: number,
   selectedParagraph: TextSegment | null,
   selectedParagraphPageRef: { current: number },
+  paperId?: string,
 ) {
   const [ocrText, setOcrText] = useState("");
   const [ocrLoading, setOcrLoading] = useState(false);
@@ -63,33 +65,55 @@ export function useOcr(
     setOcrError("");
     setOcrText("");
 
-    const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
-      if (!cancelled) {
-        const cleaned = cleanSpecialTokens(event.payload.piece);
-        if (cleaned) setOcrText(prev => prev + cleaned);
-      }
-    });
+    // Try DB persistent cache first (only when paperId is available)
+    const cachePromise = paperId
+      ? getOcrCacheText(paperId, pdfPageIndex, selectedParagraph.xmin, selectedParagraph.ymin, selectedParagraph.xmax, selectedParagraph.ymax)
+      : Promise.resolve(null);
 
-    invoke<{ text: string }>("run_ocr_region", {
-      filePath: documentPath,
-      pageIndex: pdfPageIndex,
-      xmin: selectedParagraph.xmin,
-      ymin: selectedParagraph.ymin,
-      xmax: selectedParagraph.xmax,
-      ymax: selectedParagraph.ymax,
-    })
-      .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
-      .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
+    cachePromise
+      .then((cached) => {
+        if (cancelled) return null;
+        if (cached != null && cached !== "") {
+          // Cache hit — use cached text directly
+          setOcrText(cached);
+          setOcrLoading(false);
+          return null; // signal: no OCR needed
+        }
+        // Cache miss — run OCR with streaming
+        const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
+          if (!cancelled) {
+            const cleaned = cleanSpecialTokens(event.payload.piece);
+            if (cleaned) setOcrText(prev => prev + cleaned);
+          }
+        });
+
+        return invoke<{ text: string }>("run_ocr_region", {
+          filePath: documentPath,
+          pageIndex: pdfPageIndex,
+          xmin: selectedParagraph.xmin,
+          ymin: selectedParagraph.ymin,
+          xmax: selectedParagraph.xmax,
+          ymax: selectedParagraph.ymax,
+          paperId: paperId ?? null,
+        })
+          .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
+          .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
+          .finally(() => {
+            if (!cancelled) setOcrLoading(false);
+            unlistenPromise.then(unlisten => unlisten());
+          });
+      })
+      .catch((e) => {
+        if (!cancelled) setOcrError(`OCR 缓存查询失败: ${String(e)}`);
+      })
       .finally(() => {
         if (!cancelled) setOcrLoading(false);
-        unlistenPromise.then(unlisten => unlisten());
       });
 
     return () => {
       cancelled = true;
-      unlistenPromise.then(unlisten => unlisten());
     };
-  }, [selectedParagraph, ocrEnabled, ocrInitialized, documentPath, pdfPageIndex]);
+  }, [selectedParagraph, ocrEnabled, ocrInitialized, documentPath, pdfPageIndex, paperId]);
 
   // ── Sentence splitting for PDF paragraph text ────────────────────
   useEffect(() => {
@@ -162,6 +186,7 @@ export function useOcr(
       ymin: para.ymin,
       xmax: para.xmax,
       ymax: para.ymax,
+      paperId: paperId ?? null,
       forceRefresh: true,
     })
       .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
@@ -175,7 +200,7 @@ export function useOcr(
       cancelled = true;
       unlistenPromise.then(unlisten => unlisten());
     };
-  }, [ocrEnabled, ocrInitialized, documentPath, pdfPageIndex, selectedParagraphPageRef]);
+  }, [ocrEnabled, ocrInitialized, documentPath, pdfPageIndex, selectedParagraphPageRef, paperId]);
 
   return {
     ocrText, setOcrText,

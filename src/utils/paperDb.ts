@@ -249,6 +249,20 @@ export async function searchIndexPaper(
   return invoke<number>("search_index_paper", { paperId, filePath });
 }
 
+export async function searchIndexPaperOcr(
+  paperId: string,
+  filePath: string,
+  scoreThreshold?: number,
+  forceRefresh?: boolean,
+): Promise<number> {
+  return invoke<number>("search_index_paper_ocr", {
+    paperId,
+    filePath,
+    scoreThreshold,
+    forceRefresh,
+  });
+}
+
 export async function searchIndexAll(): Promise<number> {
   return invoke<number>("search_index_all");
 }
@@ -274,4 +288,24 @@ export async function searchExtractPages(
   filePath: string
 ): Promise<ExtractedPages> {
   return invoke<ExtractedPages>("search_extract_pages", { paperId, filePath });
+}
+
+// ── OCR paragraph cache ─────────────────────────────────────────────────────
+
+export async function getOcrCacheText(
+  paperId: string,
+  pageIndex: number,
+  xmin: number,
+  ymin: number,
+  xmax: number,
+  ymax: number
+): Promise<string | null> {
+  return invoke<string | null>("get_ocr_cache_text", {
+    paperId,
+    pageIndex,
+    xmin,
+    ymin,
+    xmax,
+    ymax,
+  });
 }

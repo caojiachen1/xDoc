@@ -400,7 +400,8 @@ fn parse_tei_xml_manual(
                     title,
                     level: 1,
                     content: if content.len() > 2000 {
-                        content[..2000].to_string()
+                        let end = content.floor_char_boundary(2000);
+                        content[..end].to_string()
                     } else {
                         content
                     },

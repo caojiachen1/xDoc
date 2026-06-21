@@ -1,7 +1,7 @@
 /**
  * GlobalSearchDialog — Single-paper full-text & semantic search.
  *
- * Ctrl+Shift+F to open.  Searches ONLY the currently open PDF.
+ * Ctrl+F to open.  Searches ONLY the currently open PDF.
  *   1. 全文搜索  — SQL LIKE keyword search (CJK-friendly)
  *   2. 语义搜索  — LLM-powered semantic matching (supports cross-language)
  *
@@ -15,6 +15,7 @@ import {
   Text,
   Badge,
   Tooltip,
+  ProgressBar,
 } from "@fluentui/react-components";
 import {
   Search24Regular,
@@ -23,13 +24,18 @@ import {
   Document20Regular,
   Sparkle24Regular,
   ArrowRight16Regular,
+  DocumentText24Regular,
+  Eye24Regular,
 } from "@fluentui/react-icons";
 import { fetch } from "@tauri-apps/plugin-http";
+import { listen } from "@tauri-apps/api/event";
 import type { PaperInfo } from "./HomePage";
 import type { LlmSettings } from "./SettingsDialog";
+import { renderLatexToHtml } from "../utils/latex";
 import {
   searchPaper,
   searchIndexPaper,
+  searchIndexPaperOcr,
   searchIndexStatus,
   searchExtractPages,
   type SearchResult,
@@ -42,6 +48,9 @@ interface GlobalSearchDialogProps {
   currentPaper: PaperInfo | null;
   onOpenResult: (pageIndex: number) => void;
   llmSettings?: LlmSettings;
+  searchIndexMode: "pdf" | "ocr";
+  onSearchIndexModeChange: (mode: "pdf" | "ocr") => void;
+  ocrEnabled: boolean;
 }
 
 type SearchMode = "fulltext" | "semantic";
@@ -59,6 +68,9 @@ export default function GlobalSearchDialog({
   currentPaper,
   onOpenResult,
   llmSettings,
+  searchIndexMode,
+  onSearchIndexModeChange,
+  ocrEnabled,
 }: GlobalSearchDialogProps) {
   const [query, setQuery] = useState("");
   const [mode, setMode] = useState<SearchMode>("fulltext");
@@ -70,6 +82,15 @@ export default function GlobalSearchDialog({
   const [isIndexed, setIsIndexed] = useState(false);
   const [indexing, setIndexing] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
+  const [ocrIndexProgress, setOcrIndexProgress] = useState<{
+    page: number;
+    total_pages: number;
+    status: string;
+    paragraph: number;
+    total_paragraphs: number;
+    message: string;
+  } | null>(null);
+  const [indexError, setIndexError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resultsListRef = useRef<HTMLDivElement>(null);
@@ -82,6 +103,8 @@ export default function GlobalSearchDialog({
       setSemanticResults([]);
       setSelectedIdx(0);
       setSemanticStatus("");
+      setOcrIndexProgress(null);
+      setIndexError(null);
       // Check if current paper is indexed
       if (currentPaper) {
         searchIndexStatus()
@@ -91,6 +114,41 @@ export default function GlobalSearchDialog({
       setTimeout(() => inputRef.current?.focus(), 80);
     }
   }, [open, currentPaper]);
+
+  // ── Listen for OCR index progress events ─────────────────
+  const prevProgressRef = useRef<{ page: number; status: string } | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const unlisten = listen<{
+      page: number;
+      total_pages: number;
+      status: string;
+      paragraph: number;
+      total_paragraphs: number;
+      message: string;
+    }>("ocr-index-progress", (event) => {
+      const p = event.payload;
+      setOcrIndexProgress(p);
+      // Log on page change or status transition
+      const prev = prevProgressRef.current;
+      if (!prev || prev.page !== p.page || prev.status !== p.status) {
+        if (p.status === "detecting") {
+          console.log(`[search-index] OCR 进度: 第 ${p.page + 1}/${p.total_pages} 页 — 版面分析中`);
+        } else if (p.status === "ocr" && p.paragraph === 1) {
+          console.log(`[search-index] OCR 进度: 第 ${p.page + 1}/${p.total_pages} 页 — 开始识别 ${p.total_paragraphs} 个段落`);
+        } else if (p.status === "indexing") {
+          console.log(`[search-index] OCR 进度: 正在写入搜索索引...`);
+        } else if (p.status === "done") {
+          console.log(`[search-index] OCR 进度: 完成`);
+          setTimeout(() => setOcrIndexProgress(null), 2000);
+        }
+      }
+      prevProgressRef.current = { page: p.page, status: p.status };
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [open]);
 
   // ── Debounced full-text search (single paper) ───────────
   useEffect(() => {
@@ -115,8 +173,9 @@ export default function GlobalSearchDialog({
   }, [query, mode, currentPaper]);
 
   // ── Semantic search (LLM with full page text) ──────────
-  const runSemanticSearch = useCallback(async () => {
-    if (!query.trim() || !llmSettings || !currentPaper) return;
+  const runSemanticSearch = useCallback(async (presetQuery?: string) => {
+    const q = presetQuery ?? query;
+    if (!q.trim() || !llmSettings || !currentPaper) return;
     setSemanticSearching(true);
     setSemanticResults([]);
     setSemanticStatus("正在提取文档文本...");
@@ -242,16 +301,31 @@ export default function GlobalSearchDialog({
   // ── Index current paper ──────────────────────────────────
   const handleIndex = useCallback(async () => {
     if (!currentPaper) return;
+    const startTime = Date.now();
+    const modeLabel = searchIndexMode === "ocr" ? "OCR" : "PDF";
+    console.log(`[search-index] 开始${modeLabel}索引（强制刷新）: paper_id=${currentPaper.id}, path=${currentPaper.path}`);
     setIndexing(true);
+    setIndexError(null);
+    setOcrIndexProgress(null);
     try {
-      await searchIndexPaper(currentPaper.id, currentPaper.path);
+      if (searchIndexMode === "ocr") {
+        const pageCount = await searchIndexPaperOcr(
+          currentPaper.id, currentPaper.path, undefined, true,
+        );
+        console.log(`[search-index] OCR 索引完成: ${pageCount} 页, 耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+      } else {
+        const pageCount = await searchIndexPaper(currentPaper.id, currentPaper.path);
+        console.log(`[search-index] PDF 索引完成: ${pageCount} 页, 耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s`);
+      }
       setIsIndexed(true);
     } catch (e) {
-      console.warn("[search] index failed:", e);
+      const errMsg = String(e);
+      console.error(`[search-index] ${modeLabel}索引失败 (耗时 ${((Date.now() - startTime) / 1000).toFixed(1)}s):`, e);
+      setIndexError(errMsg);
     } finally {
       setIndexing(false);
     }
-  }, [currentPaper]);
+  }, [currentPaper, searchIndexMode]);
 
   // ── Keyboard navigation ──────────────────────────────────
   const displayResults = mode === "fulltext" ? results : semanticResults;
@@ -272,7 +346,7 @@ export default function GlobalSearchDialog({
           query.trim() &&
           !semanticSearching
         ) {
-          runSemanticSearch();
+          runSemanticSearch(query);
         } else if (displayResults[selectedIdx]) {
           const r = displayResults[selectedIdx];
           onOpenResult(r.page_index);
@@ -331,36 +405,83 @@ export default function GlobalSearchDialog({
               <Text size={400} weight="semibold">
                 搜索
               </Text>
-              {paperTitle && (
-                <Badge appearance="outline" size="medium" className="gs-paper-badge">
-                  {paperTitle.length > 30
-                    ? paperTitle.substring(0, 30) + "..."
-                    : paperTitle}
-                </Badge>
-              )}
             </div>
             <div className="gs-header-actions">
               {currentPaper && (
-                <Tooltip
-                  content={isIndexed ? "已建立索引" : "点击建立文档索引"}
-                  relationship="label"
-                >
-                  <Button
-                    size="small"
-                    appearance={isIndexed ? "subtle" : "outline"}
-                    icon={
-                      indexing ? (
-                        <Spinner size="extra-tiny" appearance="inverted" />
-                      ) : (
-                        <Database24Regular />
-                      )
+                <>
+                  {/* Index mode toggle — only show when OCR is enabled */}
+                  {ocrEnabled && (
+                    <div style={{ display: "flex", gap: "2px", marginRight: "4px" }}>
+                      <Tooltip
+                        content="使用 PDF 直接提取的文字建立索引（速度快，精度一般）"
+                        relationship="label"
+                      >
+                        <Button
+                          size="small"
+                          appearance={searchIndexMode === "pdf" ? "primary" : "subtle"}
+                          icon={<DocumentText24Regular />}
+                          onClick={() => onSearchIndexModeChange("pdf")}
+                          disabled={indexing}
+                        >
+                          PDF
+                        </Button>
+                      </Tooltip>
+                      <Tooltip
+                        content="使用 OCR 识别的文字建立索引（速度慢，精度高）"
+                        relationship="label"
+                      >
+                        <Button
+                          size="small"
+                          appearance={searchIndexMode === "ocr" ? "primary" : "subtle"}
+                          icon={<Eye24Regular />}
+                          onClick={() => onSearchIndexModeChange("ocr")}
+                          disabled={indexing}
+                        >
+                          OCR
+                        </Button>
+                      </Tooltip>
+                    </div>
+                  )}
+                  <Tooltip
+                    content={
+                      indexError
+                        ? `索引失败: ${indexError}`
+                        : indexing
+                          ? "正在建立索引..."
+                          : isIndexed
+                            ? `点击重新建立索引（当前：${searchIndexMode === "ocr" ? "OCR" : "PDF"}）`
+                            : `点击建立文档索引（${searchIndexMode === "ocr" ? "OCR" : "PDF"}）`
                     }
-                    onClick={handleIndex}
-                    disabled={indexing}
+                    relationship="label"
                   >
-                    {indexing ? "索引中..." : isIndexed ? "已索引" : "建立索引"}
-                  </Button>
-                </Tooltip>
+                    <Button
+                      size="small"
+                      appearance={indexError ? "outline" : isIndexed && !indexing ? "subtle" : "outline"}
+                      style={indexError ? { borderColor: "#e74c3c", color: "#e74c3c" } : undefined}
+                      icon={
+                        indexing ? (
+                          <Spinner size="extra-tiny" appearance="inverted" />
+                        ) : (
+                          <Database24Regular />
+                        )
+                      }
+                      onClick={handleIndex}
+                      disabled={indexing}
+                    >
+                      {indexing
+                        ? ocrIndexProgress
+                          ? `${ocrIndexProgress.page + 1}/${ocrIndexProgress.total_pages}`
+                          : "索引中..."
+                        : indexError
+                          ? "失败"
+                          : isIndexed
+                            ? "已索引"
+                            : searchIndexMode === "ocr"
+                              ? "OCR 索引"
+                              : "建立索引"}
+                    </Button>
+                  </Tooltip>
+                </>
               )}
               <Button
                 icon={<Dismiss20Regular />}
@@ -426,7 +547,7 @@ export default function GlobalSearchDialog({
                         size="small"
                         appearance="primary"
                         icon={<Sparkle24Regular />}
-                        onClick={runSemanticSearch}
+                        onClick={() => runSemanticSearch(query)}
                         disabled={hasNoDoc}
                       >
                         搜索
@@ -453,7 +574,31 @@ export default function GlobalSearchDialog({
           </div>
         </div>
 
-        {/* ── Results body ─────────────────────────────────── */}
+          {/* Semantic search presets — between header and body */}
+          {isSemantic && !query.trim() && (
+            <div className="gs-presets" style={{ display: "flex", flexWrap: "wrap", gap: "4px", padding: "8px 16px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+              {[
+                "摘要", "引言", "相关工作", "方法论",
+                "实验部分", "结果与讨论", "结论", "未来工作",
+              ].map((preset) => (
+                <Button
+                  key={preset}
+                  size="small"
+                  appearance="outline"
+                  onClick={() => {
+                    setQuery(preset);
+                    setSelectedIdx(0);
+                    runSemanticSearch(preset);
+                  }}
+                  disabled={hasNoDoc}
+                >
+                  {preset}
+                </Button>
+              ))}
+            </div>
+          )}
+
+          {/* ── Results body ─────────────────────────────────── */}
         <div className="gs-body" ref={resultsListRef}>
           {/* No document open */}
           {hasNoDoc && (
@@ -468,6 +613,47 @@ export default function GlobalSearchDialog({
               <Spinner size="small" appearance="inverted" />
               <Text size={200}>
                 {semanticStatus || (isSemantic ? "AI 正在分析..." : "搜索中...")}
+              </Text>
+            </div>
+          )}
+
+          {/* Indexing progress / error */}
+          {indexing && !ocrIndexProgress && (
+            <div className="gs-status">
+              <Spinner size="small" appearance="inverted" />
+              <Text size={200}>正在准备索引...</Text>
+            </div>
+          )}
+          {ocrIndexProgress && (
+            <div className="gs-status" style={{ gap: "6px" }}>
+              {indexing && <Spinner size="small" appearance="inverted" />}
+              <Text size={200}>{ocrIndexProgress.message}</Text>
+              <div style={{ width: "100%", padding: "0 16px" }}>
+                <ProgressBar
+                  value={
+                    ocrIndexProgress.status === "done" ? 1
+                    : ocrIndexProgress.total_pages > 0
+                      ? (ocrIndexProgress.page + (ocrIndexProgress.total_paragraphs > 0 ? ocrIndexProgress.paragraph / ocrIndexProgress.total_paragraphs : 0)) / ocrIndexProgress.total_pages
+                      : 0
+                  }
+                  thickness="large"
+                  color={indexing ? "brand" : "success"}
+                />
+              </div>
+              <Text size={100} style={{ opacity: 0.7 }}>
+                第 {ocrIndexProgress.page + 1} / {ocrIndexProgress.total_pages} 页
+                {ocrIndexProgress.total_paragraphs > 0 &&
+                  ` · 段落 ${ocrIndexProgress.paragraph} / ${ocrIndexProgress.total_paragraphs}`}
+              </Text>
+            </div>
+          )}
+          {indexError && !indexing && (
+            <div className="gs-status" style={{ gap: "4px" }}>
+              <Text size={200} style={{ color: "#e74c3c" }}>
+                索引失败: {indexError}
+              </Text>
+              <Text size={100} style={{ opacity: 0.7 }}>
+                请检查 OCR 模型是否已正确加载，或查看 DevTools Console 获取详细日志
               </Text>
             </div>
           )}
@@ -504,7 +690,7 @@ export default function GlobalSearchDialog({
                 </div>
                 <div
                   className="gs-result-snippet"
-                  dangerouslySetInnerHTML={{ __html: r.snippet }}
+                  dangerouslySetInnerHTML={{ __html: renderLatexToHtml(r.snippet) }}
                 />
               </div>
             ))}
@@ -544,7 +730,14 @@ export default function GlobalSearchDialog({
                   )}
                 </div>
                 {r.snippet && (
-                  <div className="gs-result-snippet">{r.snippet}</div>
+                  <div
+                    className="gs-result-snippet"
+                    dangerouslySetInnerHTML={{
+                      __html: renderLatexToHtml(
+                        r.snippet.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+                      ),
+                    }}
+                  />
                 )}
                 {r.reasoning && (
                   <div className="gs-result-reason">
@@ -567,7 +760,9 @@ export default function GlobalSearchDialog({
               {!isIndexed && currentPaper && (
                 <div className="gs-hint-action">
                   <ArrowRight16Regular />
-                  <Text size={200}>点击右上方"建立索引"按钮以启用全文搜索</Text>
+                  <Text size={200}>
+                    点击右上方{searchIndexMode === "ocr" ? `\u201COCR 索引\u201D` : `\u201C建立索引\u201D`}按钮以启用全文搜索
+                  </Text>
                 </div>
               )}
               <div className="gs-hint-keys">
@@ -584,7 +779,7 @@ export default function GlobalSearchDialog({
               ? `${displayResults.length} 条结果`
               : currentPaper
                 ? isIndexed
-                  ? "已索引"
+                  ? `已索引（${searchIndexMode === "ocr" ? "OCR" : "PDF"}）`
                   : "未索引"
                 : "无文档"}
           </Text>

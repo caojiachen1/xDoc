@@ -201,3 +201,26 @@ pub(crate) fn annotation_delete(
 ) -> Result<(), String> {
     db.delete_annotations(&file_path).map_err(|e| e.to_string())
 }
+
+// ── OCR paragraph cache ─────────────────────────────────────────────────────
+
+/// Look up cached OCR text for a specific paragraph region.
+/// Returns null if not cached. Used by the frontend to skip OCR when
+/// a persistent cache entry already exists (from OCR indexing).
+#[tauri::command]
+pub(crate) fn get_ocr_cache_text(
+    paper_id: String,
+    page_index: u32,
+    xmin: f32,
+    ymin: f32,
+    xmax: f32,
+    ymax: f32,
+    db: State<'_, SettingsDb>,
+) -> Result<Option<String>, String> {
+    let ixmin = xmin.round() as i32;
+    let iymin = ymin.round() as i32;
+    let ixmax = xmax.round() as i32;
+    let iymax = ymax.round() as i32;
+    db.get_ocr_cache(&paper_id, page_index, ixmin, iymin, ixmax, iymax)
+        .map_err(|e| e.to_string())
+}

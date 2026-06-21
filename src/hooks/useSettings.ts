@@ -27,6 +27,9 @@ export function useSettings(environmentReady: boolean) {
   const [ocrModelPath, setOcrModelPath] = useState("");
   const [ocrModelId, setOcrModelId] = useState("glm-ocr");
 
+  // ── Search index mode ────────────────────────────────────────────
+  const [searchIndexMode, setSearchIndexMode] = useState<"pdf" | "ocr">("pdf");
+
   // ── Font settings ────────────────────────────────────────────────
   const [textFontSize, setTextFontSize] = useState(15);
   const [aiFontSize, setAiFontSize] = useState(14);
@@ -125,6 +128,12 @@ export function useSettings(environmentReady: boolean) {
       setOcrModelPath(readStr("ocr.modelPath", "") || "model/GLM-OCR-GGUF");
       setOcrModelId(readStr("ocr.modelId", "") || "glm-ocr");
 
+      // Search index mode
+      const savedIndexMode = readStr("search.indexMode", "pdf");
+      if (savedIndexMode === "pdf" || savedIndexMode === "ocr") {
+        setSearchIndexMode(savedIndexMode);
+      }
+
       // Font size settings
       const savedTextFontSize = readNum("ui.textFontSize");
       if (savedTextFontSize !== null) setTextFontSize(Math.max(10, Math.min(40, savedTextFontSize)));
@@ -206,6 +215,12 @@ export function useSettings(environmentReady: boolean) {
 
   useEffect(() => {
     if (!environmentReady) return;
+    void invoke("db_set_setting", { key: "search.indexMode", value: searchIndexMode })
+      .catch((e) => console.warn("[settings] persist search.indexMode failed:", e));
+  }, [searchIndexMode, environmentReady]);
+
+  useEffect(() => {
+    if (!environmentReady) return;
     void invoke("db_set_ai_config", {
       config: {
         vendor: llmSettings.vendor,
@@ -254,6 +269,8 @@ export function useSettings(environmentReady: boolean) {
     ocrEnabled, setOcrEnabled,
     ocrModelPath, setOcrModelPath,
     ocrModelId, setOcrModelId,
+    // Search index mode
+    searchIndexMode, setSearchIndexMode,
     // Font
     textFontSize, setTextFontSize,
     aiFontSize, setAiFontSize,

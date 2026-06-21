@@ -116,7 +116,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(ModelState {
-            session: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             inference_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             response_cache: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             prefetch_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
@@ -176,6 +176,7 @@ pub fn run() {
             commands::settings::annotation_save,
             commands::settings::annotation_load,
             commands::settings::annotation_delete,
+            commands::settings::get_ocr_cache_text,
             // Paper management
             commands::paper::paper_copy_to_managed,
             commands::paper::paper_save,
@@ -197,6 +198,7 @@ pub fn run() {
             commands::misc::split_sentences,
             // Full-text search
             commands::search::search_index_paper,
+            commands::search::search_index_paper_ocr,
             commands::search::search_index_all,
             commands::search::search_paper,
             commands::search::search_index_status,

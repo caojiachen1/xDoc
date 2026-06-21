@@ -92,7 +92,7 @@ pub(crate) struct CachedInference {
 // ── State structs (managed by Tauri) ──────────────────────────────────────
 
 pub struct ModelState {
-    pub session: Arc<Mutex<Option<Session>>>,
+    pub session: Arc<tokio::sync::Mutex<Option<Session>>>,
     pub inference_cache: Arc<Mutex<HashMap<String, CachedInference>>>,
     pub response_cache: Arc<Mutex<HashMap<String, ExtractContentResponse>>>,
     pub prefetch_tasks: Arc<Mutex<HashSet<String>>>,

@@ -5,6 +5,7 @@ use std::{
     env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use models_cat::asynchronous::ModelsCat;
@@ -16,6 +17,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::gguf_ocr;
 use crate::ocr_models::{self, OcrEngine};
 use crate::ppocrv6;
+use crate::settings_db::SettingsDb;
 use super::{
     copy_from_cache, render_pdf_page, resolve_dll_dir, resolve_model_path, ModelDownloadProgress,
     TauriProgress,
@@ -34,6 +36,11 @@ fn clean_special_tokens(text: &str) -> String {
     let text = special.replace_all(text, "");
     let text = solo.replace_all(&text, "");
     text.to_string()
+}
+
+/// Public wrapper for clean_special_tokens, used by other modules (e.g., search indexing).
+pub(crate) fn clean_special_tokens_public(text: &str) -> String {
+    clean_special_tokens(text)
 }
 
 // ── OCR state ──────────────────────────────────────────────────────────────
@@ -152,7 +159,9 @@ pub(crate) async fn run_ocr_region(
     xmax: f32,
     ymax: f32,
     force_refresh: Option<bool>,
+    paper_id: Option<String>,
     state: State<'_, OcrState>,
+    db: State<'_, SettingsDb>,
 ) -> Result<OcrRegionResult, String> {
     let cache_key = format!(
         "{}::{}_{}_{}_{}_{}",
@@ -161,8 +170,21 @@ pub(crate) async fn run_ocr_region(
         xmax.round() as i32, ymax.round() as i32
     );
     if !force_refresh.unwrap_or(false) {
+        // Check in-memory cache first
         if let Some(cached_text) = state.ocr_cache.lock().unwrap().get(&cache_key) {
             return Ok(OcrRegionResult { text: cached_text.clone() });
+        }
+        // Check persistent DB cache
+        if let Some(ref pid) = paper_id {
+            let ixmin = xmin.round() as i32;
+            let iymin = ymin.round() as i32;
+            let ixmax = xmax.round() as i32;
+            let iymax = ymax.round() as i32;
+            if let Ok(Some(cached_text)) = db.get_ocr_cache(pid, page_index, ixmin, iymin, ixmax, iymax) {
+                // Populate in-memory cache for faster subsequent lookups
+                state.ocr_cache.lock().unwrap().insert(cache_key, cached_text.clone());
+                return Ok(OcrRegionResult { text: cached_text });
+            }
         }
     }
 
@@ -193,7 +215,19 @@ pub(crate) async fn run_ocr_region(
     };
     let text = clean_special_tokens(&text);
 
+    // Store in in-memory cache
     state.ocr_cache.lock().unwrap().insert(cache_key, text.clone());
+
+    // Store in persistent DB cache (if paper_id is provided)
+    if let Some(ref pid) = paper_id {
+        let ixmin = xmin.round() as i32;
+        let iymin = ymin.round() as i32;
+        let ixmax = xmax.round() as i32;
+        let iymax = ymax.round() as i32;
+        let model_id_str = state.active_model_id.lock().unwrap().clone().unwrap_or_default();
+        let _ = db.set_ocr_cache(pid, page_index, ixmin, iymin, ixmax, iymax, &text, &model_id_str);
+    }
+
     Ok(OcrRegionResult { text })
 }
 
@@ -212,7 +246,21 @@ fn run_gguf_ocr(
     cropped.save(&temp_path).map_err(|e| format!("Failed to save temp image: {e}"))?;
 
     let text = {
-        let mut guard = state.gguf_backend.lock().unwrap();
+        let start = Instant::now();
+        let guard = loop {
+            match state.gguf_backend.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if start.elapsed() > Duration::from_secs(10) {
+                        let _ = std::fs::remove_file(&temp_path);
+                        return Err("OCR 后端正忙（可能正在索引），请稍后再试".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(std::sync::TryLockError::Poisoned(e)) => return Err(format!("Mutex poisoned: {e}")),
+            }
+        };
+        let mut guard = guard;
         let backend = guard.as_mut().ok_or("GGUF backend not initialized")?;
         let app_ref = app;
         backend
@@ -238,7 +286,20 @@ fn run_ppocrv6_ocr(
         .ok_or_else(|| format!("Unknown PPOCRv6 model: {}", model_id))?;
 
     let text = {
-        let mut guard = state.ppocrv6_backend.lock().unwrap();
+        let start = Instant::now();
+        let guard = loop {
+            match state.ppocrv6_backend.try_lock() {
+                Ok(g) => break g,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if start.elapsed() > Duration::from_secs(10) {
+                        return Err("OCR 后端正忙（可能正在索引），请稍后再试".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(std::sync::TryLockError::Poisoned(e)) => return Err(format!("Mutex poisoned: {e}")),
+            }
+        };
+        let mut guard = guard;
         let backend = guard.as_mut().ok_or("PPOCRv6 backend not initialized")?;
         let app_ref = app;
         backend
