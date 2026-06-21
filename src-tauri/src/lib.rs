@@ -31,7 +31,7 @@ extern "system" {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let dll_dir = commands::resolve_dll_dir();
-    eprintln!("[xDoc] lib dir resolved to: {}", dll_dir.display());
+    eprintln!("[init] lib dir resolved to: {}", dll_dir.display());
 
     // Add the DLL directory to Windows DLL search path so that
     // llama.dll can find its dependencies (ggml.dll etc.) in the same folder.
@@ -49,11 +49,11 @@ pub fn run() {
     // Open (or create) the settings DB.
     let settings_db = match SettingsDb::open() {
         Ok(db) => {
-            eprintln!("[xDoc] settings db resolved to: {}", db.path.display());
+            eprintln!("[init] settings db resolved to: {}", db.path.display());
             db
         }
         Err(e) => {
-            eprintln!("[xDoc] failed to open C:\\xDoc\\settings.db ({e}); falling back to exe dir");
+            eprintln!("[init] failed to open C:\\xDoc\\settings.db ({e}); falling back to exe dir");
             let fallback_dir = env::current_exe()
                 .ok()
                 .and_then(|p| p.parent().map(|p| p.to_path_buf()))
@@ -95,7 +95,7 @@ pub fn run() {
 
     // Initialize journal rankings table from embedded data
     if let Err(e) = settings_db.init_journal_rankings() {
-        eprintln!("[xDoc] failed to init journal rankings: {e}");
+        eprintln!("[init] failed to init journal rankings: {e}");
     }
 
     // Initialize plugin system
@@ -112,7 +112,7 @@ pub fn run() {
     };
     let plugin_state = PluginState::new(&plugin_data_dir);
     let discovered = plugin_state.scan_plugins();
-    eprintln!("[xDoc] plugin system initialized: {} plugin(s) found", discovered.len());
+    eprintln!("[init] plugin system initialized: {} plugin(s) found", discovered.len());
 
     tauri::Builder::default()
         .manage(ModelState {
@@ -195,6 +195,13 @@ pub fn run() {
             commands::misc::check_model_exists,
             commands::misc::save_fulltext_debug,
             commands::misc::split_sentences,
+            // Full-text search
+            commands::search::search_index_paper,
+            commands::search::search_index_all,
+            commands::search::search_paper,
+            commands::search::search_index_status,
+            commands::search::search_delete_index,
+            commands::search::search_extract_pages,
             // Plugin system
             plugin_host::plugin_list,
             plugin_host::plugin_get_manifest,

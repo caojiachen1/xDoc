@@ -35,6 +35,8 @@ import {
 import { createPluginContext } from "./plugin/context";
 import { pluginManager } from "./plugin/manager";
 import CommandPalette from "./components/CommandPalette";
+import GlobalSearchDialog from "./components/GlobalSearchDialog";
+import "./components/GlobalSearchDialog.css";
 import ReadingReportDialog from "./components/ReadingReport";
 import AboutDialog from "./components/AboutDialog";
 import {
@@ -69,6 +71,7 @@ import {
   useSidebar,
   useZoom,
   useReadingSession,
+  useSearch,
 } from "./hooks";
 import "./App.css";
 
@@ -177,6 +180,12 @@ function App() {
         case "k":
           e.preventDefault();
           setCommandPaletteOpen((prev) => !prev);
+          break;
+        case "f":
+          if (e.shiftKey) {
+            e.preventDefault();
+            search.openSearchDialog();
+          }
           break;
         case "o":
           e.preventDefault();
@@ -316,6 +325,9 @@ function App() {
       }
     }
   };
+
+  // ── Search hook (needs loadPageData defined above) ──────────────────────
+  const search = useSearch(loadPageData);
 
   // ── clearCurrentDocument — resets all document-related state ───────────────
   const clearCurrentDocument = () => {
@@ -1202,6 +1214,7 @@ function App() {
                   disabled={!isPdfSelected}
                 >{sidebar.refSidebarOpen ? "隐藏参考文献栏" : "显示参考文献栏"}</MenuItem>
                 <div className="menu-divider" />
+                <MenuItem onClick={() => search.openSearchDialog()}>全局搜索 (Ctrl+Shift+F)</MenuItem>
                 <MenuItem onClick={() => setCommandPaletteOpen(v => !v)}>命令面板</MenuItem>
               </MenuList>
             </MenuPopover>
@@ -2303,6 +2316,17 @@ function App() {
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
         currentPdfPath={effectivePdfPath}
+      />
+      {/* Global search dialog (Ctrl+Shift+F) */}
+      <GlobalSearchDialog
+        open={search.searchDialogOpen}
+        onClose={search.closeSearchDialog}
+        currentPaper={currentPaper}
+        onOpenResult={(pageIndex) => {
+          if (documentPath) loadPageData(documentPath, pageIndex);
+          search.closeSearchDialog();
+        }}
+        llmSettings={settings.llmSettings}
       />
     </div>
   );

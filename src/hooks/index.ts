@@ -12,3 +12,4 @@ export { useOcr } from "./useOcr";
 export { useSidebar } from "./useSidebar";
 export { useZoom } from "./useZoom";
 export { useReadingSession } from "./useReadingSession";
+export { useSearch } from "./useSearch";

@@ -15,6 +15,7 @@ pub(crate) mod model;
 pub(crate) mod ocr;
 pub(crate) mod paper;
 pub(crate) mod pdf;
+pub(crate) mod search;
 pub(crate) mod settings;
 
 // ── Shared types ───────────────────────────────────────────────────────────

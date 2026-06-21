@@ -223,3 +223,55 @@ export async function lookupJournalRanking(
     journalName,
   });
 }
+
+// ── Full-text search ───────────────────────────────────────────────────
+
+export interface SearchResult {
+  page_index: number;
+  char_offset: number;
+  snippet: string;
+}
+
+export interface PageText {
+  page_index: number;
+  text: string;
+}
+
+export interface ExtractedPages {
+  pages: PageText[];
+  language: string;
+}
+
+export async function searchIndexPaper(
+  paperId: string,
+  filePath: string
+): Promise<number> {
+  return invoke<number>("search_index_paper", { paperId, filePath });
+}
+
+export async function searchIndexAll(): Promise<number> {
+  return invoke<number>("search_index_all");
+}
+
+export async function searchPaper(
+  paperId: string,
+  query: string,
+  limit?: number
+): Promise<SearchResult[]> {
+  return invoke<SearchResult[]>("search_paper", { paperId, query, limit });
+}
+
+export async function searchIndexStatus(): Promise<string[]> {
+  return invoke<string[]>("search_index_status");
+}
+
+export async function searchDeleteIndex(paperId: string): Promise<void> {
+  return invoke("search_delete_index", { paperId });
+}
+
+export async function searchExtractPages(
+  paperId: string,
+  filePath: string
+): Promise<ExtractedPages> {
+  return invoke<ExtractedPages>("search_extract_pages", { paperId, filePath });
+}

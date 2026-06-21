@@ -217,6 +217,45 @@ impl SettingsDb {
         crate::plugin_storage::init_plugin_storage_table(&conn)
             .map_err(|e| anyhow::anyhow!("初始化 plugin_storage 表失败: {e}"))?;
 
+        // Full-text search index — stores per-page text for search.
+        // FTS5 virtual tables do NOT support ALTER TABLE ADD COLUMN,
+        // so we detect the schema and recreate if columns are missing.
+        {
+            let needs_recreate = conn
+                .prepare("PRAGMA table_info(papers_fts)")
+                .and_then(|mut stmt| {
+                    let cols: Vec<String> = stmt
+                        .query_map([], |row| row.get::<_, String>(1))?
+                        .filter_map(|r| r.ok())
+                        .collect();
+                    eprintln!("[db] papers_fts columns: {:?}", cols);
+                    // If table exists but lacks char_count column, we must recreate
+                    Ok(!cols.is_empty() && !cols.contains(&"char_count".to_string()))
+                })
+                .unwrap_or(false);
+
+            if needs_recreate {
+                eprintln!("[db] papers_fts table has old schema, dropping and recreating...");
+                conn.execute_batch("DROP TABLE IF EXISTS papers_fts;")
+                    .map_err(|e| anyhow::anyhow!("删除旧 papers_fts 表失败: {e}"))?;
+            } else {
+                eprintln!("[db] papers_fts table schema is up-to-date");
+            }
+
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
+                    paper_id UNINDEXED,
+                    page_index UNINDEXED,
+                    text,
+                    char_count UNINDEXED,
+                    language UNINDEXED,
+                    tokenize='unicode61'
+                );",
+            )
+            .map_err(|e| anyhow::anyhow!("创建 papers_fts 表失败: {e}"))?;
+            eprintln!("[db] papers_fts table ready");
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
             path,
@@ -655,7 +694,7 @@ impl SettingsDb {
         }
         tx.commit()?;
 
-        eprintln!("[xDoc] journal rankings initialized: {} entries", entries.len());
+        eprintln!("[db] journal rankings initialized: {} entries", entries.len());
         Ok(())
     }
 
@@ -878,5 +917,226 @@ impl SettingsDb {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    // ────────────────────── Full-Text Search (FTS5) ──────────────────────
+
+    /// Index a paper's text content with metadata (char_count, language detection).
+    /// Replaces any existing index entries for this paper_id.
+    pub fn index_paper_text(
+        &self,
+        paper_id: &str,
+        pages: &[(u32, String)], // (page_index, text)
+    ) -> Result<()> {
+        let conn = self.conn.lock();
+        eprintln!("[db] index_paper_text: paper_id={}, pages={}", paper_id, pages.len());
+        // Remove old entries
+        let deleted = conn.execute(
+            "DELETE FROM papers_fts WHERE paper_id = ?1",
+            params![paper_id],
+        )?;
+        eprintln!("[db] Deleted {} old index entries for paper_id={}", deleted, paper_id);
+        // Detect dominant language across all pages
+        let all_text: String = pages.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" ");
+        let language = detect_text_language(&all_text);
+        eprintln!("[db] Detected language: {}", language);
+        // Insert new entries
+        let mut inserted = 0u32;
+        for (page_idx, text) in pages {
+            if !text.trim().is_empty() {
+                let char_count = text.chars().count() as i32;
+                conn.execute(
+                    "INSERT INTO papers_fts (paper_id, page_index, text, char_count, language) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![paper_id, *page_idx as i32, text, char_count, &language],
+                )?;
+                inserted += 1;
+            }
+        }
+        eprintln!("[db] Inserted {} new index entries for paper_id={}", inserted, paper_id);
+        Ok(())
+    }
+
+    /// Check if a paper has been indexed for full-text search.
+    pub fn is_paper_indexed(&self, paper_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM papers_fts WHERE paper_id = ?1",
+            params![paper_id],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Delete FTS index entries for a paper.
+    pub fn delete_paper_index(&self, paper_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM papers_fts WHERE paper_id = ?1",
+            params![paper_id],
+        )?;
+        Ok(())
+    }
+
+    /// Search a SINGLE paper's indexed text using SQL LIKE (CJK-friendly).
+    /// Returns (page_index, char_offset, snippet) for each page with a match.
+    pub fn search_paper_fts(
+        &self,
+        paper_id: &str,
+        query: &str,
+        limit: i32,
+    ) -> Result<Vec<(i32, i32, String)>> {
+        let conn = self.conn.lock();
+        let trimmed = query.trim().to_string();
+        if trimmed.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let pattern = format!("%{}%", trimmed);
+        let mut stmt = conn.prepare(
+            "SELECT page_index, text FROM papers_fts
+             WHERE paper_id = ?1 AND text LIKE ?2
+             ORDER BY page_index
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![paper_id, pattern, limit], |row| {
+            Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))
+        })?;
+
+        let mut out = Vec::new();
+        for r in rows {
+            let (page_index, text) = r?;
+            let lower_text = text.to_lowercase();
+            let lower_query = trimmed.to_lowercase();
+            if let Some(byte_offset) = lower_text.find(&lower_query) {
+                let char_offset = text[..byte_offset].chars().count() as i32;
+                let snippet = Self::build_snippet(&text, &trimmed, 120);
+                out.push((page_index, char_offset, snippet));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Get all indexed page texts for a specific paper.
+    /// Returns (page_index, text) sorted by page.
+    pub fn get_paper_pages_text(&self, paper_id: &str) -> Result<Vec<(u32, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT page_index, text FROM papers_fts
+             WHERE paper_id = ?1
+             ORDER BY page_index",
+        )?;
+        let rows = stmt.query_map(params![paper_id], |row| {
+            Ok((row.get::<_, u32>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Get the detected language for a paper's index.
+    pub fn get_paper_language(&self, paper_id: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT language FROM papers_fts WHERE paper_id = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![paper_id], |row| row.get(0))?;
+        if let Some(r) = rows.next() {
+            Ok(Some(r?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Extract a context window around the first match and add `<mark>` highlighting.
+    fn build_snippet(text: &str, query: &str, context_chars: usize) -> String {
+        let lower_text = text.to_lowercase();
+        let lower_query = query.to_lowercase();
+        let pos = lower_text.find(&lower_query);
+
+        let snippet = if let Some(start) = pos {
+            let match_end = start + query.len();
+            let ctx_start = if start > context_chars { start - context_chars } else { 0 };
+            let ctx_end = std::cmp::min(match_end + context_chars, text.len());
+            // Adjust to char boundaries
+            let ctx_start = text.floor_char_boundary(ctx_start);
+            let ctx_end = text.ceil_char_boundary(ctx_end);
+
+            let prefix = if ctx_start > 0 { "..." } else { "" };
+            let suffix = if ctx_end < text.len() { "..." } else { "" };
+            format!(
+                "{}{}<mark>{}</mark>{}{}",
+                prefix,
+                &text[ctx_start..start],
+                &text[start..match_end],
+                &text[match_end..ctx_end],
+                suffix,
+            )
+        } else {
+            // No match in original text (shouldn't happen), return beginning
+            let end = std::cmp::min(240, text.len());
+            let end = text.ceil_char_boundary(end);
+            format!("{}...", &text[..end])
+        };
+
+        // Escape HTML entities (except our <mark> tags)
+        snippet
+    }
+
+    /// Get all indexed paper IDs (for status display).
+    pub fn list_indexed_paper_ids(&self) -> Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT paper_id FROM papers_fts",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+}
+
+/// Simple language detection based on character frequency analysis.
+/// Returns "zh" for Chinese-dominant, "ja" for Japanese, "en" for Latin-dominant, "mixed" otherwise.
+pub fn detect_text_language(text: &str) -> String {
+    let mut cjk_count = 0u32;
+    let mut latin_count = 0u32;
+    let mut hiragana_count = 0u32;
+    let mut total = 0u32;
+
+    for ch in text.chars() {
+        if ch.is_whitespace() || ch.is_ascii_punctuation() {
+            continue;
+        }
+        total += 1;
+        let cp = ch as u32;
+        if (0x4E00..=0x9FFF).contains(&cp) || (0x3400..=0x4DBF).contains(&cp) {
+            cjk_count += 1;
+        } else if (0x3040..=0x309F).contains(&cp) || (0x30A0..=0x30FF).contains(&cp) {
+            hiragana_count += 1;
+        } else if ch.is_ascii_alphabetic() {
+            latin_count += 1;
+        }
+    }
+
+    if total == 0 {
+        return "unknown".to_string();
+    }
+
+    let cjk_ratio = cjk_count as f64 / total as f64;
+    let latin_ratio = latin_count as f64 / total as f64;
+    let kana_ratio = hiragana_count as f64 / total as f64;
+
+    if kana_ratio > 0.05 {
+        "ja".to_string()
+    } else if cjk_ratio > 0.3 {
+        "zh".to_string()
+    } else if latin_ratio > 0.5 {
+        "en".to_string()
+    } else {
+        "mixed".to_string()
     }
 }

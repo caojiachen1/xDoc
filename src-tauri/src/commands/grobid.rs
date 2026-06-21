@@ -174,14 +174,14 @@ fn grobid_cache_path(pdf_path: &Path) -> PathBuf {
 fn load_grobid_json_cache(pdf_path: &Path) -> Option<GrobidDocumentOutput> {
     let cache_path = grobid_cache_path(pdf_path);
     if !cache_path.exists() {
-        eprintln!("[xDoc:grobid] JSON cache miss: {} (not found)", cache_path.display());
+        eprintln!("[grobid] JSON cache miss: {} (not found)", cache_path.display());
         return None;
     }
     match std::fs::read_to_string(&cache_path) {
         Ok(content) => match serde_json::from_str::<GrobidDocumentOutput>(&content) {
             Ok(doc) => {
                 eprintln!(
-                    "[xDoc:grobid] JSON cache HIT: {} ({} sections, {} refs)",
+                    "[grobid] JSON cache HIT: {} ({} sections, {} refs)",
                     cache_path.display(),
                     doc.sections.len(),
                     doc.references.len()
@@ -189,12 +189,12 @@ fn load_grobid_json_cache(pdf_path: &Path) -> Option<GrobidDocumentOutput> {
                 Some(doc)
             }
             Err(e) => {
-                eprintln!("[xDoc:grobid] JSON cache parse error: {e}");
+                eprintln!("[grobid] JSON cache parse error: {e}");
                 None
             }
         },
         Err(e) => {
-            eprintln!("[xDoc:grobid] JSON cache read error: {e}");
+            eprintln!("[grobid] JSON cache read error: {e}");
             None
         }
     }
@@ -206,15 +206,15 @@ fn save_grobid_json_cache(pdf_path: &Path, result: &GrobidDocumentOutput) {
         Ok(json) => {
             if let Err(e) = std::fs::write(&cache_path, json) {
                 eprintln!(
-                    "[xDoc:grobid] Failed to write JSON cache to {}: {e}",
+                    "[grobid] Failed to write JSON cache to {}: {e}",
                     cache_path.display()
                 );
             } else {
-                eprintln!("[xDoc:grobid] JSON cache saved to: {}", cache_path.display());
+                eprintln!("[grobid] JSON cache saved to: {}", cache_path.display());
             }
         }
         Err(e) => {
-            eprintln!("[xDoc:grobid] JSON cache serialize error: {e}");
+            eprintln!("[grobid] JSON cache serialize error: {e}");
         }
     }
 }
@@ -230,7 +230,7 @@ fn extract_structure(
 ) {
     // Strategy 1: fulltext_to_structured
     eprintln!(
-        "[xDoc:grobid] Strategy 1: calling fulltext_to_structured for {}",
+        "[grobid] Strategy 1: calling fulltext_to_structured for {}",
         path.display()
     );
     match grobid_rs::fulltext_to_structured(path) {
@@ -241,7 +241,7 @@ fn extract_structure(
                 .map(|ft| ft.sections.len())
                 .unwrap_or(0);
             eprintln!(
-                "[xDoc:grobid] Strategy 1 OK: full_text={}, sections={}, figures={}, tables={}",
+                "[grobid] Strategy 1 OK: full_text={}, sections={}, figures={}, tables={}",
                 doc.full_text.is_some(),
                 sections_count,
                 doc.full_text.as_ref().map(|ft| ft.figures.len()).unwrap_or(0),
@@ -250,7 +250,7 @@ fn extract_structure(
             if let Some(ft) = &doc.full_text {
                 for (i, sec) in ft.sections.iter().enumerate() {
                     eprintln!(
-                        "[xDoc:grobid]   section[{}]: level={}, title={:?}, content_len={}, subsections={}",
+                        "[grobid]   section[{}]: level={}, title={:?}, content_len={}, subsections={}",
                         i,
                         sec.level,
                         sec.title.as_deref().unwrap_or("(none)"),
@@ -278,50 +278,50 @@ fn extract_structure(
                     })
                     .collect();
                 eprintln!(
-                    "[xDoc:grobid] extracted: {} sections (flattened), {} figures, {} tables",
+                    "[grobid] extracted: {} sections (flattened), {} figures, {} tables",
                     sections.len(),
                     figures.len(),
                     tables.len()
                 );
                 return (sections, figures, tables);
             } else {
-                eprintln!("[xDoc:grobid] Strategy 1: full_text is None — trying fallback");
+                eprintln!("[grobid] Strategy 1: full_text is None — trying fallback");
             }
         }
         Err(e) => {
-            eprintln!("[xDoc:grobid] Strategy 1 FAILED: {e}");
+            eprintln!("[grobid] Strategy 1 FAILED: {e}");
         }
     }
 
     // Strategy 2: fulltext_to_tei → manual TEI XML parsing
     eprintln!(
-        "[xDoc:grobid] Strategy 2: calling fulltext_to_tei for {}",
+        "[grobid] Strategy 2: calling fulltext_to_tei for {}",
         path.display()
     );
     match grobid_rs::fulltext_to_tei(path) {
         Ok(tei_xml) => {
             eprintln!(
-                "[xDoc:grobid] Strategy 2: got TEI XML ({} chars), doing manual parse",
+                "[grobid] Strategy 2: got TEI XML ({} chars), doing manual parse",
                 tei_xml.len()
             );
             let (sections, figures, tables) = parse_tei_xml_manual(&tei_xml);
             if !sections.is_empty() || !figures.is_empty() || !tables.is_empty() {
                 eprintln!(
-                    "[xDoc:grobid] Manual TEI parse: {} sections, {} figures, {} tables",
+                    "[grobid] Manual TEI parse: {} sections, {} figures, {} tables",
                     sections.len(),
                     figures.len(),
                     tables.len()
                 );
                 return (sections, figures, tables);
             }
-            eprintln!("[xDoc:grobid] Manual TEI parse found nothing useful");
+            eprintln!("[grobid] Manual TEI parse found nothing useful");
         }
         Err(e) => {
-            eprintln!("[xDoc:grobid] Strategy 2: fulltext_to_tei FAILED: {e}");
+            eprintln!("[grobid] Strategy 2: fulltext_to_tei FAILED: {e}");
         }
     }
 
-    eprintln!("[xDoc:grobid] All structure extraction strategies failed → empty structure");
+    eprintln!("[grobid] All structure extraction strategies failed → empty structure");
     (Vec::new(), Vec::new(), Vec::new())
 }
 
@@ -582,7 +582,7 @@ fn parse_tei_xml_manual(
     }
 
     eprintln!(
-        "[xDoc:grobid] manual TEI parse: {} sections, {} figures, {} tables",
+        "[grobid] manual TEI parse: {} sections, {} figures, {} tables",
         sections.len(),
         figures.len(),
         tables.len()
@@ -658,7 +658,7 @@ pub(crate) async fn grobid_ensure_ready(
     };
 
     if !should_init {
-        eprintln!("[xDoc:grobid] ensure_ready: init already in progress, waiting…");
+        eprintln!("[grobid] ensure_ready: init already in progress, waiting…");
         let status_arc = state.status.clone();
         let init_done = state.init_done.clone();
         return tauri::async_runtime::spawn_blocking(move || {
@@ -791,7 +791,7 @@ pub(crate) async fn grobid_parse_document(
                     tauri::async_runtime::spawn_blocking(
                         move || -> Result<GrobidDocumentOutput, String> {
                             eprintln!(
-                                "[xDoc:grobid] structure_only re-parse for {}",
+                                "[grobid] structure_only re-parse for {}",
                                 path.display()
                             );
                             let (sections, figures, tables) = extract_structure(&path);
@@ -849,7 +849,7 @@ pub(crate) async fn grobid_parse_document(
             }
         }
         eprintln!(
-            "[xDoc:grobid] structure_only requested but no cache for {}, doing full parse",
+            "[grobid] structure_only requested but no cache for {}, doing full parse",
             file_path
         );
     }
@@ -868,11 +868,11 @@ pub(crate) async fn grobid_parse_document(
             let guard = state.cached_result.lock().unwrap();
             if let Some((ref p, ref r)) = *guard {
                 if p == &file_path {
-                    eprintln!("[xDoc:grobid] in-memory cache HIT for {}", file_path);
+                    eprintln!("[grobid] in-memory cache HIT for {}", file_path);
                     Some(r.clone())
                 } else {
                     eprintln!(
-                        "[xDoc:grobid] in-memory cache MISS (cached={}, requested={})",
+                        "[grobid] in-memory cache MISS (cached={}, requested={})",
                         p, file_path
                     );
                     None
@@ -892,7 +892,7 @@ pub(crate) async fn grobid_parse_document(
             let has_references = !doc.references.is_empty();
 
             if has_sections && has_references {
-                eprintln!("[xDoc:grobid] using complete cache for {}", file_path);
+                eprintln!("[grobid] using complete cache for {}", file_path);
                 *state.cached_result.lock().unwrap() = Some((file_path.clone(), doc.clone()));
                 let _ = app.emit(
                     "grobid-parse-event",
@@ -910,7 +910,7 @@ pub(crate) async fn grobid_parse_document(
             need_structure = !has_sections;
             need_references = !has_references;
             eprintln!(
-                "[xDoc:grobid] partial cache for {} (sections={}, refs={}), will re-parse missing parts",
+                "[grobid] partial cache for {} (sections={}, refs={}), will re-parse missing parts",
                 file_path,
                 if has_sections { "ok" } else { "MISSING" },
                 if has_references { "ok" } else { "MISSING" }
@@ -926,7 +926,7 @@ pub(crate) async fn grobid_parse_document(
             }
         } else {
             eprintln!(
-                "[xDoc:grobid] no cache found for {}, will do full parse",
+                "[grobid] no cache found for {}, will do full parse",
                 file_path
             );
         }
@@ -987,10 +987,10 @@ pub(crate) async fn grobid_parse_document(
 
     let parse_result = tauri::async_runtime::spawn_blocking(move || -> Result<GrobidDocumentOutput, String> {
         let (sections, figures, tables) = if need_structure {
-            eprintln!("[xDoc:grobid] re-parsing structure (sections missing from cache)");
+            eprintln!("[grobid] re-parsing structure (sections missing from cache)");
             extract_structure(&path)
         } else {
-            eprintln!("[xDoc:grobid] using cached sections, skipping structure re-parse");
+            eprintln!("[grobid] using cached sections, skipping structure re-parse");
             (
                 cached_sections_opt.unwrap_or_default(),
                 cached_figures_opt.unwrap_or_default(),
@@ -999,7 +999,7 @@ pub(crate) async fn grobid_parse_document(
         };
 
         let metadata = if cached_meta_opt.is_some() {
-            eprintln!("[xDoc:grobid] using cached metadata, skipping header re-parse");
+            eprintln!("[grobid] using cached metadata, skipping header re-parse");
             cached_meta_opt.clone().unwrap()
         } else {
             match grobid_rs::process_header_structured(&path) {
@@ -1036,7 +1036,7 @@ pub(crate) async fn grobid_parse_document(
                     keywords: meta.keywords.clone(),
                 },
                 Err(e) => {
-                    eprintln!("[xDoc:grobid] header parsing failed: {e}");
+                    eprintln!("[grobid] header parsing failed: {e}");
                     GrobidMetadataOutput {
                         title: None,
                         authors: Vec::new(),
@@ -1051,10 +1051,10 @@ pub(crate) async fn grobid_parse_document(
         };
 
         let references = if !need_references {
-            eprintln!("[xDoc:grobid] using cached references, skipping references re-parse");
+            eprintln!("[grobid] using cached references, skipping references re-parse");
             cached_refs_opt.unwrap_or_default()
         } else {
-            eprintln!("[xDoc:grobid] re-parsing references (missing from cache)");
+            eprintln!("[grobid] re-parsing references (missing from cache)");
             match grobid_rs::process_references_structured(&path) {
                 Ok(refs) => refs
                     .iter()
@@ -1083,7 +1083,7 @@ pub(crate) async fn grobid_parse_document(
                     })
                     .collect(),
                 Err(e) => {
-                    eprintln!("[xDoc:grobid] references parsing failed: {e}");
+                    eprintln!("[grobid] references parsing failed: {e}");
                     cached_refs_opt.unwrap_or_default()
                 }
             }
@@ -1145,10 +1145,10 @@ pub(crate) async fn grobid_batch_parse(
     paths: Vec<String>,
     state: State<'_, GrobidEngineState>,
 ) -> Result<Vec<String>, String> {
-    eprintln!("[xDoc:grobid] batch parse: {} files", paths.len());
+    eprintln!("[grobid] batch parse: {} files", paths.len());
 
     if let Err(e) = grobid_ensure_ready(state.clone()).await {
-        eprintln!("[xDoc:grobid] batch: engine init failed: {e}");
+        eprintln!("[grobid] batch: engine init failed: {e}");
         for file_path in &paths {
             let _ = app.emit(
                 "grobid-parse-event",
@@ -1180,7 +1180,7 @@ pub(crate) async fn grobid_batch_parse(
                 parsed_paths.push(file_path.clone());
             }
             Err(e) => {
-                eprintln!("[xDoc:grobid] batch: failed to parse {}: {}", file_path, e);
+                eprintln!("[grobid] batch: failed to parse {}: {}", file_path, e);
                 let _ = app.emit(
                     "grobid-parse-event",
                     GrobidParseEvent {
@@ -1196,7 +1196,7 @@ pub(crate) async fn grobid_batch_parse(
     }
 
     eprintln!(
-        "[xDoc:grobid] batch parse done: {}/{} succeeded",
+        "[grobid] batch parse done: {}/{} succeeded",
         parsed_paths.len(),
         paths.len()
     );
@@ -1262,7 +1262,7 @@ pub(crate) async fn grobid_save_ref_enrichment(
 
     save_grobid_json_cache(&pdf_path, &doc);
     eprintln!(
-        "[xDoc:grobid] saved enrichment for ref {} in {}",
+        "[grobid] saved enrichment for ref {} in {}",
         ref_index,
         cache_path.display()
     );
@@ -1279,7 +1279,7 @@ pub(crate) fn grobid_clear_cache(
     if cache_path.exists() {
         std::fs::remove_file(&cache_path)
             .map_err(|e| format!("Failed to delete cache file: {e}"))?;
-        eprintln!("[xDoc:grobid] deleted JSON cache: {}", cache_path.display());
+        eprintln!("[grobid] deleted JSON cache: {}", cache_path.display());
     }
     *state.cached_result.lock().unwrap() = None;
     Ok(())

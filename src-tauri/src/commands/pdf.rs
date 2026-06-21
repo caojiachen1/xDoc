@@ -897,7 +897,7 @@ pub(crate) async fn extract_first_page_metadata(
     tauri::async_runtime::spawn_blocking(move || -> Result<FirstPageMetadata, String> {
         let t0 = std::time::Instant::now();
         let log = |step: &str| {
-            eprintln!("[xDoc:meta] {} (+{}ms)", step, t0.elapsed().as_millis());
+            eprintln!("[pdf] {} (+{}ms)", step, t0.elapsed().as_millis());
         };
 
         log("binding pdfium...");

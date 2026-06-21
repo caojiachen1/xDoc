@@ -33,7 +33,7 @@ pub(crate) async fn load_model(
 
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let t0 = std::time::Instant::now();
-        eprintln!("[xDoc:model] loading ONNX model from {}...", resolved_str);
+        eprintln!("[model] loading ONNX model from {}...", resolved_str);
 
         let session = Session::builder()
             .map_err(|e| e.to_string())?
@@ -41,7 +41,7 @@ pub(crate) async fn load_model(
             .map_err(|e| e.to_string())?;
 
         eprintln!(
-            "[xDoc:model] ONNX session created (+{}ms)",
+            "[model] ONNX session created (+{}ms)",
             t0.elapsed().as_millis()
         );
 
@@ -51,7 +51,7 @@ pub(crate) async fn load_model(
         response_cache_arc.lock().unwrap().clear();
 
         eprintln!(
-            "[xDoc:model] model loaded successfully (+{}ms)",
+            "[model] model loaded successfully (+{}ms)",
             t0.elapsed().as_millis()
         );
         Ok("Model loaded successfully".to_string())
