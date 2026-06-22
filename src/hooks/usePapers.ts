@@ -19,6 +19,7 @@ import {
 export function usePapers(
   onPaperDeleted: (paper: PaperInfo) => void,
   onPaperRenamed?: (paperId: string, oldPath: string, newPath: string) => void,
+  llmSettings?: { vendor: string; baseUrl: string; vendorApiKeys: Record<string, string>; model?: string },
 ) {
   const [papersList, setPapersList] = useState<PaperInfo[]>([]);
   const [extractingPaperId, setExtractingPaperId] = useState<string | null>(null);
@@ -111,31 +112,35 @@ export function usePapers(
   const handleDeletePaper = useCallback(async (id: string) => {
     const paper = papersList.find(p => p.id === id);
     if (!paper) return;
-    setPapersList(prev => prev.filter(p => p.id !== id));
-    onPaperDeleted(paper);
-    try { await dbDeletePaper(id); } catch (e) { console.error("[App] failed to delete paper from DB:", e); }
+    try {
+      await dbDeletePaper(id);              // 先删数据库，失败则不更新 UI
+      setPapersList(prev => prev.filter(p => p.id !== id));  // DB 成功后才更新 UI
+      onPaperDeleted(paper);
+    } catch (e) {
+      console.error("[App] failed to delete paper from DB:", e);
+    }
   }, [papersList, onPaperDeleted]);
 
   // ── Extract metadata for a paper ─────────────────────────────────
-  const handleExtractMetadata = useCallback(async (paperId: string) => {
+  const handleExtractMetadata = useCallback(async (paperId: string, force = false) => {
     const paper = papersList.find(p => p.id === paperId);
-    if (!paper || paper.metadataExtracted) return;
+    if (!paper) return;
+    // Skip if already extracted (unless forced)
+    if (paper.metadataExtracted && !force) return;
     setExtractingPaperId(paperId);
     try {
       const base64Data = await invoke<string>("read_file_base64", { filePath: paper.path });
-      const metadata = await extractMetadataEnhanced(paper.path, base64Data);
+      const metadata = await extractMetadataEnhanced(paper.path, base64Data, llmSettings);
       let renamedPaper = { ...paper, metadata, metadataExtracted: true };
         if (metadata.title && paper.managedPath) {
           try {
-            const hasChinese = /[\u4e00-\u9fff]/.test(metadata.title);
-            if (!hasChinese) {
-              const oldPath = paper.path;
-              const newPath = await renamePaper(paper.managedPath, metadata.title);
-              renamedPaper.path = newPath;
-              renamedPaper.managedPath = newPath;
-              renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
-              if (oldPath !== newPath) onPaperRenamed?.(paperId, oldPath, newPath);
-            }
+            const oldPath = paper.path;
+            // Rename: use OCR title for Chinese papers too (XMP is often garbled)
+            const newPath = await renamePaper(paper.managedPath, metadata.title);
+            renamedPaper.path = newPath;
+            renamedPaper.managedPath = newPath;
+            renamedPaper.name = newPath.replace(/\\/g, "/").split("/").pop() || renamedPaper.name;
+            if (oldPath !== newPath) onPaperRenamed?.(paperId, oldPath, newPath);
           } catch (e) { console.warn("[App] rename failed:", e); }
         }
       setPapersList(prev => prev.map(p => p.id === paperId ? renamedPaper : p));

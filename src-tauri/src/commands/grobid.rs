@@ -814,8 +814,11 @@ pub(crate) async fn grobid_parse_document(
                     Ok(result) => {
                         *cached_result_arc.lock().unwrap() =
                             Some((file_path.clone(), result.clone()));
-                        let pdf_path = PathBuf::from(&file_path);
-                        save_grobid_json_cache(&pdf_path, &result);
+                        // Only save cache if result has meaningful content
+                        if !result.sections.is_empty() || !result.references.is_empty() {
+                            let pdf_path = PathBuf::from(&file_path);
+                            save_grobid_json_cache(&pdf_path, &result);
+                        }
                         let _ = app_clone.emit(
                             "grobid-parse-event",
                             GrobidParseEvent {
@@ -853,6 +856,12 @@ pub(crate) async fn grobid_parse_document(
             "[grobid] structure_only requested but no cache for {}, doing full parse",
             file_path
         );
+    }
+
+    // ── Early exit if PDF file no longer exists (e.g. paper was deleted) ──
+    if !Path::new(&file_path).exists() {
+        eprintln!("[grobid] PDF file not found, skipping: {}", file_path);
+        return Err(format!("PDF file not found: {}", file_path));
     }
 
     // Check caches
@@ -1105,8 +1114,15 @@ pub(crate) async fn grobid_parse_document(
     match parse_result {
         Ok(result) => {
             *cached_result_arc.lock().unwrap() = Some((file_path.clone(), result.clone()));
-            let pdf_path = PathBuf::from(&file_path);
-            save_grobid_json_cache(&pdf_path, &result);
+            // Only save cache if result has meaningful content (avoid orphan empty caches)
+            if !result.sections.is_empty() || !result.references.is_empty()
+                || result.metadata.title.as_ref().map_or(false, |t| !t.trim().is_empty())
+            {
+                let pdf_path = PathBuf::from(&file_path);
+                save_grobid_json_cache(&pdf_path, &result);
+            } else {
+                eprintln!("[grobid] skipping cache save: empty result for {}", file_path);
+            }
 
             let _ = app_clone.emit(
                 "grobid-parse-event",

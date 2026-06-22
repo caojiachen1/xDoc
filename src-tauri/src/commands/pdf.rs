@@ -73,6 +73,11 @@ pub struct FirstPageMetadata {
     pub all_segments: Vec<FontTextSegment>,
     pub page_width: f32,
     pub page_height: f32,
+    pub ocr_title: Option<String>,
+    pub ocr_abstract: Option<String>,
+    pub ocr_full_text: Option<String>,
+    pub ocr_authors: Option<String>,
+    pub ocr_keywords: Option<String>,
 }
 
 // ── Annotation export types ────────────────────────────────────────────────
@@ -883,6 +888,7 @@ pub(crate) async fn extract_first_page_metadata(
     file_path: String,
     score_threshold: Option<f32>,
     state: State<'_, ModelState>,
+    ocr_state: State<'_, crate::commands::ocr::OcrState>,
 ) -> Result<FirstPageMetadata, String> {
     let path = Path::new(&file_path);
     if !path.exists() {
@@ -894,6 +900,13 @@ pub(crate) async fn extract_first_page_metadata(
     let session_arc = state.session.clone();
     let inference_cache_arc = state.inference_cache.clone();
     let fp = file_path.clone();
+
+    // Clone OCR state Arcs for use inside spawn_blocking
+    let ocr_active_engine = ocr_state.active_engine.clone();
+    let ocr_active_model_id = ocr_state.active_model_id.clone();
+    let ocr_model_root = ocr_state.model_root.clone();
+    let ocr_gguf_backend = ocr_state.gguf_backend.clone();
+    let ocr_ppocrv6_backend = ocr_state.ppocrv6_backend.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> Result<FirstPageMetadata, String> {
         let t0 = std::time::Instant::now();
@@ -978,8 +991,82 @@ pub(crate) async fn extract_first_page_metadata(
             }
         };
 
+        // ── Extract authors from segments (between title and abstract) ──
+        let authors_from_segments: Option<String> = {
+            if segments.is_empty() {
+                None
+            } else {
+                let max_size = segments
+                    .iter()
+                    .map(|s| s.font_size)
+                    .fold(0.0f32, f32::max);
+                if max_size > 0.0 {
+                    let title_threshold = max_size * 0.9;
+                    // Find the bottom of the title area
+                    let title_bottom = segments
+                        .iter()
+                        .filter(|s| s.font_size >= title_threshold)
+                        .map(|s| s.ymax)
+                        .fold(0.0f32, f32::max);
+                    // Find the top of the abstract area
+                    let abstract_top = segments
+                        .iter()
+                        .filter(|s| {
+                            let t = s.text.trim();
+                            t.starts_with("摘要") || t.starts_with("摘 要")
+                                || t.starts_with("Abstract") || t.starts_with("ABSTRACT")
+                        })
+                        .map(|s| s.ymin)
+                        .fold(f32::MAX, f32::min);
+                    if title_bottom > 0.0 && abstract_top < f32::MAX && abstract_top > title_bottom {
+                        let author_segs: Vec<&FontTextSegment> = segments
+                            .iter()
+                            .filter(|s| {
+                                s.ymin >= title_bottom - 5.0
+                                    && s.ymax <= abstract_top + 5.0
+                                    && s.font_size < title_threshold
+                                    && !s.text.trim().is_empty()
+                            })
+                            .collect();
+                        if !author_segs.is_empty() {
+                            let text = author_segs
+                                .iter()
+                                .map(|s| s.text.trim())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .trim()
+                                .to_string();
+                            if !text.is_empty() { Some(text) } else { None }
+                        } else { None }
+                    } else { None }
+                } else { None }
+            }
+        };
+
+        // ── Extract keywords from full_text ──
+        let keywords_from_text: Option<String> = {
+            let patterns = [
+                r"(?:关\s*键\s*词|Keywords?|Key\s*words?)[\s:：;；]*(.{3,200}?)(?:\n|$)",
+            ];
+            let mut found: Option<String> = None;
+            for pat in &patterns {
+                if let Ok(re) = regex::Regex::new(pat) {
+                    if let Some(caps) = re.captures(&full_text) {
+                        if let Some(m) = caps.get(1) {
+                            let text = m.as_str().trim().to_string();
+                            if !text.is_empty() {
+                                found = Some(text);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        };
+
         log("rendering page for layout detection...");
-        let (title_by_layout, abstract_by_layout) = {
+        let (title_by_layout, abstract_by_layout, ocr_title, ocr_abstract, ocr_full_text, ocr_authors, ocr_keywords) = {
             let render_result = render_pdf_page(Path::new(&fp), 0);
             if let Ok((image, _, _)) = render_result {
                 log(&format!(
@@ -1032,6 +1119,28 @@ pub(crate) async fn extract_first_page_metadata(
                 };
 
                 if let Some(ref boxes) = layout_boxes {
+                    // Log all layout boxes with class names
+                    let cls_name = |id: u32| -> &'static str {
+                        match id {
+                            0 => "abstract", 1 => "algorithm", 2 => "aside_text",
+                            3 => "chart", 4 => "content", 5 => "display_formula",
+                            6 => "doc_title", 7 => "figure_title", 8 => "footer",
+                            9 => "footer_image", 10 => "footnote", 11 => "formula_number",
+                            12 => "header", 13 => "header_image", 14 => "image",
+                            15 => "inline_formula", 16 => "number", 17 => "paragraph_title",
+                            18 => "reference", 19 => "reference_content", 20 => "seal",
+                            21 => "table", 22 => "text", 23 => "vertical_text",
+                            24 => "vision_footnote", _ => "unknown",
+                        }
+                    };
+                    log(&format!("layout boxes: {} total", boxes.len()));
+                    for (i, b) in boxes.iter().enumerate() {
+                        log(&format!(
+                            "  box[{}]: class={}({}) score={:.2} bbox=[{:.0},{:.0},{:.0},{:.0}]",
+                            i, cls_name(b.cls_id), b.cls_id, b.score,
+                            b.xmin, b.ymin, b.xmax, b.ymax
+                        ));
+                    }
                     let collect_text_in_class = |cls_id: u32| -> Option<String> {
                         let class_boxes: Vec<&LayoutBox> =
                             boxes.iter().filter(|b| b.cls_id == cls_id).collect();
@@ -1063,22 +1172,250 @@ pub(crate) async fn extract_first_page_metadata(
                         }
                     };
 
-                    (collect_text_in_class(6), collect_text_in_class(0))
+                    let tl = collect_text_in_class(6);
+                    let al = collect_text_in_class(0);
+                    log(&format!("layout title (class=6): {:?}", tl.as_ref().map(|s| s.chars().take(80).collect::<String>())));
+                    log(&format!("layout abstract (class=0): {:?}", al.as_ref().map(|s| s.chars().take(80).collect::<String>())));
+
+                    // ── OCR on layout regions for cross-validation ──
+                    let mut ot: Option<String> = None;
+                    let mut oa: Option<String> = None;
+                    let mut oft: Option<String> = None;
+                    if ocr_active_model_id.lock().unwrap().is_some() {
+                        log("OCR engine active — starting region OCR...");
+                        let img_w = image.width() as f32;
+                        let img_h = image.height() as f32;
+
+                        // OCR title regions (class 6)
+                        if tl.is_some() {
+                            let title_boxes: Vec<&LayoutBox> =
+                                boxes.iter().filter(|b| b.cls_id == 6).collect();
+                            let mut ocr_texts: Vec<String> = Vec::new();
+                            for lb in &title_boxes {
+                                let cx = (lb.xmin.clamp(0.0, img_w) as u32,
+                                          lb.ymin.clamp(0.0, img_h) as u32);
+                                let cw = ((lb.xmax - lb.xmin).clamp(1.0, img_w - cx.0 as f32) as u32).max(1);
+                                let ch = ((lb.ymax - lb.ymin).clamp(1.0, img_h - cx.1 as f32) as u32).max(1);
+                                log(&format!("OCR title crop: ({},{},{},{})", cx.0, cx.1, cw, ch));
+                                let cropped = image.crop_imm(cx.0, cx.1, cw, ch);
+                                match super::search::run_ocr_for_index(
+                                    *ocr_active_engine.lock().unwrap(),
+                                    &ocr_active_model_id.lock().unwrap().clone().unwrap_or_default(),
+                                    &ocr_model_root.lock().unwrap().clone().unwrap_or_default(),
+                                    &cropped,
+                                    &ocr_gguf_backend,
+                                    &ocr_ppocrv6_backend,
+                                    0, 0,
+                                ) {
+                                    Ok(text) => {
+                                        log(&format!("OCR title raw ({}B): {:?}", text.len(), text.chars().take(80).collect::<String>()));
+                                        let cleaned = crate::commands::ocr::clean_special_tokens_public(&text);
+                                        log(&format!("OCR title cleaned: {:?}", cleaned.chars().take(80).collect::<String>()));
+                                        if !cleaned.trim().is_empty() {
+                                            ocr_texts.push(cleaned);
+                                        }
+                                    }
+                                    Err(e) => log(&format!("OCR title failed: {}", e)),
+                                }
+                            }
+                            if !ocr_texts.is_empty() {
+                                ot = Some(ocr_texts.join(" "));
+                            }
+                            log(&format!("OCR title final: {:?}", ot.as_ref().map(|s| s.chars().take(80).collect::<String>())));
+                        }
+
+                        // OCR abstract regions (class 0)
+                        if al.is_some() {
+                            let abs_boxes: Vec<&LayoutBox> =
+                                boxes.iter().filter(|b| b.cls_id == 0).collect();
+                            log(&format!("OCR abstract: {} region(s) to process", abs_boxes.len()));
+                            let mut ocr_texts: Vec<String> = Vec::new();
+                            for lb in &abs_boxes {
+                                let cx = (lb.xmin.clamp(0.0, img_w) as u32,
+                                          lb.ymin.clamp(0.0, img_h) as u32);
+                                let cw = ((lb.xmax - lb.xmin).clamp(1.0, img_w - cx.0 as f32) as u32).max(1);
+                                let ch = ((lb.ymax - lb.ymin).clamp(1.0, img_h - cx.1 as f32) as u32).max(1);
+                                log(&format!("OCR abstract crop: ({},{},{},{})", cx.0, cx.1, cw, ch));
+                                let cropped = image.crop_imm(cx.0, cx.1, cw, ch);
+                                match super::search::run_ocr_for_index(
+                                    *ocr_active_engine.lock().unwrap(),
+                                    &ocr_active_model_id.lock().unwrap().clone().unwrap_or_default(),
+                                    &ocr_model_root.lock().unwrap().clone().unwrap_or_default(),
+                                    &cropped,
+                                    &ocr_gguf_backend,
+                                    &ocr_ppocrv6_backend,
+                                    0, 1,
+                                ) {
+                                    Ok(text) => {
+                                        log(&format!("OCR abstract raw ({}B): {:?}", text.len(), text.chars().take(80).collect::<String>()));
+                                        let cleaned = crate::commands::ocr::clean_special_tokens_public(&text);
+                                        log(&format!("OCR abstract cleaned: {:?}", cleaned.chars().take(80).collect::<String>()));
+                                        if !cleaned.trim().is_empty() {
+                                            ocr_texts.push(cleaned);
+                                        }
+                                    }
+                                    Err(e) => log(&format!("OCR abstract failed: {}", e)),
+                                }
+                            }
+                            if !ocr_texts.is_empty() {
+                                oa = Some(ocr_texts.join(" "));
+                            }
+                            log(&format!("OCR abstract final: {:?}", oa.as_ref().map(|s| s.chars().take(80).collect::<String>())));
+                        }
+
+                        // OCR full page as fallback
+                        log("OCR full page: starting...");
+                        match super::search::run_ocr_for_index(
+                            *ocr_active_engine.lock().unwrap(),
+                            &ocr_active_model_id.lock().unwrap().clone().unwrap_or_default(),
+                            &ocr_model_root.lock().unwrap().clone().unwrap_or_default(),
+                            &image,
+                            &ocr_gguf_backend,
+                            &ocr_ppocrv6_backend,
+                            0, 2,
+                        ) {
+                            Ok(text) => {
+                                log(&format!("OCR full page raw ({}B): {:?}", text.len(), text.chars().take(120).collect::<String>()));
+                                let cleaned = crate::commands::ocr::clean_special_tokens_public(&text);
+                                log(&format!("OCR full page cleaned ({}B): {:?}", cleaned.len(), cleaned.chars().take(120).collect::<String>()));
+                                if !cleaned.trim().is_empty() {
+                                    oft = Some(cleaned);
+                                }
+                            }
+                            Err(e) => log(&format!("OCR full page failed: {}", e)),
+                        }
+                    } else {
+                        log("OCR engine NOT active — skipping region OCR");
+                    }
+
+                    // ── Extract authors/keywords/full-abstract from OCR full text ──
+                    let mut ocr_auth: Option<String> = None;
+                    let mut ocr_kw: Option<String> = None;
+                    if let Some(ref ft) = oft {
+                        log(&format!("Extracting from OCR full text ({}B)...", ft.len()));
+
+                        // Full abstract: extract between "摘要"/"Abstract" and "关键词"/"Keywords"/next section
+                        {
+                            let re_abs = regex::Regex::new(r"(?:摘\s*要|Abstract)\s*([\s\S]{20,2000}?)(?=\n\s*(?:关\s*键\s*词|Keywords?|Key\s*words?|中图分类号|收稿日期|基金|1\s*[\.\uff0e]\s*\S|引言|Introduction)|\z)").ok();
+                            if let Some(re) = re_abs {
+                                if let Some(caps) = re.captures(ft) {
+                                    if let Some(m) = caps.get(1) {
+                                        let full_abs = m.as_str().trim().to_string();
+                                        if full_abs.len() > 50 {
+                                            // Only replace if significantly longer than region crop
+                                            let region_len = oa.as_ref().map_or(0, |s| s.len());
+                                            if full_abs.len() > region_len + 30 {
+                                                log(&format!("OCR abstract from fulltext ({}B) replaces region crop ({}B)", full_abs.len(), region_len));
+                                                oa = Some(full_abs);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Authors: line-by-line parsing (more robust than regex for CJK)
+                        let lines: Vec<&str> = ft.lines().collect();
+                        let mut author_lines: Vec<String> = Vec::new();
+                        let mut found_title = false;
+                        for line in &lines {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                // Skip blank lines but keep looking
+                                continue;
+                            }
+                            if !found_title {
+                                // First non-empty line is the title — skip it
+                                found_title = true;
+                                continue;
+                            }
+                            // Stop when we hit abstract or keywords markers
+                            if trimmed.starts_with("摘") && trimmed.contains("要")
+                                || trimmed.starts_with("Abstract")
+                                || trimmed.starts_with("ABSTRACT")
+                                || trimmed.starts_with("关") && trimmed.contains("键")
+                                || trimmed.starts_with("Keywords")
+                            {
+                                break;
+                            }
+                            // Collect author/affiliation lines
+                            author_lines.push(trimmed.to_string());
+                        }
+                        if !author_lines.is_empty() {
+                            // Filter out affiliation lines (contain "大学", "学院", "研究所", etc.)
+                            let non_affil: Vec<&str> = author_lines
+                                .iter()
+                                .filter(|l| {
+                                    !l.starts_with('(') && !l.starts_with('（')
+                                    && !l.contains("大学") && !l.contains("学院")
+                                    && !l.contains("研究所") && !l.contains("研究院")
+                                    && !l.contains("实验室")
+                                })
+                                .map(|s| s.as_str())
+                                .collect();
+                            let auth_text = if !non_affil.is_empty() {
+                                non_affil.join(" ").trim().to_string()
+                            } else {
+                                author_lines.join(" ").trim().to_string()
+                            };
+                            if !auth_text.is_empty() {
+                                ocr_auth = Some(auth_text);
+                                log(&format!("OCR authors (line parse): {:?}", ocr_auth.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+                            }
+                        } else {
+                            log("OCR authors: no lines found between title and abstract");
+                        }
+                        // Keywords: after 关键词
+                        if let Some(re) = regex::Regex::new(r"(?:关\s*键\s*词|Keywords?|Key\s*words?)[\s:：;；]*([\s\S]{3,200}?)(?:\n|$)").ok() {
+                            if let Some(caps) = re.captures(ft) {
+                                if let Some(m) = caps.get(1) {
+                                    let text = m.as_str().trim().to_string();
+                                    if !text.is_empty() {
+                                        ocr_kw = Some(text);
+                                        log(&format!("OCR keywords (from fulltext regex): {:?}", ocr_kw.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Fallback to segment-based extraction
+                    if ocr_auth.is_none() {
+                        ocr_auth = authors_from_segments.clone();
+                        if ocr_auth.is_some() {
+                            log(&format!("OCR authors (fallback segments): {:?}", ocr_auth.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+                        }
+                    }
+                    if ocr_kw.is_none() {
+                        ocr_kw = keywords_from_text.clone();
+                        if ocr_kw.is_some() {
+                            log(&format!("OCR keywords (fallback text): {:?}", ocr_kw.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+                        }
+                    }
+                    log(&format!("OCR authors final: {:?}", ocr_auth.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+                    log(&format!("OCR keywords final: {:?}", ocr_kw.as_ref().map(|s| s.chars().take(60).collect::<String>())));
+
+                    (tl, al, ot, oa, oft, ocr_auth, ocr_kw)
                 } else {
-                    (None, None)
+                    // No layout boxes — use segment/text-based fallback
+                    (None, None, None, None, None, authors_from_segments.clone(), keywords_from_text.clone())
                 }
             } else {
                 log("page render failed, skipping layout detection");
-                (None, None)
+                (None, None, None, None, None, authors_from_segments.clone(), keywords_from_text.clone())
             }
         };
 
         log(&format!(
-            "done (total {}ms) — title_font={:?}, title_layout={:?}, doi={:?}",
+            "done (total {}ms)\n  title_font={:?}\n  title_layout={:?}\n  doi={:?}\n  ocr_title={:?}\n  ocr_abstract={:?}\n  ocr_authors={:?}\n  ocr_keywords={:?}\n  ocr_full_text={:?}",
             t0.elapsed().as_millis(),
-            title_by_font.as_deref(),
-            title_by_layout.as_deref(),
+            title_by_font.as_deref().map(|s| s.chars().take(50).collect::<String>()),
+            title_by_layout.as_deref().map(|s| s.chars().take(50).collect::<String>()),
             doi.as_deref(),
+            ocr_title.as_ref().map(|s| s.chars().take(50).collect::<String>()),
+            ocr_abstract.as_ref().map(|s| s.chars().take(50).collect::<String>()),
+            ocr_authors.as_ref().map(|s| s.chars().take(50).collect::<String>()),
+            ocr_keywords.as_ref().map(|s| s.chars().take(50).collect::<String>()),
+            ocr_full_text.as_ref().map(|s| format!("{}B", s.len())),
         ));
 
         Ok(FirstPageMetadata {
@@ -1090,6 +1427,11 @@ pub(crate) async fn extract_first_page_metadata(
             all_segments: segments,
             page_width,
             page_height,
+            ocr_title,
+            ocr_abstract,
+            ocr_full_text,
+            ocr_authors,
+            ocr_keywords,
         })
     })
     .await

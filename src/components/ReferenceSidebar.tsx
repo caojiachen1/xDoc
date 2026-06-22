@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { resolveDoi, searchByTitle } from "../utils/crossrefResolver";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
+import { renderLatexToHtml } from "../utils/latex";
 import type { PaperInfo } from "./HomePage";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 
@@ -165,6 +166,8 @@ interface ReferenceSidebarProps {
   onReparseStructure?: () => void;
   onClearCacheAndReparse?: () => void;
   onClearMetadata?: () => void;
+  onExtractMetadata?: (paperId: string, force: boolean) => void;
+  metadataExtracting?: boolean;
 }
 
 export default function ReferenceSidebar({
@@ -178,6 +181,8 @@ export default function ReferenceSidebar({
   onReparseStructure,
   onClearCacheAndReparse,
   onClearMetadata,
+  onExtractMetadata,
+  metadataExtracting,
 }: ReferenceSidebarProps) {
   const [activeTab, setActiveTab] = useState<SidebarTab>("info");
   const [references, setReferences] = useState<EnrichedReference[]>([]);
@@ -187,6 +192,19 @@ export default function ReferenceSidebar({
 
   const metadata: PaperMetadata | undefined = paper?.metadata;
   const grobidMeta = grobidDocument?.metadata;
+
+  // CJK detection helper — same logic as useGrobid / pdfMetadata
+  const hasCJK = useCallback((s: string | undefined | null) =>
+    !!s && /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(s), []);
+
+  const isCJKPaper = useCallback(() => {
+    if (!paper) return false;
+    return hasCJK(paper.name)
+      || hasCJK(paper.metadata?.title)
+      || hasCJK(paper.metadata?.abstract)
+      || (paper.metadata?.authors?.some(a => hasCJK(a)) ?? false)
+      || (paper.metadata?.keywords?.some(k => hasCJK(k)) ?? false);
+  }, [paper, hasCJK]);
 
   // Convert GrobidRefOutput to EnrichedReference, loading cached enrichment
   useEffect(() => {
@@ -613,55 +631,187 @@ export default function ReferenceSidebar({
     return ref.crossrefJournal || ref.journal;
   };
 
+  // Strip leading "Abstract"/"摘要" label from abstract text
+  const cleanAbstract = (text: string): string => {
+    return text.replace(/^(?:Abstract|ABSTRACT|abstract|\u6458\u8981)[.\s:\uFF1A\u2014\-]*/, "").trim();
+  };
+
   // ── Render helpers ────────────────────────────────────────────────────────
   const renderInfoTab = () => {
-    // Prefer grobid metadata, fall back to paper.metadata
+    const cjk = isCJKPaper();
     const hasGrobidMeta = grobidMeta && (grobidMeta.title || grobidMeta.authors.length > 0 || grobidMeta.abstract_text);
+    const hasPaperMeta = metadata && (metadata.title || (metadata.authors && metadata.authors.length > 0) || metadata.abstract);
 
-    // Re-parse button component
-    const reparseButton = onReparse ? (
-      <button
-        className="ref-reparse-btn"
-        onClick={onReparse}
-        disabled={grobidLoading}
-        title="重新用 Grobid 解析当前文档"
-      >
-        <RefreshCw size={12} className={grobidLoading ? "spin" : ""} />
-        {grobidLoading ? "解析中…" : "重新解析"}
-      </button>
-    ) : null;
+    // CJK buttons use metadataExtracting state; non-CJK uses grobidLoading
+    const cjkBusy = !!metadataExtracting;
+    const nonCjkBusy = grobidLoading;
 
-    // Clear cache buttons
-    const clearMetadataBtn = onClearMetadata ? (
-      <button
-        className="ref-reparse-btn ref-clear-btn"
-        onClick={onClearMetadata}
-        disabled={grobidLoading}
-        title="清除元数据缓存并重新提取"
-      >
-        <Trash2 size={11} />
-        清除缓存
-      </button>
-    ) : null;
+    const reparseButton = cjk
+      ? (onExtractMetadata && paper ? (
+          <button
+            className="ref-reparse-btn"
+            onClick={() => onExtractMetadata(paper.id, true)}
+            disabled={cjkBusy}
+            title={"\u91CD\u65B0\u7528 OCR \u63D0\u53D6\u5143\u6570\u636E"}
+          >
+            <RefreshCw size={12} className={cjkBusy ? "spin" : ""} />
+            {cjkBusy ? "\u63D0\u53D6\u4E2D\u2026" : "\u91CD\u65B0\u89E3\u6790"}
+          </button>
+        ) : null)
+      : (onReparse ? (
+          <button
+            className="ref-reparse-btn"
+            onClick={onReparse}
+            disabled={nonCjkBusy}
+            title={"\u91CD\u65B0\u7528 Grobid \u89E3\u6790\u5F53\u524D\u6587\u6863"}
+          >
+            <RefreshCw size={12} className={nonCjkBusy ? "spin" : ""} />
+            {nonCjkBusy ? "\u89E3\u6790\u4E2D\u2026" : "\u91CD\u65B0\u89E3\u6790"}
+          </button>
+        ) : null);
 
-    const clearCacheBtn = onClearCacheAndReparse ? (
-      <button
-        className="ref-reparse-btn ref-clear-btn"
-        onClick={onClearCacheAndReparse}
-        disabled={grobidLoading}
-        title="删除 Grobid 缓存文件并重新全量解析"
-      >
-        <Trash2 size={11} />
-        清除缓存
-      </button>
-    ) : null;
+    // Single clear cache button
+    const clearCacheBtn = cjk
+      ? (onClearMetadata ? (
+          <button
+            className="ref-reparse-btn ref-clear-btn"
+            onClick={onClearMetadata}
+            disabled={cjkBusy}
+            title={"\u6E05\u9664\u5143\u6570\u636E\u7F13\u5B58\u5E76\u91CD\u65B0\u63D0\u53D6"}
+          >
+            <Trash2 size={11} />
+            {"\u6E05\u9664\u7F13\u5B58"}
+          </button>
+        ) : null)
+      : (onClearCacheAndReparse ? (
+          <button
+            className="ref-reparse-btn ref-clear-btn"
+            onClick={onClearCacheAndReparse}
+            disabled={nonCjkBusy}
+            title={"\u5220\u9664 Grobid \u7F13\u5B58\u6587\u4EF6\u5E76\u91CD\u65B0\u5168\u91CF\u89E3\u6790"}
+          >
+            <Trash2 size={11} />
+            {"\u6E05\u9664\u7F13\u5B58"}
+          </button>
+        ) : null);
 
+    // CJK paper: prefer paper.metadata (from OCR pipeline), fall back to Grobid for missing fields
+    if (cjk && hasPaperMeta) {
+      return (
+        <div className="ref-info-section">
+          <div className="ref-action-row">
+            {reparseButton}
+            {clearCacheBtn}
+          </div>
+          {metadata.title && (
+            <div className="ref-info-title">{metadata.title}</div>
+          )}
+
+          {metadata.authors && metadata.authors.length > 0 && (
+            <div className="ref-info-field">
+              <Users size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u4F5C\u8005"}</div>
+                <div className="ref-info-text">{metadata.authors.join(", ")}</div>
+              </div>
+            </div>
+          )}
+
+          {metadata.abstract && (
+            <div className="ref-info-field">
+              <FileText size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u6458\u8981"}</div>
+                <div className="ref-info-text ref-info-abstract" dangerouslySetInnerHTML={{ __html: renderLatexToHtml(cleanAbstract(metadata.abstract!)) }} />
+              </div>
+            </div>
+          )}
+
+          {metadata.keywords && metadata.keywords.length > 0 && (
+            <div className="ref-info-field">
+              <Tag size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u5173\u952E\u8BCD"}</div>
+                <div className="ref-info-tags">
+                  {metadata.keywords.map((kw, i) => (
+                    <span key={i} className="ref-info-tag">{kw}</span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {metadata.journal && (
+            <div className="ref-info-field">
+              <Building2 size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u671F\u520A/\u4F1A\u8BAE"}</div>
+                <div className="ref-info-text">{metadata.journal}</div>
+              </div>
+            </div>
+          )}
+
+          {metadata.publisher && (
+            <div className="ref-info-field">
+              <Globe size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u51FA\u7248\u793E"}</div>
+                <div className="ref-info-text">{metadata.publisher}</div>
+              </div>
+            </div>
+          )}
+
+          {metadata.date && (
+            <div className="ref-info-field">
+              <Calendar size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u65E5\u671F"}</div>
+                <div className="ref-info-text">{metadata.date}</div>
+              </div>
+            </div>
+          )}
+
+          {(metadata.volume || metadata.issue || metadata.pages) && (
+            <div className="ref-info-field">
+              <Hash size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">{"\u5377/\u671F/\u9875"}</div>
+                <div className="ref-info-text">
+                  {[
+                    metadata.volume && `Vol. ${metadata.volume}`,
+                    metadata.issue && `No. ${metadata.issue}`,
+                    metadata.pages && `pp. ${metadata.pages}`,
+                  ]
+                    .filter(Boolean)
+                    .join(", ")}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {metadata.doi && (
+            <div className="ref-info-field">
+              <ExternalLink size={13} className="ref-info-icon" />
+              <div className="ref-info-value">
+                <div className="ref-info-label">DOI</div>
+                <div className="ref-info-text">
+                  <a href={`https://doi.org/${metadata.doi}`} target="_blank" rel="noopener noreferrer" className="ref-info-link">
+                    {metadata.doi}
+                  </a>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Non-CJK paper (or CJK without paper.metadata): use Grobid metadata
     if (hasGrobidMeta) {
       return (
         <div className="ref-info-section">
           <div className="ref-action-row">
             {reparseButton}
-            {clearMetadataBtn}
             {clearCacheBtn}
           </div>
           {grobidMeta.title && (
@@ -672,7 +822,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Users size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">作者</div>
+                <div className="ref-info-label">{"\u4F5C\u8005"}</div>
                 <div className="ref-info-text">
                   {formatGrobidAuthors(grobidMeta.authors)}
                 </div>
@@ -684,8 +834,8 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <FileText size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">摘要</div>
-                <div className="ref-info-text ref-info-abstract">{grobidMeta.abstract_text}</div>
+                <div className="ref-info-label">{"\u6458\u8981"}</div>
+                <div className="ref-info-text ref-info-abstract" dangerouslySetInnerHTML={{ __html: renderLatexToHtml(cleanAbstract(grobidMeta.abstract_text!)) }} />
               </div>
             </div>
           )}
@@ -694,7 +844,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Building2 size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">期刊/会议</div>
+                <div className="ref-info-label">{"\u671F\u520A/\u4F1A\u8BAE"}</div>
                 <div className="ref-info-text">{grobidMeta.venue.name}</div>
               </div>
             </div>
@@ -704,7 +854,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Globe size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">出版社</div>
+                <div className="ref-info-label">{"\u51FA\u7248\u793E"}</div>
                 <div className="ref-info-text">{grobidMeta.venue.publisher}</div>
               </div>
             </div>
@@ -714,7 +864,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Calendar size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">日期</div>
+                <div className="ref-info-label">{"\u65E5\u671F"}</div>
                 <div className="ref-info-text">
                   {[grobidMeta.date.year, grobidMeta.date.month, grobidMeta.date.day]
                     .filter(Boolean)
@@ -728,7 +878,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Hash size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">卷/期/页</div>
+                <div className="ref-info-label">{"\u5377/\u671F/\u9875"}</div>
                 <div className="ref-info-text">
                   {[
                     grobidMeta.venue.volume && `Vol. ${grobidMeta.venue.volume}`,
@@ -765,7 +915,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Tag size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">关键词</div>
+                <div className="ref-info-label">{"\u5173\u952E\u8BCD"}</div>
                 <div className="ref-info-tags">
                   {grobidMeta.keywords.map((kw, i) => (
                     <span key={i} className="ref-info-tag">{kw}</span>
@@ -780,15 +930,15 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Users size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">作者详情</div>
+                <div className="ref-info-label">{"\u4F5C\u8005\u8BE6\u60C5"}</div>
                 <div className="ref-info-text" style={{ fontSize: 12 }}>
                   {grobidMeta.authors.map((a, i) => {
-                    const name = a.full_name || [a.first_name, a.last_name].filter(Boolean).join(" ") || "未知";
+                    const name = a.full_name || [a.first_name, a.last_name].filter(Boolean).join(" ") || "\u672A\u77E5";
                     const parts = [name];
                     if (a.affiliation) parts.push(a.affiliation);
                     if (a.email) parts.push(a.email);
                     if (a.identifier) parts.push(`ORCID: ${a.identifier}`);
-                    return <div key={i} style={{ marginBottom: 4 }}>{parts.join(" · ")}</div>;
+                    return <div key={i} style={{ marginBottom: 4 }}>{parts.join(" \u00B7 ")}</div>;
                   })}
                 </div>
               </div>
@@ -798,10 +948,14 @@ export default function ReferenceSidebar({
       );
     }
 
-    // Fallback to paper.metadata
+    // Fallback to paper.metadata (non-CJK without Grobid)
     if (metadata) {
       return (
         <div className="ref-info-section">
+          <div className="ref-action-row">
+            {reparseButton}
+            {clearCacheBtn}
+          </div>
           {metadata.title && (
             <div className="ref-info-title">{metadata.title}</div>
           )}
@@ -809,7 +963,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Users size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">作者</div>
+                <div className="ref-info-label">{"\u4F5C\u8005"}</div>
                 <div className="ref-info-text">{metadata.authors.join(", ")}</div>
               </div>
             </div>
@@ -818,8 +972,8 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <FileText size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">摘要</div>
-                <div className="ref-info-text ref-info-abstract">{metadata.abstract}</div>
+                <div className="ref-info-label">{"\u6458\u8981"}</div>
+                <div className="ref-info-text ref-info-abstract" dangerouslySetInnerHTML={{ __html: renderLatexToHtml(cleanAbstract(metadata.abstract!)) }} />
               </div>
             </div>
           )}
@@ -827,7 +981,7 @@ export default function ReferenceSidebar({
             <div className="ref-info-field">
               <Building2 size={13} className="ref-info-icon" />
               <div className="ref-info-value">
-                <div className="ref-info-label">期刊</div>
+                <div className="ref-info-label">{"\u671F\u520A"}</div>
                 <div className="ref-info-text">{metadata.journal}</div>
               </div>
             </div>
@@ -852,11 +1006,11 @@ export default function ReferenceSidebar({
     return (
       <div className="ref-empty">
         <BookOpen size={28} style={{ opacity: 0.3, marginBottom: 8 }} />
-        <div>等待 Grobid 解析…</div>
-        <div className="ref-empty-hint">打开 PDF 后自动提取文献信息</div>
+        <div>{"\u7B49\u5F85\u89E3\u6790\u2026"}</div>
+        <div className="ref-empty-hint">{"\u6253\u5F00 PDF \u540E\u81EA\u52A8\u63D0\u53D6\u6587\u732E\u4FE1\u606F"}</div>
         <div className="ref-action-row">
           {reparseButton}
-          {clearMetadataBtn}
+          {clearCacheBtn}
         </div>
       </div>
     );

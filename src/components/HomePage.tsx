@@ -7,6 +7,7 @@ import { fetch } from "@tauri-apps/plugin-http";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
 import { lookupJournalRanking, type JournalRanking } from "../utils/paperDb";
+import { renderLatexToHtml } from "../utils/latex";
 import type { LlmSettings } from "./SettingsDialog";
 import CitationExportDialog from "./CitationExportDialog";
 import { usePluginContextMenuItems } from "../plugin";
@@ -36,7 +37,7 @@ interface HomePageProps {
   onImportPapers: () => Promise<void>;
   onDeletePaper: (id: string) => void;
   onDropImport: (paths: string[]) => void;
-  onExtractMetadata: (paperId: string) => void;
+  onExtractMetadata: (paperId: string, force?: boolean) => void;
   extractingPaperId?: string | null;
   grobidStatusMap?: Record<string, GrobidStatus>;
   llmSettings?: LlmSettings;
@@ -548,7 +549,7 @@ export default function HomePage({
       );
     }
     if (key === "abstract") {
-      return <div className="home-metadata-abstract">{cleanAbstract(String(value))}</div>;
+      return <div className="home-metadata-abstract" dangerouslySetInnerHTML={{ __html: renderLatexToHtml(cleanAbstract(String(value))) }} />;
     }
     return <span>{String(value)}</span>;
   };
@@ -862,7 +863,7 @@ export default function HomePage({
                     </div>
                     <div className="home-metadata-value">
                       {key === "abstract" && showTranslatedAbstract && selectedPaper.metadata?.abstractTranslation
-                        ? <div className="home-metadata-abstract">{cleanAbstract(selectedPaper.metadata.abstractTranslation)}</div>
+                        ? <div className="home-metadata-abstract" dangerouslySetInnerHTML={{ __html: renderLatexToHtml(cleanAbstract(selectedPaper.metadata.abstractTranslation)) }} />
                         : renderMetadataValue(key, value)}
                       <button
                         className={`home-metadata-copy ${copiedField === key ? "copied" : ""}`}
@@ -964,12 +965,12 @@ export default function HomePage({
             <div
               className="context-menu-item"
               onClick={() => {
-                onExtractMetadata(contextMenu.paper.id);
+                onExtractMetadata(contextMenu.paper.id, true);
                 setContextMenu(null);
               }}
             >
               <RefreshCw size={14} />
-              <span>提取元数据</span>
+              <span>重新提取元数据</span>
             </div>
             <div
               className="context-menu-item"

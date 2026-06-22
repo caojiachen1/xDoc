@@ -1211,6 +1211,16 @@ impl SettingsDb {
         )?;
         Ok(())
     }
+
+    /// Delete all reading session records for a specific paper.
+    pub fn delete_reading_sessions(&self, paper_id: &str) -> Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM reading_sessions WHERE paper_id = ?1",
+            params![paper_id],
+        )?;
+        Ok(())
+    }
 }
 
 /// Simple language detection based on character frequency analysis.

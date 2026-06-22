@@ -357,7 +357,7 @@ fn is_text_class_id(cls_id: u32) -> bool {
 }
 
 /// Run OCR on a cropped image region using the active engine (non-streaming, for indexing).
-fn run_ocr_for_index(
+pub(crate) fn run_ocr_for_index(
     engine: OcrEngine,
     model_id: &str,
     model_root: &Path,

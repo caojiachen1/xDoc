@@ -125,7 +125,7 @@ function App() {
         grobid.triggerGrobidParse(newPath);
       }
     }
-  });
+  }, settings.llmSettings);
   const grobid = useGrobid(documentPath, papers.papersList);
   const annotations = useAnnotations(documentPath, pdfPageIndex, zoom.displaySize);
   const isPdfSelected = useMemo(() => documentPath.toLowerCase().endsWith(".pdf"), [documentPath]);
@@ -435,10 +435,10 @@ function App() {
   };
 
   // ── Grobid cross-validate wrapper (updates papers list) ───────────────────
+  // Use functional updater to always get the LATEST list (avoids stale closure)
   const crossValidateAndUpdate = useCallback((path: string, doc: import("./types").GrobidDocumentOutput) => {
-    const updated = grobid.crossValidateGrobidMeta(path, doc, papers.papersList);
-    papers.setPapersList(updated);
-  }, [grobid.crossValidateGrobidMeta, papers.papersList]);
+    papers.setPapersList(prev => grobid.crossValidateGrobidMeta(path, doc, prev));
+  }, [grobid.crossValidateGrobidMeta, papers.setPapersList]);
 
   // ── Grobid batch with engine init ─────────────────────────────────────────
   const batchParseWithInit = useCallback((papersList: PaperInfo[]) => {
@@ -2122,7 +2122,11 @@ function App() {
                   onReparse={() => grobid.triggerGrobidParse(documentPath, true)}
                   onReparseStructure={grobid.triggerGrobidStructureOnly}
                   onClearCacheAndReparse={grobid.handleClearGrobidCacheAndReparse}
-                  onClearMetadata={() => grobid.handleClearMetadataAndReparse(() => undefined, async () => {})}
+                  onClearMetadata={() => {
+                    if (currentPaper) papers.handleExtractMetadata(currentPaper.id, true);
+                  }}
+                  onExtractMetadata={papers.handleExtractMetadata}
+                  metadataExtracting={!!currentPaper && papers.extractingPaperId === currentPaper.id}
                 />
               </>
             )}

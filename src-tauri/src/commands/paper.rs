@@ -64,12 +64,35 @@ pub(crate) fn paper_delete(id: String, db: State<'_, SettingsDb>) -> Result<(), 
         .get_paper_managed_path(&id)
         .map_err(|e| e.to_string())?;
 
+    // ── Cascade delete related data BEFORE removing the paper record ──
+
+    // FTS search index
+    let _ = db.delete_paper_index(&id);
+    // OCR paragraph cache
+    let _ = db.clear_ocr_cache(&id);
+    // Reading sessions
+    let _ = db.delete_reading_sessions(&id);
+    // Annotations (keyed by file_path)
+    if let Some(ref mp) = managed_path {
+        let _ = db.delete_annotations(mp);
+    }
+
+    // ── Delete the paper DB record ──
     db.delete_paper(&id).map_err(|e| e.to_string())?;
 
+    // ── Delete associated files on disk ──
     if let Some(mp) = managed_path {
         let p = Path::new(&mp);
+        // Delete the managed PDF file
         if p.exists() {
             let _ = std::fs::remove_file(p);
+        }
+        // Delete grobid cache file (<stem>.grobid.json alongside the PDF)
+        let grobid_cache = p.with_file_name(
+            format!("{}.grobid.json", p.file_stem().unwrap_or_default().to_string_lossy()),
+        );
+        if grobid_cache.exists() {
+            let _ = std::fs::remove_file(&grobid_cache);
         }
     }
 

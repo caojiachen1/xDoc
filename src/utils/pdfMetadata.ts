@@ -318,6 +318,11 @@ interface FirstPageMetadataResponse {
   all_segments: FontTextSegment[];
   page_width: number;
   page_height: number;
+  ocr_title: string | null;
+  ocr_abstract: string | null;
+  ocr_full_text: string | null;
+  ocr_authors: string | null;
+  ocr_keywords: string | null;
 }
 
 // ── Cross-validation helpers ─────────────────────────────────────────
@@ -370,11 +375,19 @@ function crossValidateTitle(
   return candidates[0].value;
 }
 
-// ── Enhanced metadata extraction (5 layers + cross-validation) ───────
+// ── Enhanced metadata extraction (6 layers + cross-validation) ───────
+
+interface LlmSettingsForMeta {
+  vendor: string;
+  baseUrl: string;
+  vendorApiKeys: Record<string, string>;
+  model?: string;
+}
 
 export async function extractMetadataEnhanced(
   filePath: string,
   base64Data: string,
+  llmSettings?: LlmSettingsForMeta,
 ): Promise<PaperMetadata> {
   const t0 = performance.now();
   const log = (step: string) => console.log(`[pdfMeta:enhanced] ${step} (+${(performance.now() - t0).toFixed(0)}ms)`);
@@ -387,15 +400,28 @@ export async function extractMetadataEnhanced(
   // Layer 3: Backend layout + font analysis
   log("starting Layer 3 (backend layout + font)...");
   let backend: FirstPageMetadataResponse | null = null;
+  let arxivId: string | null = null;
+  let isChinese = false;
   try {
     backend = await invoke<FirstPageMetadataResponse>(
       "extract_first_page_metadata",
       { filePath, scoreThreshold: 0.5 },
     );
-    log(`Layer 3 done: title_layout=${JSON.stringify(backend.title_by_layout)}, doi=${backend.doi}, segments=${backend.all_segments.length}`);
+    log(`Layer 3 done: segments=${backend.all_segments.length}, page=${backend.page_width}x${backend.page_height}`);
+    log(`  title_by_font=${JSON.stringify(backend.title_by_font?.substring(0, 80))}`);
+    log(`  title_by_layout=${JSON.stringify(backend.title_by_layout?.substring(0, 80))}`);
+    log(`  abstract_by_layout=${JSON.stringify(backend.abstract_by_layout?.substring(0, 80))}`);
+    log(`  ocr_title=${JSON.stringify(backend.ocr_title?.substring(0, 80))}`);
+    log(`  ocr_abstract=${JSON.stringify(backend.ocr_abstract?.substring(0, 80))}`);
+    log(`  ocr_authors=${JSON.stringify(backend.ocr_authors?.substring(0, 80))}`);
+    log(`  ocr_keywords=${JSON.stringify(backend.ocr_keywords?.substring(0, 80))}`);
+    log(`  ocr_full_text=${backend.ocr_full_text ? backend.ocr_full_text.length + "B" : "null"}`);
+    log(`  doi=${backend.doi}, arxiv=${backend.arxiv_id}`);
   } catch (e) {
     log(`Layer 3 FAILED: ${e}`);
-    console.warn("Backend metadata extraction failed:", e);
+    console.warn("[pdfMeta] Backend metadata extraction failed:", e);
+    // Try to get at least the font segments from a simpler call
+    // so we don't lose all backend data
   }
 
   if (backend) {
@@ -403,11 +429,11 @@ export async function extractMetadataEnhanced(
     if (!result.doi && backend.doi) result.doi = backend.doi;
 
     // Detect arXiv ID from segments or existing text
-    const arxivId = backend.arxiv_id || detectArxivId(
+    arxivId = backend.arxiv_id || detectArxivId(
       backend.all_segments.map((s) => s.text).join(" "),
     );
 
-    // Cross-validate title
+    // Cross-validate title: xmp vs layout vs font (3-way base)
     const validatedTitle = crossValidateTitle(
       result.title,
       backend.title_by_layout,
@@ -415,73 +441,282 @@ export async function extractMetadataEnhanced(
     );
     if (validatedTitle) result.title = validatedTitle;
 
-    // Merge layout-detected abstract (usually more accurate than regex)
+    // Merge layout-detected abstract
     if (backend.abstract_by_layout) {
       result.abstract = backend.abstract_by_layout;
     }
 
-    // Layer 4: Remote API resolution
-    // Priority: DOI (CrossRef) > arXiv > title search
-    let remote: Partial<PaperMetadata> | null = null;
+    // ── OCR cross-validation (Layer 3.5) ──
+    log("Layer 3.5: OCR cross-validation...");
+    // Detect Chinese paper: check XMP title, layout title, and OCR title
+    const hasChinese = (s: string | null | undefined) => !!s && /[\u4e00-\u9fff]/.test(s);
+    isChinese = hasChinese(result.title) || hasChinese(backend.title_by_layout) || hasChinese(backend.ocr_title);
+    log(`Chinese detection: xmp_title=${hasChinese(result.title)}, layout_title=${hasChinese(backend.title_by_layout)}, ocr_title=${hasChinese(backend.ocr_title)} → isChinese=${isChinese}`);
 
-    if (result.doi) {
-      log(`starting Layer 4: CrossRef DOI resolve (${result.doi})...`);
-      try {
-        remote = await resolveDoi(result.doi);
-        log(`Layer 4 CrossRef done: ${remote ? "got data" : "null"}`);
-      } catch (e) {
-        log(`Layer 4 CrossRef FAILED: ${e}`);
-      }
-    }
+    // Helper: parse keywords string into array
+    const parseKeywordsStr = (kw: string | null | undefined): string[] | undefined => {
+      if (!kw) return undefined;
+      const parts = kw.split(/[,;，；、\s]+/).map(s => s.trim()).filter(Boolean);
+      return parts.length > 0 ? parts : undefined;
+    };
 
-    if (!remote && arxivId) {
-      log(`starting Layer 4: arXiv resolve (${arxivId})...`);
-      try {
-        remote = await resolveArxiv(arxivId);
-        log(`Layer 4 arXiv done: ${remote ? "got data" : "null"}`);
-        // If arXiv entry has a DOI, try CrossRef for richer data
-        if (remote?.doi && remote.doi !== result.doi) {
-          try {
-            const crossRefData = await resolveDoi(remote.doi);
-            if (crossRefData) remote = { ...remote, ...crossRefData };
-          } catch {
-            // CrossRef failure — use arXiv data
-          }
-        }
-      } catch (e) {
-        log(`Layer 4 arXiv FAILED: ${e}`);
-      }
-    }
+    // Helper: parse authors string into array
+    const parseAuthorsStr = (auth: string | null | undefined): string[] | undefined => {
+      if (!auth) return undefined;
+      // Chinese authors: split by comma, space, or semicolon
+      const parts = auth.split(/[,;，；\s]+/).map(s => s.trim()).filter(Boolean);
+      return parts.length > 0 ? parts : undefined;
+    };
 
-    if (!remote && result.title && result.title.length > 10) {
-      log(`starting Layer 4: CrossRef title search...`);
-      try {
-        remote = await searchByTitle(result.title);
-        log(`Layer 4 title search done: ${remote ? "got data" : "null"}`);
-      } catch (e) {
-        log(`Layer 4 title search FAILED: ${e}`);
-      }
-    }
+    if (llmSettings) {
+      // ── AI mode: send OCR content to AI for metadata extraction ──
+      log("AI available — delegating to AI for metadata extraction...");
+      const apiKey = llmSettings.vendorApiKeys[llmSettings.vendor];
+      if (apiKey && llmSettings.baseUrl) {
+        try {
+          const baseUrl = llmSettings.baseUrl.replace(/\/+$/, "");
 
-    // Layer 5: Merge remote data (highest priority — authoritative source)
-    if (remote) {
-      log("Layer 5: merging remote data...");
-      const keys = Object.keys(remote) as (keyof PaperMetadata)[];
-      for (const key of keys) {
-        const val = remote[key];
-        if (val !== undefined && val !== null) {
-          if (Array.isArray(val)) {
-            if (val.length > 0) {
-              (result as Record<string, unknown>)[key] = val;
+          // Build comprehensive OCR content for AI analysis
+          const ocrContent = {
+            title_region_ocr: backend.ocr_title,
+            abstract_region_ocr: backend.ocr_abstract?.substring(0, 1000),
+            authors_ocr: backend.ocr_authors,
+            keywords_ocr: backend.ocr_keywords,
+            full_page_ocr: backend.ocr_full_text?.substring(0, 2000),
+            layout_title: backend.title_by_layout,
+            layout_abstract: backend.abstract_by_layout?.substring(0, 800),
+            xmp_metadata: {
+              title: result.title,
+              authors: result.authors,
+              abstract: result.abstract?.substring(0, 800),
+              journal: result.journal,
+              date: result.date,
+              doi: result.doi,
+            },
+          };
+
+          const prompt = `你是一个学术论文元数据提取助手。请根据以下OCR识别结果和PDF元数据，提取正确的论文元数据。
+
+## 输入数据
+
+### OCR识别结果（来自首页图像识别，对中文论文更可靠）：
+${JSON.stringify(ocrContent, null, 2)}
+
+## 提取规则：
+1. **标题 (title)**：优先使用OCR标题区域结果，与XMP标题比较取更完整准确的
+2. **作者 (authors)**：从OCR作者区域或全文OCR中提取作者列表
+3. **摘要 (abstract)**：优先使用OCR摘要区域结果
+4. **关键词 (keywords)**：从OCR关键词结果或全文中提取关键词列表
+5. **期刊名 (journal)**：从XMP或全文OCR中提取
+6. **日期 (date)**：从XMP或全文中提取，格式为 YYYY-MM-DD 或 YYYY
+7. **DOI**：从XMP或全文中提取
+
+## 特别注意：
+- 中文论文的XMP元数据经常有乱码，此时应以OCR结果为准
+- 作者应返回字符串数组
+- 关键词应返回字符串数组
+- 如果某个字段无法确定，不要包含在输出中
+
+## 输出格式：
+只返回JSON对象，不要包含markdown代码块：
+{ "title": "...", "authors": ["..."], "abstract": "...", "keywords": ["..."], "journal": "...", "date": "...", "doi": "..." }`;
+
+          const model = llmSettings.model || "gpt-4o-mini";
+          const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model,
+              messages: [{ role: "user", content: prompt }],
+              temperature: 0.1,
+            }),
+          });
+
+          if (response.ok) {
+            const data = await response.json() as { choices?: { message?: { content?: string } }[] };
+            const content = data.choices?.[0]?.message?.content;
+            if (content) {
+              const jsonMatch = content.match(/\{[\s\S]*\}/);
+              if (jsonMatch) {
+                const verified = JSON.parse(jsonMatch[0]) as Partial<PaperMetadata>;
+                log(`AI extraction result: title=${JSON.stringify(verified.title?.substring(0, 60))}`);
+                if (verified.title?.trim()) result.title = verified.title.trim();
+                if (verified.authors?.length) result.authors = verified.authors;
+                if (verified.abstract?.trim() && verified.abstract.trim().length > 20) {
+                  result.abstract = verified.abstract.trim();
+                }
+                if (verified.keywords?.length) result.keywords = verified.keywords;
+                if (verified.journal?.trim()) result.journal = verified.journal.trim();
+                if (verified.date?.trim()) result.date = verified.date.trim();
+                if (verified.doi?.trim()) result.doi = verified.doi.trim();
+              }
             }
-          } else if (typeof val === "string" && val.trim()) {
+          }
+        } catch (e) {
+          log(`AI metadata extraction FAILED: ${e}`);
+        }
+      }
+    } else {
+      // ── No AI mode: use layout+OCR results directly ──
+      log(`No AI — using layout+OCR results (isChinese=${isChinese})`);
+      if (isChinese) {
+        // Chinese paper: prefer OCR results (XMP often garbled for CJK)
+        log("Chinese paper detected — using OCR metadata as primary source");
+        const beforeTitle = result.title;
+        if (backend.ocr_title?.trim()) {
+          result.title = backend.ocr_title.trim();
+          log(`  title: XMP "${beforeTitle?.substring(0, 40)}" → OCR "${result.title.substring(0, 40)}"`);
+        } else {
+          log(`  title: kept "${result.title?.substring(0, 40)}" (no OCR title)`);
+        }
+        if (backend.ocr_abstract?.trim()) {
+          const beforeAbs = result.abstract?.substring(0, 40);
+          result.abstract = backend.ocr_abstract.trim();
+          log(`  abstract: "${beforeAbs}" → "${result.abstract.substring(0, 40)}"`);
+        } else {
+          log(`  abstract: kept (no OCR abstract)`);
+        }
+        // Extract authors from OCR
+        const ocrAuthors = parseAuthorsStr(backend.ocr_authors);
+        if (ocrAuthors) {
+          result.authors = ocrAuthors;
+          log(`  authors: ${JSON.stringify(ocrAuthors)}`);
+        } else {
+          log(`  authors: kept ${JSON.stringify(result.authors)} (no OCR authors)`);
+        }
+        // Extract keywords from OCR
+        const ocrKeywords = parseKeywordsStr(backend.ocr_keywords);
+        if (ocrKeywords) {
+          result.keywords = ocrKeywords;
+          log(`  keywords: ${JSON.stringify(ocrKeywords)}`);
+        } else {
+          log(`  keywords: kept ${JSON.stringify(result.keywords)} (no OCR keywords)`);
+        }
+        // Try to extract date/journal/doi from full OCR text if missing
+        if (backend.ocr_full_text) {
+          const fullTextExtracted = extractFromFirstPageText(backend.ocr_full_text);
+          log(`  fullText extract: date=${fullTextExtracted.date}, doi=${fullTextExtracted.doi}, vol=${fullTextExtracted.volume}`);
+          if (!result.date && fullTextExtracted.date) result.date = fullTextExtracted.date;
+          if (!result.doi && fullTextExtracted.doi) result.doi = fullTextExtracted.doi;
+          if (!result.volume && fullTextExtracted.volume) result.volume = fullTextExtracted.volume;
+          if (!result.issue && fullTextExtracted.issue) result.issue = fullTextExtracted.issue;
+          if (!result.pages && fullTextExtracted.pages) result.pages = fullTextExtracted.pages;
+        }
+        log(`  final metadata: title="${result.title?.substring(0, 50)}", authors=${JSON.stringify(result.authors?.slice(0, 3))}, keywords=${JSON.stringify(result.keywords?.slice(0, 5))}`);
+      } else {
+        // English paper: keep extracted metadata (XMP/layout is more reliable)
+        log("English paper detected — keeping extracted metadata");
+      }
+    }
+  }
+
+  // Layer 4: Remote API resolution
+  // Priority: DOI (CrossRef) > arXiv > title search
+  // Skip CrossRef title search for Chinese papers (OCR is more reliable)
+  let remote: Partial<PaperMetadata> | null = null;
+
+  if (result.doi) {
+    log(`starting Layer 4: CrossRef DOI resolve (${result.doi})...`);
+    try {
+      remote = await resolveDoi(result.doi);
+      log(`Layer 4 CrossRef done: ${remote ? "got data" : "null"}`);
+    } catch (e) {
+      log(`Layer 4 CrossRef FAILED: ${e}`);
+    }
+  }
+
+  if (!remote && arxivId) {
+    log(`starting Layer 4: arXiv resolve (${arxivId})...`);
+    try {
+      remote = await resolveArxiv(arxivId);
+      log(`Layer 4 arXiv done: ${remote ? "got data" : "null"}`);
+      if (remote?.doi && remote.doi !== result.doi) {
+        try {
+          const crossRefData = await resolveDoi(remote.doi);
+          if (crossRefData) remote = { ...remote, ...crossRefData };
+        } catch {
+          // CrossRef failure — use arXiv data
+        }
+      }
+    } catch (e) {
+      log(`Layer 4 arXiv FAILED: ${e}`);
+    }
+  }
+
+  if (!remote && !isChinese && result.title && result.title.length > 10) {
+    log(`starting Layer 4: CrossRef title search...`);
+    try {
+      remote = await searchByTitle(result.title);
+      log(`Layer 4 title search done: ${remote ? "got data" : "null"}`);
+    } catch (e) {
+      log(`Layer 4 title search FAILED: ${e}`);
+    }
+  }
+
+  // Layer 5: Merge remote data (highest priority — authoritative source)
+  if (remote) {
+    log("Layer 5: merging remote data...");
+    const keys = Object.keys(remote) as (keyof PaperMetadata)[];
+    for (const key of keys) {
+      const val = remote[key];
+      if (val !== undefined && val !== null) {
+        if (Array.isArray(val)) {
+          if (val.length > 0) {
             (result as Record<string, unknown>)[key] = val;
           }
+        } else if (typeof val === "string" && val.trim()) {
+          (result as Record<string, unknown>)[key] = val;
         }
       }
     }
   }
 
+  // Layer 6: CJK paper safety net — UNCONDITIONAL OCR override
+  // For CJK papers, OCR is ALWAYS more reliable than PDF embedded text
+  if (backend) {
+    const hasCJK = (s: string | null | undefined) => !!s && /[\u4e00-\u9fff]/.test(s);
+    const isCJK = hasCJK(result.title) || hasCJK(backend.ocr_title) || hasCJK(backend.title_by_layout);
+
+    if (isCJK) {
+      // Title: ALWAYS use OCR title for CJK papers
+      if (backend.ocr_title?.trim()) {
+        const ocrTitle = backend.ocr_title.trim();
+        if (ocrTitle !== result.title) {
+          log(`Layer 6: FORCE OCR title (replacing "${result.title?.substring(0, 40)}" → "${ocrTitle.substring(0, 40)}")`);
+          result.title = ocrTitle;
+        }
+      }
+      // Abstract: ALWAYS use OCR abstract for CJK papers
+      if (backend.ocr_abstract?.trim()) {
+        const ocrAbs = backend.ocr_abstract.trim();
+        if (ocrAbs !== result.abstract) {
+          log(`Layer 6: FORCE OCR abstract (${ocrAbs.length}B)`);
+          result.abstract = ocrAbs;
+        }
+      }
+      // Authors: ALWAYS use OCR authors for CJK papers
+      if (backend.ocr_authors?.trim()) {
+        const auth = backend.ocr_authors.split(/[,;\uff0c\uff1b\s]+/).map(s => s.trim()).filter(Boolean);
+        if (auth.length > 0) {
+          log(`Layer 6: FORCE OCR authors: ${JSON.stringify(auth)}`);
+          result.authors = auth;
+        }
+      }
+      // Keywords: ALWAYS use OCR keywords for CJK papers
+      if (backend.ocr_keywords?.trim()) {
+        const kw = backend.ocr_keywords.split(/[,;\uff0c\uff1b\u3001\s]+/).map(s => s.trim()).filter(Boolean);
+        if (kw.length > 0) {
+          log(`Layer 6: FORCE OCR keywords: ${JSON.stringify(kw)}`);
+          result.keywords = kw;
+        }
+      }
+    }
+  }
+
+  log(`FINAL: title="${result.title?.substring(0, 60)}", authors=${JSON.stringify(result.authors?.slice(0, 3))}, keywords=${JSON.stringify(result.keywords?.slice(0, 5))}`);
   log(`extractMetadataEnhanced done (total ${(performance.now() - t0).toFixed(0)}ms)`);
   return result;
 }

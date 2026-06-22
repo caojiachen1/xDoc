@@ -123,11 +123,34 @@ export function useGrobid(
 
   // ── Cross-validate Grobid metadata with extracted metadata ───────
   const crossValidateGrobidMeta = useCallback((path: string, doc: GrobidDocumentOutput, currentPapers: PaperInfo[]): PaperInfo[] => {
-    const paper = currentPapers.find(p => p.path === path);
+    // Find paper by path OR managedPath (handles renamed papers)
+    const paper = currentPapers.find(p => p.path === path || p.managedPath === path);
     if (!paper) return currentPapers;
 
     const existing = paper.metadata;
     const grobid = doc.metadata;
+
+    // CJK detection: check ALL possible sources
+    const hasCJK = (s: string | undefined | null) => !!s && /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(s);
+
+    // Check if this is a CJK paper from ANY source:
+    // 1. Grobid's own title/abstract/authors (most reliable indicator)
+    // 2. Existing metadata
+    // 3. PDF filename
+    const grobidHasCJK = hasCJK(grobid.title) || hasCJK(grobid.abstract_text)
+      || (grobid.authors?.some(a => hasCJK(a.full_name)) ?? false);
+    const existingHasCJK = hasCJK(existing?.title) || hasCJK(existing?.abstract)
+      || (existing?.authors?.some(a => hasCJK(a)) ?? false)
+      || (existing?.keywords?.some(k => hasCJK(k)) ?? false);
+    const filenameHasCJK = hasCJK(paper.name);
+
+    if (grobidHasCJK || existingHasCJK || filenameHasCJK) {
+      // Chinese/CJK paper: skip ALL Grobid metadata, OCR is the authoritative source
+      console.log("[Grobid] CJK paper detected — skipping metadata cross-validation:", paper.name);
+      return currentPapers;
+    }
+
+    // English papers: merge Grobid metadata
     const merged: PaperMetadata = { ...(existing ?? {}) };
 
     // Title: prefer Grobid if existing is empty or filename-like
@@ -139,12 +162,12 @@ export function useGrobid(
       }
     }
 
-    // Abstract
+    // Abstract: only fill in if missing
     if (!merged.abstract && grobid.abstract_text) {
       merged.abstract = grobid.abstract_text;
     }
 
-    // Authors
+    // Authors: only fill in if missing
     if ((!merged.authors || merged.authors.length === 0) && grobid.authors.length > 0) {
       merged.authors = grobid.authors
         .map(a => a.full_name || [a.first_name, a.middle_name, a.last_name].filter(Boolean).join(" "))
@@ -166,7 +189,7 @@ export function useGrobid(
     if (!merged.pages && grobid.venue?.pages) merged.pages = grobid.venue.pages;
     if (!merged.publisher && grobid.venue?.publisher) merged.publisher = grobid.venue.publisher;
 
-    // Keywords
+    // Keywords: only merge additional ones
     if ((!merged.keywords || merged.keywords.length === 0) && grobid.keywords.length > 0) {
       merged.keywords = grobid.keywords;
     } else if (merged.keywords && grobid.keywords.length > 0) {
@@ -183,10 +206,20 @@ export function useGrobid(
     return currentPapers.map(p => p.id === paper.id ? updatedPaper : p);
   }, []);
 
+  // ── CJK detection helper ─────────────────────────────────────────
+  const isCJKPaper = (paper: PaperInfo): boolean => {
+    const hasCJK = (s: string | undefined | null) => !!s && /[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/.test(s);
+    return hasCJK(paper.name)
+      || hasCJK(paper.metadata?.title)
+      || hasCJK(paper.metadata?.abstract)
+      || (paper.metadata?.authors?.some(a => hasCJK(a)) ?? false);
+  };
+
   // ── Start batch parsing ──────────────────────────────────────────
   const startGrobidBatch = useCallback((papers: PaperInfo[], crossValidate: (path: string, doc: GrobidDocumentOutput) => void) => {
     const pdfPaths = papers
       .filter(p => p.path.toLowerCase().endsWith(".pdf"))
+      .filter(p => !isCJKPaper(p))  // Skip CJK papers — OCR is authoritative
       .map(p => p.path);
     const newPaths = pdfPaths.filter(p =>
       !grobidBatchQueueRef.current.includes(p) &&
