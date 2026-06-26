@@ -274,16 +274,6 @@ function App() {
       allItems.push({ str: item.str, xPdf, yPdf, wPdf, hPdf, yTopPdf: yPdf + hPdf });
     }
 
-    // ── Find closest item Y to drag start and drag end ──
-    let bestDistStart = Infinity;
-    let bestDistEnd = Infinity;
-    for (const it of allItems) {
-      const d1 = Math.abs(it.yPdf - rawStartY);
-      const d2 = Math.abs(it.yPdf - rawEndY);
-      if (d1 < bestDistStart) bestDistStart = d1;
-      if (d2 < bestDistEnd) bestDistEnd = d2;
-    }
-
     // ── Character-level selection ──
     const matched: Array<{ str: string; x: number; y: number; w: number; h: number }> = [];
 
@@ -297,13 +287,15 @@ function App() {
         lineLeft = Math.min(rawStartX, rawEndX);
         lineRight = Math.max(rawStartX, rawEndX);
       } else {
-        const distToStart = Math.abs(it.yPdf - rawStartY);
-        const distToEnd = Math.abs(it.yPdf - rawEndY);
-        const lineTol = it.hPdf * 0.5;
-        const onFirstLine = distToStart <= bestDistStart + lineTol;
-        const onLastLine = distToEnd <= bestDistEnd + lineTol;
+        // Use item center Y for comparison, with tolerance = line height.
+        // Items closer to drag start are "first line", closer to drag end are "last line".
+        const itCenter = it.yPdf + it.hPdf / 2;
+        const distToStart = Math.abs(itCenter - rawStartY);
+        const distToEnd = Math.abs(itCenter - rawEndY);
+        const onFirstLine = distToStart < it.hPdf && distToStart <= distToEnd;
+        const onLastLine = distToEnd < it.hPdf && distToEnd < distToStart;
 
-        if (onFirstLine && (!onLastLine || distToStart <= distToEnd)) {
+        if (onFirstLine && !onLastLine) {
           // First line: from drag start X → block right
           lineLeft = rawStartX;
           lineRight = blockRight;
