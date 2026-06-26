@@ -112,6 +112,8 @@ function App() {
   const pdfSelectionRef = useRef<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
   const pdfSelectingRef = useRef(false);
   const pdfSelectionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const pdfDragStartXRef = useRef(0); // Original drag start X (for first line left boundary)
+  const pdfDragStartYRef = useRef(0); // Original drag start Y (for first line identification)
   const pdfSelectionOverlayRef = useRef<HTMLDivElement>(null);
   const pdfViewportScaleRef = useRef(1);
   const pdfPageHRef = useRef(0);
@@ -191,7 +193,7 @@ function App() {
   }, []);
 
   // ── PDF selection hit-testing ─────────────────────────────────────────────
-  const hitTestTextItems = useCallback((selRect: { x: number; y: number; w: number; h: number }) => {
+  const hitTestTextItems = useCallback((_selRect: { x: number; y: number; w: number; h: number }) => {
     const items = pdfTextItemsRef.current;
     if (!items || items.length === 0) return [];
 
@@ -199,22 +201,39 @@ function App() {
     const pageH = pdfPageHRef.current;
     if (scale <= 0 || pageH <= 0) return [];
 
-    // Selection rectangle in PDF coords (top-left origin)
-    const selLeft = selRect.x / scale;
-    const selTop = selRect.y / scale;
-    const selRight = (selRect.x + selRect.w) / scale;
-    const selBottom = (selRect.y + selRect.h) / scale;
+    // Use RAW start/end from pdfSelectionRef — preserves drag direction
+    const sel = pdfSelectionRef.current;
+    if (!sel) return [];
 
-    const isMultiLine = selBottom - selTop > 5;
+    const rawStartX = sel.startX / scale;
+    const rawStartY = sel.startY / scale;
+    const rawEndX = sel.endX / scale;
+    const rawEndY = sel.endY / scale;
 
-    // ── Find the text block (layout box) containing the drag start ──
+    // Bounding box for vertical range detection
+    const selTop = Math.min(rawStartY, rawEndY);
+    const selBottom = Math.max(rawStartY, rawEndY);
+
+    // Compute average line height from items for threshold
+    let avgH = 12;
+    let hCount = 0;
+    for (const item of items) {
+      if (item.transform) {
+        avgH += item.height || Math.abs(item.transform[3]) || 10;
+        hCount++;
+      }
+    }
+    if (hCount > 0) avgH /= hCount;
+    const isMultiLine = selBottom - selTop > avgH;
+
+    // ── Find the text block (layout box) ──
     let blockLeft = 0;
-    let blockRight = selRight;
+    let blockRight = Math.max(rawStartX, rawEndX);
 
     const lxBoxes = layoutBoxesRef.current;
     if (lxBoxes.length > 0) {
-      const selCenterX = (selLeft + selRight) / 2;
-      const selCenterY = (selTop + selBottom) / 2;
+      const cx = (rawStartX + rawEndX) / 2;
+      const cy = (rawStartY + rawEndY) / 2;
       const sxScale = zoom.scale.x || 1;
       const syScale = zoom.scale.y || 1;
 
@@ -224,7 +243,7 @@ function App() {
         const bT = box.ymin * syScale / scale;
         const bR = box.xmax * sxScale / scale;
         const bB = box.ymax * syScale / scale;
-        if (selCenterX >= bL && selCenterX <= bR && selCenterY >= bT && selCenterY <= bB) {
+        if (cx >= bL && cx <= bR && cy >= bT && cy <= bB) {
           blockLeft = bL; blockRight = bR; found = true; break;
         }
       }
@@ -235,19 +254,15 @@ function App() {
           const bR = box.xmax * sxScale / scale;
           const bT = box.ymin * syScale / scale;
           const bB = box.ymax * syScale / scale;
-          const dist = Math.hypot(selCenterX - (bL + bR) / 2, selCenterY - (bT + bB) / 2);
+          const dist = Math.hypot(cx - (bL + bR) / 2, cy - (bT + bB) / 2);
           if (dist < bestDist) { bestDist = dist; blockLeft = bL; blockRight = bR; }
         }
       }
     }
 
-    // ── Character-level selection ──
-    // For each text item, split into characters and select only those
-    // that overlap the selection rectangle.
-    // Multi-line: first/last lines use precise rect, intermediate lines use block width.
-
-    const matched: Array<{ str: string; x: number; y: number; w: number; h: number }> = [];
-
+    // ── Build item data ──
+    type ItemD = { str: string; xPdf: number; yPdf: number; wPdf: number; hPdf: number; yTopPdf: number };
+    const allItems: ItemD[] = [];
     for (const item of items) {
       if (!item.str || !item.transform) continue;
       const tx = item.transform;
@@ -256,69 +271,88 @@ function App() {
       const wPdf = item.width || 0;
       const hPdf = item.height || Math.abs(tx[3]) || Math.abs(tx[0]) || 10;
       const yPdf = pageH - pdfY - hPdf;
-      const yTopPdf = yPdf + hPdf;
+      allItems.push({ str: item.str, xPdf, yPdf, wPdf, hPdf, yTopPdf: yPdf + hPdf });
+    }
 
-      // Quick vertical check — skip items completely outside selection
-      if (yTopPdf < selTop || yPdf > selBottom) continue;
+    // ── Find closest item Y to drag start and drag end ──
+    let bestDistStart = Infinity;
+    let bestDistEnd = Infinity;
+    for (const it of allItems) {
+      const d1 = Math.abs(it.yPdf - rawStartY);
+      const d2 = Math.abs(it.yPdf - rawEndY);
+      if (d1 < bestDistStart) bestDistStart = d1;
+      if (d2 < bestDistEnd) bestDistEnd = d2;
+    }
 
-      // Determine the horizontal bounds for this item's line
-      let itemSelLeft: number;
-      let itemSelRight: number;
+    // ── Character-level selection ──
+    const matched: Array<{ str: string; x: number; y: number; w: number; h: number }> = [];
+
+    for (const it of allItems) {
+      if (it.yTopPdf < selTop || it.yPdf > selBottom) continue;
+
+      let lineLeft: number;
+      let lineRight: number;
 
       if (!isMultiLine) {
-        // Single line: character-precise using original selection rectangle
-        itemSelLeft = selLeft;
-        itemSelRight = selRight;
-      } else if (yTopPdf < selTop + hPdf * 0.5) {
-        // First line: from drag start to block right edge
-        itemSelLeft = selLeft;
-        itemSelRight = blockRight;
-      } else if (yPdf > selBottom - hPdf * 0.5) {
-        // Last line: from block left edge to drag end
-        itemSelLeft = blockLeft;
-        itemSelRight = selRight;
+        lineLeft = Math.min(rawStartX, rawEndX);
+        lineRight = Math.max(rawStartX, rawEndX);
       } else {
-        // Intermediate line: full block width
-        itemSelLeft = blockLeft;
-        itemSelRight = blockRight;
+        const distToStart = Math.abs(it.yPdf - rawStartY);
+        const distToEnd = Math.abs(it.yPdf - rawEndY);
+        const lineTol = it.hPdf * 0.5;
+        const onFirstLine = distToStart <= bestDistStart + lineTol;
+        const onLastLine = distToEnd <= bestDistEnd + lineTol;
+
+        if (onFirstLine && (!onLastLine || distToStart <= distToEnd)) {
+          // First line: from drag start X → block right
+          lineLeft = rawStartX;
+          lineRight = blockRight;
+        } else if (onLastLine) {
+          // Last line: from block left → current mouse X
+          lineLeft = blockLeft;
+          lineRight = rawEndX;
+        } else {
+          // Intermediate: full block width
+          lineLeft = blockLeft;
+          lineRight = blockRight;
+        }
       }
 
-      // Skip items completely outside horizontal bounds
-      if (xPdf + wPdf < itemSelLeft || xPdf > itemSelRight) continue;
+      // Normalize (lineLeft may be > lineRight if dragging left)
+      const lMin = Math.min(lineLeft, lineRight);
+      const lMax = Math.max(lineLeft, lineRight);
 
-      // Split into characters and select only those within bounds
-      const chars = item.str.split("");
+      if (it.xPdf + it.wPdf < lMin || it.xPdf > lMax) continue;
+
+      // Character-level
+      const chars = it.str.split("");
       const n = chars.length;
       if (n === 0) continue;
-      const charW = wPdf / n;
+      const charW = it.wPdf / n;
 
+      let firstIdx = -1;
+      let lastIdx = -1;
       for (let i = 0; i < n; i++) {
-        const cLeft = xPdf + i * charW;
+        const cLeft = it.xPdf + i * charW;
         const cRight = cLeft + charW;
-        // Character must overlap the horizontal bounds
-        if (cRight <= itemSelLeft || cLeft >= itemSelRight) continue;
-
-        // Accumulate consecutive selected characters into one highlight
-        const selStart = Math.max(cLeft, itemSelLeft);
-        const selEnd = Math.min(cRight, itemSelRight);
-
-        // Try to merge with the previous highlight if adjacent
-        const prev = matched[matched.length - 1];
-        if (prev && Math.abs((prev.x + prev.w) / scale - selStart) < 0.5 &&
-            Math.abs(prev.y / scale - yPdf) < hPdf * 0.5) {
-          // Extend previous highlight
-          const newEnd = selEnd * scale;
-          prev.w = newEnd - prev.x;
-          prev.str += chars[i];
-        } else {
-          matched.push({
-            str: chars[i],
-            x: selStart * scale,
-            y: yPdf * scale,
-            w: (selEnd - selStart) * scale,
-            h: hPdf * scale,
-          });
+        if (cRight > lMin && cLeft < lMax) {
+          if (firstIdx === -1) firstIdx = i;
+          lastIdx = i;
         }
+      }
+      if (firstIdx === -1) continue;
+
+      const hl = it.xPdf + firstIdx * charW;
+      const hr = it.xPdf + (lastIdx + 1) * charW;
+      const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
+
+      const prev = matched[matched.length - 1];
+      const gap = hl * scale - (prev ? prev.x + prev.w : 0);
+      if (prev && gap < charW * scale * 1.5 && Math.abs(prev.y / scale - it.yPdf) < it.hPdf * 0.5) {
+        prev.w = hr * scale - prev.x;
+        prev.str += hStr;
+      } else {
+        matched.push({ str: hStr, x: hl * scale, y: it.yPdf * scale, w: (hr - hl) * scale, h: it.hPdf * scale });
       }
     }
 
@@ -332,6 +366,8 @@ function App() {
 
     const pos = pdfToSelectionCoords(e);
     pdfSelectionStartRef.current = pos;
+    pdfDragStartXRef.current = pos.x; // Remember exact drag start X for first line
+    pdfDragStartYRef.current = pos.y; // Remember exact drag start Y for first line
     pdfSelectionRef.current = { startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
     pdfSelectingRef.current = false;
 
@@ -369,7 +405,6 @@ function App() {
 
     const matched = hitTestTextItems({ x: rectX, y: rectY, w: rectW, h: rectH });
     const overlay = pdfSelectionOverlayRef.current;
-    console.log("[PDF] overlay exists:", !!overlay, "matched:", matched.length);
     if (overlay) {
       overlay.innerHTML = "";
       for (const item of matched) {
@@ -380,11 +415,6 @@ function App() {
         div.style.width = `${item.w}px`;
         div.style.height = `${item.h}px`;
         overlay.appendChild(div);
-      }
-      console.log("[PDF] overlay children:", overlay.childElementCount, "overlay rect:", overlay.getBoundingClientRect());
-      if (matched.length > 0) {
-        const first = overlay.children[0] as HTMLElement;
-        console.log("[PDF] first highlight:", first?.style.cssText, "rect:", first?.getBoundingClientRect());
       }
     }
   }, [pdfToSelectionCoords, hitTestTextItems]);
