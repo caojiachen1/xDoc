@@ -2329,10 +2329,30 @@
   transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
 }
 
-/* Override pdfjs default transparent ::selection inside textLayer */
+/* Disable native selection — custom drag-to-select is used instead */
 .pdf-text-layer span::selection,
 .pdf-text-layer br::selection {
-  background: rgba(0, 150, 255, 0.3) !important;
+  background: transparent !important;
+}
+
+/* Custom selection overlay — rendered between text layer and annotation canvas.
+   z-index must be very high: pdfjs spans have CSS transform which creates
+   independent stacking contexts that paint above normal siblings. */
+.pdf-selection-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 9999;
+}
+
+.pdf-selection-highlight {
+  position: absolute;
+  background: rgba(0, 100, 255, 0.25);
+  border-radius: 1px;
+  pointer-events: none;
 }
 
 /* ── PDF Floating AI Menu (text selection mode) ────────────── */

@@ -52,7 +52,6 @@ import {
   ERASER_CURSOR,
   isVisualBox,
   actionLabels,
-  mergeTextLayerSpans,
   type LayoutBox,
   type TextSegment,
   type DetectionResponse,
@@ -107,6 +106,17 @@ function App() {
   const pdfJsDocRef = useRef<any>(null);
   const textLayerInstanceRef = useRef<any>(null);
   const mainLayoutRef = useRef<HTMLDivElement>(null);
+
+  // ── PDF custom text selection state ────────────────────────────────────────
+  const pdfTextItemsRef = useRef<any[]>([]);
+  const pdfSelectionRef = useRef<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
+  const pdfSelectingRef = useRef(false);
+  const pdfSelectionStartRef = useRef<{ x: number; y: number } | null>(null);
+  const pdfSelectionOverlayRef = useRef<HTMLDivElement>(null);
+  const pdfViewportScaleRef = useRef(1);
+  const pdfPageHRef = useRef(0);
+  const layoutBoxesRef = useRef<LayoutBox[]>([]);
+  const DRAG_THRESHOLD = 3;
 
   // ── Hook initialization (order matters: zoom before annotations, aiChat before ocr) ──
   const settings = useSettings(environmentReady);
@@ -168,6 +178,281 @@ function App() {
       setTimeout(() => document.body.removeChild(toast), 300);
     }, 4000);
   });
+
+  // ── PDF selection coordinate helpers ──────────────────────────────────────
+  const pdfToSelectionCoords = useCallback((e: React.PointerEvent) => {
+    const container = textLayerRef.current;
+    if (!container) return { x: 0, y: 0 };
+    const rect = container.getBoundingClientRect();
+    return {
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    };
+  }, []);
+
+  // ── PDF selection hit-testing ─────────────────────────────────────────────
+  const hitTestTextItems = useCallback((selRect: { x: number; y: number; w: number; h: number }) => {
+    const items = pdfTextItemsRef.current;
+    if (!items || items.length === 0) return [];
+
+    const scale = pdfViewportScaleRef.current;
+    const pageH = pdfPageHRef.current;
+    if (scale <= 0 || pageH <= 0) return [];
+
+    // Selection rectangle in PDF coords (top-left origin)
+    const selLeft = selRect.x / scale;
+    const selTop = selRect.y / scale;
+    const selRight = (selRect.x + selRect.w) / scale;
+    const selBottom = (selRect.y + selRect.h) / scale;
+
+    const isMultiLine = selBottom - selTop > 5;
+
+    // ── Find the text block (layout box) containing the drag start ──
+    let blockLeft = 0;
+    let blockRight = selRight;
+
+    const lxBoxes = layoutBoxesRef.current;
+    if (lxBoxes.length > 0) {
+      const selCenterX = (selLeft + selRight) / 2;
+      const selCenterY = (selTop + selBottom) / 2;
+      const sxScale = zoom.scale.x || 1;
+      const syScale = zoom.scale.y || 1;
+
+      let found = false;
+      for (const box of lxBoxes) {
+        const bL = box.xmin * sxScale / scale;
+        const bT = box.ymin * syScale / scale;
+        const bR = box.xmax * sxScale / scale;
+        const bB = box.ymax * syScale / scale;
+        if (selCenterX >= bL && selCenterX <= bR && selCenterY >= bT && selCenterY <= bB) {
+          blockLeft = bL; blockRight = bR; found = true; break;
+        }
+      }
+      if (!found) {
+        let bestDist = Infinity;
+        for (const box of lxBoxes) {
+          const bL = box.xmin * sxScale / scale;
+          const bR = box.xmax * sxScale / scale;
+          const bT = box.ymin * syScale / scale;
+          const bB = box.ymax * syScale / scale;
+          const dist = Math.hypot(selCenterX - (bL + bR) / 2, selCenterY - (bT + bB) / 2);
+          if (dist < bestDist) { bestDist = dist; blockLeft = bL; blockRight = bR; }
+        }
+      }
+    }
+
+    // ── Character-level selection ──
+    // For each text item, split into characters and select only those
+    // that overlap the selection rectangle.
+    // Multi-line: first/last lines use precise rect, intermediate lines use block width.
+
+    const matched: Array<{ str: string; x: number; y: number; w: number; h: number }> = [];
+
+    for (const item of items) {
+      if (!item.str || !item.transform) continue;
+      const tx = item.transform;
+      const xPdf = tx[4];
+      const pdfY = tx[5];
+      const wPdf = item.width || 0;
+      const hPdf = item.height || Math.abs(tx[3]) || Math.abs(tx[0]) || 10;
+      const yPdf = pageH - pdfY - hPdf;
+      const yTopPdf = yPdf + hPdf;
+
+      // Quick vertical check — skip items completely outside selection
+      if (yTopPdf < selTop || yPdf > selBottom) continue;
+
+      // Determine the horizontal bounds for this item's line
+      let itemSelLeft: number;
+      let itemSelRight: number;
+
+      if (!isMultiLine) {
+        // Single line: character-precise using original selection rectangle
+        itemSelLeft = selLeft;
+        itemSelRight = selRight;
+      } else if (yTopPdf < selTop + hPdf * 0.5) {
+        // First line: from drag start to block right edge
+        itemSelLeft = selLeft;
+        itemSelRight = blockRight;
+      } else if (yPdf > selBottom - hPdf * 0.5) {
+        // Last line: from block left edge to drag end
+        itemSelLeft = blockLeft;
+        itemSelRight = selRight;
+      } else {
+        // Intermediate line: full block width
+        itemSelLeft = blockLeft;
+        itemSelRight = blockRight;
+      }
+
+      // Skip items completely outside horizontal bounds
+      if (xPdf + wPdf < itemSelLeft || xPdf > itemSelRight) continue;
+
+      // Split into characters and select only those within bounds
+      const chars = item.str.split("");
+      const n = chars.length;
+      if (n === 0) continue;
+      const charW = wPdf / n;
+
+      for (let i = 0; i < n; i++) {
+        const cLeft = xPdf + i * charW;
+        const cRight = cLeft + charW;
+        // Character must overlap the horizontal bounds
+        if (cRight <= itemSelLeft || cLeft >= itemSelRight) continue;
+
+        // Accumulate consecutive selected characters into one highlight
+        const selStart = Math.max(cLeft, itemSelLeft);
+        const selEnd = Math.min(cRight, itemSelRight);
+
+        // Try to merge with the previous highlight if adjacent
+        const prev = matched[matched.length - 1];
+        if (prev && Math.abs((prev.x + prev.w) / scale - selStart) < 0.5 &&
+            Math.abs(prev.y / scale - yPdf) < hPdf * 0.5) {
+          // Extend previous highlight
+          const newEnd = selEnd * scale;
+          prev.w = newEnd - prev.x;
+          prev.str += chars[i];
+        } else {
+          matched.push({
+            str: chars[i],
+            x: selStart * scale,
+            y: yPdf * scale,
+            w: (selEnd - selStart) * scale,
+            h: hPdf * scale,
+          });
+        }
+      }
+    }
+
+    return matched;
+  }, [zoom.displaySize, zoom.scale]);
+
+  // ── PDF custom pointer event handlers ────────────────────────────────────
+  const handlePdfPointerDown = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    if (annotations.annotationMode) return;
+
+    const pos = pdfToSelectionCoords(e);
+    pdfSelectionStartRef.current = pos;
+    pdfSelectionRef.current = { startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
+    pdfSelectingRef.current = false;
+
+    if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
+    aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+    window.getSelection()?.removeAllRanges();
+  }, [annotations.annotationMode, pdfToSelectionCoords, aiChat]);
+
+  const handlePdfPointerMove = useCallback((e: React.PointerEvent) => {
+    if (!pdfSelectionStartRef.current) return;
+
+    const pos = pdfToSelectionCoords(e);
+    const start = pdfSelectionStartRef.current;
+    const dx = pos.x - start.x;
+    const dy = pos.y - start.y;
+
+    if (!pdfSelectingRef.current && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+
+    if (!pdfSelectingRef.current) {
+      pdfSelectingRef.current = true;
+      textLayerRef.current?.setPointerCapture(e.pointerId);
+    }
+
+    e.preventDefault();
+
+    pdfSelectionRef.current = {
+      startX: start.x, startY: start.y,
+      endX: pos.x, endY: pos.y,
+    };
+
+    const rectX = Math.min(start.x, pos.x);
+    const rectY = Math.min(start.y, pos.y);
+    const rectW = Math.abs(dx);
+    const rectH = Math.abs(dy);
+
+    const matched = hitTestTextItems({ x: rectX, y: rectY, w: rectW, h: rectH });
+    const overlay = pdfSelectionOverlayRef.current;
+    console.log("[PDF] overlay exists:", !!overlay, "matched:", matched.length);
+    if (overlay) {
+      overlay.innerHTML = "";
+      for (const item of matched) {
+        const div = document.createElement("div");
+        div.className = "pdf-selection-highlight";
+        div.style.left = `${item.x}px`;
+        div.style.top = `${item.y}px`;
+        div.style.width = `${item.w}px`;
+        div.style.height = `${item.h}px`;
+        overlay.appendChild(div);
+      }
+      console.log("[PDF] overlay children:", overlay.childElementCount, "overlay rect:", overlay.getBoundingClientRect());
+      if (matched.length > 0) {
+        const first = overlay.children[0] as HTMLElement;
+        console.log("[PDF] first highlight:", first?.style.cssText, "rect:", first?.getBoundingClientRect());
+      }
+    }
+  }, [pdfToSelectionCoords, hitTestTextItems]);
+
+  const handlePdfPointerUp = useCallback((e: React.PointerEvent) => {
+    if (!pdfSelectingRef.current) {
+      pdfSelectionStartRef.current = null;
+      pdfSelectionRef.current = null;
+      return;
+    }
+
+    pdfSelectingRef.current = false;
+    textLayerRef.current?.releasePointerCapture(e.pointerId);
+    pdfSelectionStartRef.current = null;
+
+    const sel = pdfSelectionRef.current;
+    if (!sel) return;
+
+    const rectX = Math.min(sel.startX, sel.endX);
+    const rectY = Math.min(sel.startY, sel.endY);
+    const rectW = Math.abs(sel.endX - sel.startX);
+    const rectH = Math.abs(sel.endY - sel.startY);
+    const finalRect = { x: rectX, y: rectY, w: rectW, h: rectH };
+
+    const matched = hitTestTextItems(finalRect);
+    const text = matched.map(m => m.str).join("");
+
+    const overlay = pdfSelectionOverlayRef.current;
+    if (overlay) {
+      overlay.innerHTML = "";
+      for (const item of matched) {
+        const div = document.createElement("div");
+        div.className = "pdf-selection-highlight";
+        div.style.left = `${item.x}px`;
+        div.style.top = `${item.y}px`;
+        div.style.width = `${item.w}px`;
+        div.style.height = `${item.h}px`;
+        overlay.appendChild(div);
+      }
+    }
+
+    if (text.trim()) {
+      const wrapEl = textLayerRef.current?.parentElement;
+      if (!wrapEl) return;
+      const wrapRect = wrapEl.getBoundingClientRect();
+
+      const menuW = 260;
+      const menuH = 40;
+      let menuX = rectX + rectW / 2 - menuW / 2;
+      let menuY = rectY - menuH - 4;
+
+      menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
+      if (menuY < 4) menuY = rectY + rectH + 4;
+      menuY = Math.max(4, menuY);
+
+      aiChat.setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
+    } else {
+      if (overlay) overlay.innerHTML = "";
+      aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+    }
+  }, [hitTestTextItems, aiChat]);
+
+  const clearPdfSelection = useCallback(() => {
+    pdfSelectionRef.current = null;
+    pdfSelectionStartRef.current = null;
+    pdfSelectingRef.current = false;
+    if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
+  }, []);
 
   // ── Computed values ────────────────────────────────────────────────────────
   const currentPaper = useMemo(() => papers.papersList.find(p => p.path === documentPath) || null, [papers.papersList, documentPath]);
@@ -234,8 +519,9 @@ function App() {
       setSelectMode("text");
       aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
       window.getSelection()?.removeAllRanges();
+      clearPdfSelection();
     }
-  }, [settings.modelLoaded, selectMode]);
+  }, [settings.modelLoaded, selectMode, clearPdfSelection]);
 
   // ── runModel — runs layout detection on a document ─────────────────────────
   const runModel = async (targetPageIndex?: number, targetFilePath?: string, thresholdOverride?: number) => {
@@ -517,6 +803,9 @@ function App() {
     };
   }, [documentPath, isPdfSelected]);
 
+  // ── Sync layout boxes to ref for hit-testing ─────────────────────────────
+  useEffect(() => { layoutBoxesRef.current = boxes; }, [boxes]);
+
   // ── Render pdfjs TextLayer when in text mode ──────────────────────────────
   useEffect(() => {
     if (selectMode !== "text" || !isPdfSelected || !pdfJsDocRef.current ||
@@ -555,7 +844,11 @@ function App() {
         });
         textLayerInstanceRef.current = textLayer;
         await textLayer.render();
-        if (!cancelled) mergeTextLayerSpans(container);
+        if (!cancelled) {
+          pdfTextItemsRef.current = textContent.items;
+          pdfViewportScaleRef.current = scale;
+          pdfPageHRef.current = baseViewport.height;
+        }
       } catch (e) {
         if (!cancelled) console.warn("[TextLayer] render failed:", e);
       }
@@ -660,10 +953,14 @@ function App() {
       const target = e.target as HTMLElement;
       if (!target.closest(".pdf-floating-ai-menu")) {
         aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+        clearPdfSelection();
       }
     };
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+      if (e.key === "Escape") {
+        aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+        clearPdfSelection();
+      }
     };
     document.addEventListener("mousedown", handleClick);
     document.addEventListener("keydown", handleKey);
@@ -770,33 +1067,6 @@ function App() {
     });
   };
 
-  const handlePdfTextSelection = (_e: React.MouseEvent) => {
-    const selection = window.getSelection();
-    if (!selection || !selection.toString().trim()) {
-      aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
-      return;
-    }
-
-    const selectedText = selection.toString().trim();
-    const range = selection.getRangeAt(0);
-    const rect = range.getBoundingClientRect();
-
-    const wrapEl = textLayerRef.current?.parentElement;
-    if (!wrapEl) return;
-    const wrapRect = wrapEl.getBoundingClientRect();
-
-    const menuW = 260;
-    const menuH = 40;
-
-    let menuX = rect.left - wrapRect.left + rect.width / 2 - menuW / 2;
-    let menuY = rect.top - wrapRect.top - menuH - 4;
-
-    menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
-    if (menuY < 4) menuY = rect.bottom - wrapRect.top + 4;
-    menuY = Math.max(4, menuY);
-
-    aiChat.setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText });
-  };
 
   const handlePdfFloatingAction = (action: string) => {
     if (aiChat.pdfFloatingMenu.selectedText) {
@@ -1353,6 +1623,7 @@ function App() {
                           setSelectMode("text");
                           aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
                           window.getSelection()?.removeAllRanges();
+                          clearPdfSelection();
                         }}
                         title="文字选择模式"
                       />
@@ -1366,6 +1637,7 @@ function App() {
                           setSelectMode("box");
                           aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
                           window.getSelection()?.removeAllRanges();
+                          clearPdfSelection();
                         }}
                         title={settings.modelLoaded ? "框选模式" : "需安装布局模型"}
                       />
@@ -1781,12 +2053,29 @@ function App() {
                       </div>
                       {/* PDF Text Layer — visible in text selection mode */}
                       {selectMode === "text" && (
-                        <div
-                          ref={textLayerRef}
-                          className="pdf-text-layer"
-                          style={{ width: zoom.displaySize.width, height: zoom.displaySize.height }}
-                          onMouseUp={handlePdfTextSelection}
-                        />
+                        <>
+                          <div
+                            ref={textLayerRef}
+                            className="pdf-text-layer"
+                            style={{
+                              width: zoom.displaySize.width,
+                              height: zoom.displaySize.height,
+                              pointerEvents: annotations.annotationMode ? "none" : "auto",
+                            }}
+                            onPointerDown={handlePdfPointerDown}
+                            onPointerMove={handlePdfPointerMove}
+                            onPointerUp={handlePdfPointerUp}
+                          />
+                          <div
+                            ref={pdfSelectionOverlayRef}
+                            className="pdf-selection-overlay"
+                            style={{
+                              width: zoom.displaySize.width,
+                              height: zoom.displaySize.height,
+                              pointerEvents: "none",
+                            }}
+                          />
+                        </>
                       )}
                       {/* Annotation canvas overlay — sits above bboxes */}
                       <canvas
