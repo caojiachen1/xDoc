@@ -79,6 +79,12 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     downloading: false, progress: 0, message: "", status: "idle",
   });
 
+  // Grobid assets
+  const [grobidAssetsOk, setGrobidAssetsOk] = useState<boolean | null>(null);
+  const [grobidDownload, setGrobidDownload] = useState<ModelDownloadState>({
+    downloading: false, progress: 0, message: "", status: "idle",
+  });
+
   // OCR settings
   const [ocrEnabled, setOcrEnabled] = useState(
     localStorage.getItem("xdoc.settings.ocr.enabled") === "true"
@@ -150,6 +156,9 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
               checkOcrModelExists();
               invoke<OcrModelInfo[]>("list_ocr_models").then(setOcrModelList).catch(() => {});
             }
+          } else if (p.model_type === "grobid") {
+            setGrobidDownload(state);
+            if (p.status === "completed") checkGrobidAssets();
           }
         },
       );
@@ -174,9 +183,18 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
 
   useEffect(() => { checkOcrModelExists(); }, [checkOcrModelExists]);
 
+  const checkGrobidAssets = useCallback(async () => {
+    try {
+      setGrobidAssetsOk(await invoke<boolean>("check_grobid_assets_exists"));
+    } catch { setGrobidAssetsOk(false); }
+  }, []);
+
+  useEffect(() => { checkGrobidAssets(); }, [checkGrobidAssets]);
+
   const runChecks = async () => {
     setChecking(true);
     await checkLayoutModel(DEFAULT_LAYOUT_MODEL_PATH);
+    await checkGrobidAssets();
     setChecking(false);
   };
 
@@ -189,6 +207,15 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
       localStorage.setItem("xdoc.settings.modelPath", DEFAULT_LAYOUT_MODEL_PATH);
     } catch (e) {
       setLayoutDownload({ downloading: false, progress: 0, message: String(e), status: "error" });
+    }
+  };
+
+  const downloadGrobidAssets = async () => {
+    setGrobidDownload({ downloading: true, progress: 0, message: "准备下载...", status: "downloading" });
+    try {
+      await invoke<string>("download_grobid_assets");
+    } catch (e) {
+      setGrobidDownload({ downloading: false, progress: 0, message: String(e), status: "error" });
     }
   };
 
@@ -446,6 +473,58 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
                   )}
                 </div>
               )}
+
+              <Divider />
+
+              {/* Grobid Assets */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {checking || grobidDownload.downloading ? (
+                      <Spinner size="tiny" />
+                    ) : grobidAssetsOk ? (
+                      <CheckmarkCircle24Regular primaryFill="green" />
+                    ) : (
+                      <Info24Regular primaryFill="gray" />
+                    )}
+                    <Text>Grobid 引擎资源 <Text size={100} style={{ color: "gray" }}>(可选)</Text></Text>
+                  </div>
+                  {!grobidAssetsOk && !checking && !grobidDownload.downloading && (
+                    <Button
+                      size="small"
+                      icon={<ArrowDownload24Regular />}
+                      onClick={downloadGrobidAssets}
+                    >
+                      下载
+                    </Button>
+                  )}
+                </div>
+                <Text size={100} style={{ color: "gray" }}>
+                  学术论文参考文献解析引擎所需资源文件（grobid_assets + lib DLL）
+                </Text>
+                {grobidDownload.downloading && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <ProgressBar
+                      value={grobidDownload.progress / 100}
+                      color={grobidDownload.status === "error" ? "error" : "brand"}
+                    />
+                    <Text size={100} style={{ color: grobidDownload.status === "error" ? "red" : "gray" }}>
+                      {grobidDownload.message}
+                    </Text>
+                  </div>
+                )}
+                {!grobidAssetsOk && !checking && !grobidDownload.downloading && grobidDownload.status === "error" && (
+                  <Text size={100} style={{ color: "red" }}>
+                    下载失败: {grobidDownload.message}
+                  </Text>
+                )}
+              </div>
             </div>
           </div>
 

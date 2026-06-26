@@ -191,6 +191,9 @@ pub fn run() {
             commands::grobid::grobid_batch_parse,
             commands::grobid::grobid_save_ref_enrichment,
             commands::grobid::grobid_clear_cache,
+            // Grobid assets
+            commands::assets::check_grobid_assets_exists,
+            commands::assets::download_grobid_assets,
             // Miscellaneous
             commands::misc::check_git,
             commands::misc::check_model_exists,

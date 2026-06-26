@@ -669,6 +669,27 @@ pub(crate) async fn grobid_ensure_ready(
         .map_err(|e| format!("spawn_blocking failed: {e}"))?;
     }
 
+    /// Recursively search for a directory containing `runtime` up to `max_depth` levels.
+    /// Returns the path that directly contains `runtime`, or None.
+    fn find_runtime_parent(base: &Path, max_depth: usize) -> Option<PathBuf> {
+        if max_depth == 0 {
+            return None;
+        }
+        if base.join("runtime").exists() {
+            return Some(base.to_path_buf());
+        }
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    if let Some(found) = find_runtime_parent(&entry.path(), max_depth - 1) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     let dev_path = PathBuf::from(env!("GROBID_RS_ASSETS_PATH"));
     let base_path = if dev_path.join("runtime").exists() {
         dev_path
@@ -681,6 +702,12 @@ pub(crate) async fn grobid_ensure_ready(
             .iter()
             .map(|name| exe_dir.join(name))
             .find(|p| p.join("runtime").exists())
+            .or_else(|| {
+                // If not found directly, search recursively inside each candidate
+                ["grobid-assets", "grobid_assets", "grobid-0.9.1"]
+                    .iter()
+                    .find_map(|name| find_runtime_parent(&exe_dir.join(name), 3))
+            })
             .unwrap_or(dev_path)
     };
     let status_arc = state.status.clone();

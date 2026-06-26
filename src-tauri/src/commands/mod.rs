@@ -9,6 +9,7 @@
 //!   grobid   — Grobid academic paper parsing engine
 //!   misc     — Miscellaneous utilities (git check, file ops, sentence splitting)
 
+pub(crate) mod assets;
 pub(crate) mod grobid;
 pub(crate) mod misc;
 pub(crate) mod model;
