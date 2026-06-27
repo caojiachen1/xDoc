@@ -51,7 +51,6 @@ import {
   HOME_TAB_ID,
   ERASER_CURSOR,
   isVisualBox,
-  mergeTextLayerSpans,
   actionLabels,
   type LayoutBox,
   type TextSegment,
@@ -264,25 +263,26 @@ function App() {
     }
 
     // ── Build item data: match DOM spans (visual position) to textContent items (text) ──
-    type ItemD = { str: string; xPdf: number; yPdf: number; wPdf: number; hPdf: number; yTopPdf: number };
+    type ItemD = { str: string; xPdf: number; yPdf: number; wPdf: number; hPdf: number; yTopPdf: number; spanEl: HTMLSpanElement | null };
     const allItems: ItemD[] = [];
 
     // Read rendered span positions from DOM
     const container = textLayerRef.current;
     const containerRect = container?.getBoundingClientRect();
-    const domSpans: Array<{ xPdf: number; yPdf: number; wPdf: number; hPdf: number; textContent: string }> = [];
+    const domSpans: Array<{ el: HTMLSpanElement; xPdf: number; yPdf: number; wPdf: number; hPdf: number }> = [];
 
     if (container && containerRect) {
       const spans = container.querySelectorAll(
         ":scope > span:not(.markedContent), :scope > .markedContent > span:not(.markedContent)"
       );
       spans.forEach((span) => {
-        const rect = (span as HTMLElement).getBoundingClientRect();
+        const spanEl = span as HTMLSpanElement;
+        const rect = spanEl.getBoundingClientRect();
         const xPdf = (rect.left - containerRect.left) / scale;
         const yPdf = (rect.top - containerRect.top) / scale;
         const wPdf = rect.width / scale;
         const hPdf = rect.height / scale;
-        if (wPdf > 0 && hPdf > 0) domSpans.push({ xPdf, yPdf, wPdf, hPdf, textContent: (span as HTMLElement).textContent || "" });
+        if (wPdf > 0 && hPdf > 0) domSpans.push({ el: spanEl, xPdf, yPdf, wPdf, hPdf });
       });
     }
 
@@ -312,17 +312,18 @@ function App() {
       if (bestSpan && bestDist < fontSize * 2) {
         // Use DOM span's visual position (accurate) with item's text (correct)
         allItems.push({
-            str: bestSpan.textContent || item.str,
+          str: item.str,
           xPdf: bestSpan.xPdf,
           yPdf: bestSpan.yPdf,
           wPdf: bestSpan.wPdf,
           hPdf: bestSpan.hPdf,
           yTopPdf: bestSpan.yPdf + bestSpan.hPdf,
+          spanEl: bestSpan.el,
         });
       } else {
         // Fallback: compute from transform
         const yPdf = pageH - itemY - fontSize;
-        allItems.push({ str: item.str, xPdf: itemX, yPdf, wPdf, hPdf: fontSize, yTopPdf: yPdf + fontSize });
+        allItems.push({ str: item.str, xPdf: itemX, yPdf, wPdf, hPdf: fontSize, yTopPdf: yPdf + fontSize, spanEl: null });
       }
     }
 
@@ -378,22 +379,54 @@ function App() {
       const chars = it.str.split("");
       const n = chars.length;
       if (n === 0) continue;
-      const charW = it.wPdf / n;
+
+      const charRects: Array<{ left: number; right: number }> = [];
+      if (it.spanEl && it.spanEl.firstChild && it.spanEl.firstChild.nodeType === Node.TEXT_NODE) {
+        const textNode = it.spanEl.firstChild as Text;
+        const range = document.createRange();
+        for (let i = 0; i < chars.length; i++) {
+          try {
+            range.setStart(textNode, i);
+            range.setEnd(textNode, i + 1);
+            const rect = range.getBoundingClientRect();
+            if (rect.width > 0) {
+              charRects.push({
+                left: (rect.left - containerRect!.left) / scale,
+                right: (rect.right - containerRect!.left) / scale,
+              });
+            } else {
+              const fallbackLeft = it.xPdf + (it.wPdf / n) * i;
+              const fallbackRight = fallbackLeft + (it.wPdf / n);
+              charRects.push({ left: fallbackLeft, right: fallbackRight });
+            }
+          } catch {
+            const fallbackLeft = it.xPdf + (it.wPdf / n) * i;
+            const fallbackRight = fallbackLeft + (it.wPdf / n);
+            charRects.push({ left: fallbackLeft, right: fallbackRight });
+          }
+        }
+        try { range.detach(); } catch { /* noop */ }
+      }
+
+      const charLeft = (idx: number) => charRects[idx]?.left ?? (it.xPdf + (it.wPdf / n) * idx);
+      const charRight = (idx: number) => charRects[idx]?.right ?? (it.xPdf + (it.wPdf / n) * (idx + 1));
+      const avgCharW = it.wPdf / n;
 
       let firstIdx = -1;
       let lastIdx = -1;
       for (let i = 0; i < n; i++) {
-        const cLeft = it.xPdf + i * charW;
-        const cRight = cLeft + charW;
-        if (cRight > lMin && cLeft < lMax) {
+        const cLeft = charLeft(i);
+        const cRight = charRight(i);
+        const startTol = i === 0 ? Math.min(2, avgCharW * 0.35) : 0;
+        if (cRight > lMin - startTol && cLeft < lMax) {
           if (firstIdx === -1) firstIdx = i;
           lastIdx = i;
         }
       }
       if (firstIdx === -1) continue;
 
-      const hl = it.xPdf + firstIdx * charW;
-      const hr = it.xPdf + (lastIdx + 1) * charW;
+      const hl = charLeft(firstIdx);
+      const hr = charRight(lastIdx);
       const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
       if (hStr.length === 0) continue;
 
@@ -401,6 +434,9 @@ function App() {
       const prev = matched[matched.length - 1];
       const sameLine = prev && Math.abs(prev.yPdf - it.yPdf) < Math.max(prev.hPdf, it.hPdf) * 0.6;
       if (prev && sameLine) {
+        const gap = hl * scale - (prev.x + prev.w);
+        if (gap > 3) prev.str += " ";
+        
         prev.w = hr * scale - prev.x;
         prev.str += hStr;
         prev.yPdf = Math.min(prev.yPdf, it.yPdf);
@@ -523,7 +559,7 @@ function App() {
       }
       text += matched[i].str;
     }
-    pdfSelectedTextRef.current = text.trim();
+    pdfSelectedTextRef.current = text;
 
     const overlay = pdfSelectionOverlayRef.current;
     if (overlay) {
@@ -958,7 +994,6 @@ function App() {
         });
         textLayerInstanceRef.current = textLayer;
         await textLayer.render();
-        mergeTextLayerSpans(container);
         if (!cancelled) {
           pdfTextItemsRef.current = textContent.items;
           pdfViewportScaleRef.current = scale;
@@ -1090,8 +1125,8 @@ function App() {
     if (selectMode !== "text" || !isPdfSelected || annotations.annotationMode) return;
 
     const handleCopy = (e: ClipboardEvent) => {
-      const selectedText = pdfSelectedTextRef.current.trim();
-      if (!selectedText) return;
+      const selectedText = pdfSelectedTextRef.current;
+      if (!selectedText.trim()) return;
 
       const target = e.target as HTMLElement | null;
       if (target && !target.closest(".pdf-text-layer")) return;
