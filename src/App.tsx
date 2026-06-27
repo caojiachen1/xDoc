@@ -583,7 +583,7 @@ function App() {
       const menuW = 260;
       const menuH = 40;
       let menuX = rectX + rectW / 2 - menuW / 2;
-      let menuY = rectY - menuH - 4;
+      let menuY = rectY - menuH - 12;
 
       menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
       if (menuY < 4) menuY = rectY + rectH + 4;
