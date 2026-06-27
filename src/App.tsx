@@ -354,14 +354,14 @@ function App() {
         prev.yPdf = Math.min(prev.yPdf, it.yPdf);
         prev.hPdf = Math.max(prev.hPdf, it.hPdf);
         prev.y = prev.yPdf * scale;
-        prev.h = prev.hPdf * scale;
+        prev.h = prev.hPdf * scale + 3;
       } else {
         matched.push({
           str: hStr,
           x: hl * scale,
           y: it.yPdf * scale,
           w: (hr - hl) * scale,
-          h: it.hPdf * scale,
+          h: it.hPdf * scale + 3,
           yPdf: it.yPdf,
           hPdf: it.hPdf,
         });
