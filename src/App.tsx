@@ -96,6 +96,7 @@ function App() {
   const [showRawOcr, setShowRawOcr] = useState(false);
   const [dragMode, setDragMode] = useState<DragMode>("select");
   const [selectMode, setSelectMode] = useState<SelectMode>("box");
+  const [textModeSelectedText, setTextModeSelectedText] = useState("");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [showReadingReport, setShowReadingReport] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
@@ -467,6 +468,7 @@ function App() {
 
     const pos = pdfToSelectionCoords(e);
     pdfSelectedTextRef.current = "";
+    setTextModeSelectedText("");
     pdfSelectionStartRef.current = pos;
     pdfDragStartXRef.current = pos.x; // Remember exact drag start X for first line
     pdfDragStartYRef.current = pos.y; // Remember exact drag start Y for first line
@@ -519,6 +521,23 @@ function App() {
         overlay.appendChild(div);
       }
     }
+
+    // Build text in real-time for text mode paragraph pane
+    let text = "";
+    for (let i = 0; i < matched.length; i++) {
+      if (i > 0) {
+        const prevEnd = matched[i - 1].y + matched[i - 1].h;
+        const currStart = matched[i].y;
+        if (currStart > prevEnd + 2) {
+          text += "\n";
+        } else {
+          const gap = matched[i].x - (matched[i - 1].x + matched[i - 1].w);
+          if (gap > 3) text += " ";
+        }
+      }
+      text += matched[i].str;
+    }
+    setTextModeSelectedText(text);
   }, [pdfToSelectionCoords, hitTestTextItems]);
 
   const handlePdfPointerUp = useCallback((e: React.PointerEvent) => {
@@ -560,6 +579,7 @@ function App() {
       text += matched[i].str;
     }
     pdfSelectedTextRef.current = text;
+    setTextModeSelectedText(text);
 
     const overlay = pdfSelectionOverlayRef.current;
     if (overlay) {
@@ -601,6 +621,7 @@ function App() {
     pdfSelectionStartRef.current = null;
     pdfSelectingRef.current = false;
     pdfSelectedTextRef.current = "";
+    setTextModeSelectedText("");
     if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
   }, []);
 
@@ -1282,6 +1303,9 @@ function App() {
 
   // ── getPaneFullText — gather all visible text for batch AI ─────────────────
   const getPaneFullText = (): string => {
+    if (selectMode === "text") {
+      return textModeSelectedText;
+    }
     let parts: string[] = [];
     if (selectedParagraph?.text && ocr.splitParagraphWords.length > 0) {
       parts.push(ocr.splitParagraphWords.join(""));
@@ -2324,16 +2348,14 @@ function App() {
             <div className="resizer-v" onMouseDown={zoom.handleMouseDownV} />
 
             <div className="right-pane" ref={aiChat.rightPaneRef}>
-              {selectMode === "box" && (
-                <>
-              <div className="text-pane" onMouseUp={handleTextSelection} style={{
+              <div className="text-pane" onMouseUp={selectMode === "box" ? handleTextSelection : undefined} style={{
                 height: zoom.topPaneHeight,
                 flex: typeof zoom.topPaneHeight === "string" ? `0 0 ${zoom.topPaneHeight}` : "none",
                 fontFamily: settings.textFontFamily
               }}>
                 {/* ── Panel header ── */}
                 <div className="pane-header">
-                  <h3 className="pane-title">选取段落及分词区域</h3>
+                  <h3 className="pane-title">{selectMode === "text" ? "选取文字" : "选取段落及分词区域"}</h3>
                   <div className="pane-header-actions">
                     <button
                       className="font-size-btn"
@@ -2347,7 +2369,21 @@ function App() {
                       title="放大字号"
                     >A+</button>
                   </div>
-                  {selectedFigure ? (
+                  {selectMode === "text" ? (
+                    textModeSelectedText.trim() ? (
+                      <>
+                        <button className="batch-ai-btn" onClick={() => handleBatchAiAction("解读")}>
+                          <Bot size={13} /> 解读
+                        </button>
+                        <button className="batch-ai-btn" onClick={() => handleBatchAiAction("翻译")}>
+                          <Languages size={13} /> 翻译
+                        </button>
+                        <button className="batch-ai-btn" onClick={() => handleBatchAiAction("摘要")}>
+                          <FileText size={13} /> 摘要
+                        </button>
+                      </>
+                    ) : null
+                  ) : selectedFigure ? (
                     <button className="batch-ai-btn" onClick={aiChat.handleImageAiAction}>
                       <Bot size={13} /> 解读图片
                     </button>
@@ -2368,110 +2404,127 @@ function App() {
 
                 {/* ── Content area ── */}
                 <div className="pane-body">
-                  {/* ── Figure image display ── */}
-                  {selectedFigure ? (
-                    <div className="pane-section-card">
-                      <div className="pane-section-label">
-                        {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
-                      </div>
-                      {figureImageDataUrl ? (
-                        <img
-                          src={figureImageDataUrl}
-                          alt="Selected figure"
-                          className="pane-figure-img"
-                        />
-                      ) : (
-                        <div className="pane-placeholder">加载图片中...</div>
-                      )}
-                    </div>
-                  ) : selectedParagraph ? (
-                    <>
-                      {/* PDF-extracted text with word segmentation */}
-                      {settings.pdfTextExtractionEnabled && (
-                        <div className="pane-section-card">
-                          <div className="pane-section-label">PDF 原文</div>
-                          <div className="ocr-latex-content pane-text-content" style={{ fontSize: settings.textFontSize }}>
-                            {ocr.splitParagraphWords.map((word, idx) => (
-                              <span
-                                key={idx}
-                                className="word-span"
-                                onClick={(e) => {
-                                  if (window.getSelection()?.toString() !== "") return;
-                                  showFloatingMenu(word, e.clientX, e.clientY);
-                                }}
-                              >
-                                {word}
-                              </span>
-                            ))}
-                          </div>
+                  {selectMode === "text" ? (
+                    /* ── Text selection mode: show selected text ── */
+                    textModeSelectedText.trim() ? (
+                      <div className="pane-section-card">
+                        <div className="pane-section-label">选中文字</div>
+                        <div className="pane-text-content" style={{ fontSize: settings.textFontSize, whiteSpace: "pre-wrap" }}>
+                          {textModeSelectedText}
                         </div>
-                      )}
-
-                      {/* OCR result with LaTeX rendering */}
-                      {settings.ocrEnabled && (
+                      </div>
+                    ) : (
+                      <div className="pane-empty">
+                        <FileText size={24} style={{ opacity: 0.25 }} />
+                        <span>在左侧 PDF 中拖拽选择文字</span>
+                      </div>
+                    )
+                  ) : (
+                    /* ── Box selection mode: show paragraph/figure ── */
+                    <>
+                      {selectedFigure ? (
                         <div className="pane-section-card">
-                          <div className="pane-section-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                            <span>OCR 识别结果</span>
-                            {ocr.ocrText && (
-                              <div style={{ display: "flex", gap: "4px" }}>
-                                <button
-                                  className="ref-reparse-btn"
-                                  onClick={() => setShowRawOcr(!showRawOcr)}
-                                  title={showRawOcr ? "显示解析后的格式" : "显示原始文本"}
-                                  style={{ padding: "1px 5px", fontSize: 11 }}
-                                >
-                                  {showRawOcr ? "格式" : "源文本"}
-                                </button>
-                                <button
-                                  className="ref-reparse-btn"
-                                  onClick={ocr.refreshOcr}
-                                  disabled={ocr.ocrLoading}
-                                  title="忽略缓存，重新识别当前区域"
-                                  style={{ padding: "1px 5px", fontSize: 11 }}
-                                >
-                                  <RefreshCw size={11} className={ocr.ocrLoading ? "spin" : ""} />
-                                  刷新
-                                </button>
-                              </div>
-                            )}
+                          <div className="pane-section-label">
+                            {CLASSES[selectedFigure.cls_id] ?? "figure"} #{selectedFigure.read_order}
                           </div>
-                          {ocr.ocrLoading ? (
-                            <div className="pane-placeholder">
-                              <Spinner size="tiny" />
-                              <span>OCR 识别中...</span>
-                            </div>
-                          ) : ocr.ocrError ? (
-                            <div className="pane-placeholder pane-error">{ocr.ocrError}</div>
-                          ) : ocr.ocrText ? (
-                            <div
-                              className={showRawOcr ? "pane-text-content" : "ocr-latex-content pane-text-content"}
-                              style={{ fontSize: settings.textFontSize, whiteSpace: showRawOcr ? "pre-wrap" : undefined }}
-                            >
-                              {showRawOcr
-                                ? ocr.ocrText
-                                : renderOcrNodes(ocr.splitOcrText)
-                              }
-                            </div>
+                          {figureImageDataUrl ? (
+                            <img
+                              src={figureImageDataUrl}
+                              alt="Selected figure"
+                              className="pane-figure-img"
+                            />
                           ) : (
-                            <div className="pane-placeholder">点击段落以进行 OCR 识别</div>
+                            <div className="pane-placeholder">加载图片中...</div>
                           )}
+                        </div>
+                      ) : selectedParagraph ? (
+                        <>
+                          {/* PDF-extracted text with word segmentation */}
+                          {settings.pdfTextExtractionEnabled && (
+                            <div className="pane-section-card">
+                              <div className="pane-section-label">PDF 原文</div>
+                              <div className="ocr-latex-content pane-text-content" style={{ fontSize: settings.textFontSize }}>
+                                {ocr.splitParagraphWords.map((word, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="word-span"
+                                    onClick={(e) => {
+                                      if (window.getSelection()?.toString() !== "") return;
+                                      showFloatingMenu(word, e.clientX, e.clientY);
+                                    }}
+                                  >
+                                    {word}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
+                          {/* OCR result with LaTeX rendering */}
+                          {settings.ocrEnabled && (
+                            <div className="pane-section-card">
+                              <div className="pane-section-label" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                                <span>OCR 识别结果</span>
+                                {ocr.ocrText && (
+                                  <div style={{ display: "flex", gap: "4px" }}>
+                                    <button
+                                      className="ref-reparse-btn"
+                                      onClick={() => setShowRawOcr(!showRawOcr)}
+                                      title={showRawOcr ? "显示解析后的格式" : "显示原始文本"}
+                                      style={{ padding: "1px 5px", fontSize: 11 }}
+                                    >
+                                      {showRawOcr ? "格式" : "源文本"}
+                                    </button>
+                                    <button
+                                      className="ref-reparse-btn"
+                                      onClick={ocr.refreshOcr}
+                                      disabled={ocr.ocrLoading}
+                                      title="忽略缓存，重新识别当前区域"
+                                      style={{ padding: "1px 5px", fontSize: 11 }}
+                                    >
+                                      <RefreshCw size={11} className={ocr.ocrLoading ? "spin" : ""} />
+                                      刷新
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                              {ocr.ocrLoading ? (
+                                <div className="pane-placeholder">
+                                  <Spinner size="tiny" />
+                                  <span>OCR 识别中...</span>
+                                </div>
+                              ) : ocr.ocrError ? (
+                                <div className="pane-placeholder pane-error">{ocr.ocrError}</div>
+                              ) : ocr.ocrText ? (
+                                <div
+                                  className={showRawOcr ? "pane-text-content" : "ocr-latex-content pane-text-content"}
+                                  style={{ fontSize: settings.textFontSize, whiteSpace: showRawOcr ? "pre-wrap" : undefined }}
+                                >
+                                  {showRawOcr
+                                    ? ocr.ocrText
+                                    : renderOcrNodes(ocr.splitOcrText)
+                                  }
+                                </div>
+                              ) : (
+                                <div className="pane-placeholder">点击段落以进行 OCR 识别</div>
+                              )}
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div className="pane-empty">
+                          <FileText size={24} style={{ opacity: 0.25 }} />
+                          <span>请在左侧预览中点击选中需要阅读的段落块或图片区域</span>
                         </div>
                       )}
                     </>
-                  ) : (
-                    <div className="pane-empty">
-                      <FileText size={24} style={{ opacity: 0.25 }} />
-                      <span>请在左侧预览中点击选中需要阅读的段落块或图片区域</span>
-                    </div>
                   )}
                 </div>
               </div>
 
               <div className="resizer-h" onMouseDown={zoom.handleMouseDownH} />
-                </>
-              )}
 
-              <div className="ai-pane" style={selectMode === "text" ? { flex: 1, fontFamily: settings.aiFontFamily } : { fontFamily: settings.aiFontFamily }}>
+              <div className="ai-pane" style={{ fontFamily: settings.aiFontFamily }}>
                 {/* ── Panel header ── */}
                 <div className="pane-header">
                   <h3 className="pane-title">{aiChat.aiAction || "AI 解读"}</h3>
