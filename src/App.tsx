@@ -275,7 +275,23 @@ function App() {
     }
 
     // ── Character-level selection ──
-    const matched: Array<{ str: string; x: number; y: number; w: number; h: number }> = [];
+    // Each text item → one highlight. Merge adjacent on same line.
+
+    // Find anchor items (closest to drag start/end) for first/last line detection
+    let anchorStartY = rawStartY;
+    let anchorStartH = avgH;
+    let bestStartDist = Infinity;
+    let anchorEndY = rawEndY;
+    let anchorEndH = avgH;
+    let bestEndDist = Infinity;
+    for (const it of allItems) {
+      const d1 = Math.abs(it.yPdf + it.hPdf / 2 - rawStartY);
+      const d2 = Math.abs(it.yPdf + it.hPdf / 2 - rawEndY);
+      if (d1 < bestStartDist) { bestStartDist = d1; anchorStartY = it.yPdf; anchorStartH = it.hPdf; }
+      if (d2 < bestEndDist) { bestEndDist = d2; anchorEndY = it.yPdf; anchorEndH = it.hPdf; }
+    }
+
+    const matched: Array<{ str: string; x: number; y: number; w: number; h: number; yPdf: number; hPdf: number }> = [];
 
     for (const it of allItems) {
       if (it.yTopPdf < selTop || it.yPdf > selBottom) continue;
@@ -287,36 +303,26 @@ function App() {
         lineLeft = Math.min(rawStartX, rawEndX);
         lineRight = Math.max(rawStartX, rawEndX);
       } else {
-        // Use item center Y for comparison, with tolerance = line height.
-        // Items closer to drag start are "first line", closer to drag end are "last line".
-        const itCenter = it.yPdf + it.hPdf / 2;
-        const distToStart = Math.abs(itCenter - rawStartY);
-        const distToEnd = Math.abs(itCenter - rawEndY);
-        const onFirstLine = distToStart < it.hPdf && distToStart <= distToEnd;
-        const onLastLine = distToEnd < it.hPdf && distToEnd < distToStart;
+        // Compare item Y to fixed anchor Y (not rawStartY which can fall between lines)
+        const onFirstLine = Math.abs(it.yPdf - anchorStartY) < anchorStartH * 0.3;
+        const onLastLine = Math.abs(it.yPdf - anchorEndY) < anchorEndH * 0.3;
 
         if (onFirstLine && !onLastLine) {
-          // First line: from drag start X → block right
           lineLeft = rawStartX;
           lineRight = blockRight;
         } else if (onLastLine) {
-          // Last line: from block left → current mouse X
           lineLeft = blockLeft;
           lineRight = rawEndX;
         } else {
-          // Intermediate: full block width
           lineLeft = blockLeft;
           lineRight = blockRight;
         }
       }
 
-      // Normalize (lineLeft may be > lineRight if dragging left)
       const lMin = Math.min(lineLeft, lineRight);
       const lMax = Math.max(lineLeft, lineRight);
-
       if (it.xPdf + it.wPdf < lMin || it.xPdf > lMax) continue;
 
-      // Character-level
       const chars = it.str.split("");
       const n = chars.length;
       if (n === 0) continue;
@@ -337,18 +343,34 @@ function App() {
       const hl = it.xPdf + firstIdx * charW;
       const hr = it.xPdf + (lastIdx + 1) * charW;
       const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
+      if (!hStr.trim()) continue;
 
+      // Try to merge with previous highlight on the same visual line
       const prev = matched[matched.length - 1];
+      const sameLine = prev && Math.abs(prev.yPdf - it.yPdf) < Math.max(prev.hPdf, it.hPdf) * 0.6;
       const gap = hl * scale - (prev ? prev.x + prev.w : 0);
-      if (prev && gap < charW * scale * 1.5 && Math.abs(prev.y / scale - it.yPdf) < it.hPdf * 0.5) {
+      if (prev && sameLine && gap < Math.max(prev.hPdf, it.hPdf) * scale * 0.5) {
         prev.w = hr * scale - prev.x;
         prev.str += hStr;
+        prev.yPdf = Math.min(prev.yPdf, it.yPdf);
+        prev.hPdf = Math.max(prev.hPdf, it.hPdf);
+        prev.y = prev.yPdf * scale;
+        prev.h = prev.hPdf * scale;
       } else {
-        matched.push({ str: hStr, x: hl * scale, y: it.yPdf * scale, w: (hr - hl) * scale, h: it.hPdf * scale });
+        matched.push({
+          str: hStr,
+          x: hl * scale,
+          y: it.yPdf * scale,
+          w: (hr - hl) * scale,
+          h: it.hPdf * scale,
+          yPdf: it.yPdf,
+          hPdf: it.hPdf,
+        });
       }
     }
 
-    return matched;
+    // Strip internal fields from output
+    return matched.map(m => ({ str: m.str, x: m.x, y: m.y, w: m.w, h: m.h }));
   }, [zoom.displaySize, zoom.scale]);
 
   // ── PDF custom pointer event handlers ────────────────────────────────────
