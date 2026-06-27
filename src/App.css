@@ -212,14 +212,19 @@
 
 .pane-title {
   margin: 0;
+  padding: 0;
   font-size: 12px;
-  font-weight: 600;
-  color: rgba(255, 255, 255, 0.9);
+  font-weight: 400;
+  font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  color: #d8d8d8;
   letter-spacing: 0.3px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 5px;
+  height: 22px;
+  line-height: 22px;
+  box-sizing: border-box;
 }
 
 .pane-header-actions {
@@ -372,6 +377,10 @@
   margin-bottom: 12px;
   font-size: 14px;
   color: rgba(255, 255, 255, 0.9);
+}
+
+.ai-pane .pane-title {
+  margin-bottom: 0;
 }
 
 .word-span {
