@@ -345,11 +345,10 @@ function App() {
       const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
       if (!hStr.trim()) continue;
 
-      // Try to merge with previous highlight on the same visual line
+      // Merge with previous highlight if on the same visual line (no gap limit)
       const prev = matched[matched.length - 1];
       const sameLine = prev && Math.abs(prev.yPdf - it.yPdf) < Math.max(prev.hPdf, it.hPdf) * 0.6;
-      const gap = hl * scale - (prev ? prev.x + prev.w : 0);
-      if (prev && sameLine && gap < Math.max(prev.hPdf, it.hPdf) * scale * 0.5) {
+      if (prev && sameLine) {
         prev.w = hr * scale - prev.x;
         prev.str += hStr;
         prev.yPdf = Math.min(prev.yPdf, it.yPdf);
