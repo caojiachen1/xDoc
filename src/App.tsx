@@ -51,6 +51,7 @@ import {
   HOME_TAB_ID,
   ERASER_CURSOR,
   isVisualBox,
+  mergeTextLayerSpans,
   actionLabels,
   type LayoutBox,
   type TextSegment,
@@ -114,9 +115,11 @@ function App() {
   const pdfSelectionStartRef = useRef<{ x: number; y: number } | null>(null);
   const pdfDragStartXRef = useRef(0); // Original drag start X (for first line left boundary)
   const pdfDragStartYRef = useRef(0); // Original drag start Y (for first line identification)
+  const pdfSelectedTextRef = useRef("");
   const pdfSelectionOverlayRef = useRef<HTMLDivElement>(null);
   const pdfViewportScaleRef = useRef(1);
   const pdfPageHRef = useRef(0);
+  const pdfViewportRef = useRef<any>(null);
   const layoutBoxesRef = useRef<LayoutBox[]>([]);
   const DRAG_THRESHOLD = 3;
 
@@ -260,18 +263,67 @@ function App() {
       }
     }
 
-    // ── Build item data ──
+    // ── Build item data: match DOM spans (visual position) to textContent items (text) ──
     type ItemD = { str: string; xPdf: number; yPdf: number; wPdf: number; hPdf: number; yTopPdf: number };
     const allItems: ItemD[] = [];
+
+    // Read rendered span positions from DOM
+    const container = textLayerRef.current;
+    const containerRect = container?.getBoundingClientRect();
+    const domSpans: Array<{ xPdf: number; yPdf: number; wPdf: number; hPdf: number; textContent: string }> = [];
+
+    if (container && containerRect) {
+      const spans = container.querySelectorAll(
+        ":scope > span:not(.markedContent), :scope > .markedContent > span:not(.markedContent)"
+      );
+      spans.forEach((span) => {
+        const rect = (span as HTMLElement).getBoundingClientRect();
+        const xPdf = (rect.left - containerRect.left) / scale;
+        const yPdf = (rect.top - containerRect.top) / scale;
+        const wPdf = rect.width / scale;
+        const hPdf = rect.height / scale;
+        if (wPdf > 0 && hPdf > 0) domSpans.push({ xPdf, yPdf, wPdf, hPdf, textContent: (span as HTMLElement).textContent || "" });
+      });
+    }
+
+    // Match each textContent item to the closest DOM span by position
     for (const item of items) {
       if (!item.str || !item.transform) continue;
       const tx = item.transform;
-      const xPdf = tx[4];
-      const pdfY = tx[5];
+      const itemX = tx[4];
+      const itemY = tx[5];
       const wPdf = item.width || 0;
-      const hPdf = item.height || Math.abs(tx[3]) || Math.abs(tx[0]) || 10;
-      const yPdf = pageH - pdfY - hPdf;
-      allItems.push({ str: item.str, xPdf, yPdf, wPdf, hPdf, yTopPdf: yPdf + hPdf });
+      const fontSize = Math.abs(tx[3]) || item.height || 10;
+      const itemYtop = pageH - itemY - fontSize;
+
+      // Find closest DOM span by center distance
+      let bestSpan: typeof domSpans[0] | null = null;
+      let bestDist = Infinity;
+      const itemCX = itemX + wPdf / 2;
+      const itemCY = itemYtop + fontSize / 2;
+
+      for (const sp of domSpans) {
+        const spCX = sp.xPdf + sp.wPdf / 2;
+        const spCY = sp.yPdf + sp.hPdf / 2;
+        const dist = Math.hypot(itemCX - spCX, itemCY - spCY);
+        if (dist < bestDist) { bestDist = dist; bestSpan = sp; }
+      }
+
+      if (bestSpan && bestDist < fontSize * 2) {
+        // Use DOM span's visual position (accurate) with item's text (correct)
+        allItems.push({
+            str: bestSpan.textContent || item.str,
+          xPdf: bestSpan.xPdf,
+          yPdf: bestSpan.yPdf,
+          wPdf: bestSpan.wPdf,
+          hPdf: bestSpan.hPdf,
+          yTopPdf: bestSpan.yPdf + bestSpan.hPdf,
+        });
+      } else {
+        // Fallback: compute from transform
+        const yPdf = pageH - itemY - fontSize;
+        allItems.push({ str: item.str, xPdf: itemX, yPdf, wPdf, hPdf: fontSize, yTopPdf: yPdf + fontSize });
+      }
     }
 
     // ── Character-level selection ──
@@ -343,7 +395,7 @@ function App() {
       const hl = it.xPdf + firstIdx * charW;
       const hr = it.xPdf + (lastIdx + 1) * charW;
       const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
-      if (!hStr.trim()) continue;
+      if (hStr.length === 0) continue;
 
       // Merge with previous highlight if on the same visual line (no gap limit)
       const prev = matched[matched.length - 1];
@@ -378,6 +430,7 @@ function App() {
     if (annotations.annotationMode) return;
 
     const pos = pdfToSelectionCoords(e);
+    pdfSelectedTextRef.current = "";
     pdfSelectionStartRef.current = pos;
     pdfDragStartXRef.current = pos.x; // Remember exact drag start X for first line
     pdfDragStartYRef.current = pos.y; // Remember exact drag start Y for first line
@@ -453,7 +506,24 @@ function App() {
     const finalRect = { x: rectX, y: rectY, w: rectW, h: rectH };
 
     const matched = hitTestTextItems(finalRect);
-    const text = matched.map(m => m.str).join("");
+    // Build text with proper line breaks and spacing
+    let text = "";
+    for (let i = 0; i < matched.length; i++) {
+      if (i > 0) {
+        const prevEnd = matched[i - 1].y + matched[i - 1].h;
+        const currStart = matched[i].y;
+        // Different line → newline; same line → space
+        if (currStart > prevEnd + 2) {
+          text += "\n";
+        } else {
+          // Same line: add space if there's a gap between highlights
+          const gap = matched[i].x - (matched[i - 1].x + matched[i - 1].w);
+          if (gap > 3) text += " ";
+        }
+      }
+      text += matched[i].str;
+    }
+    pdfSelectedTextRef.current = text.trim();
 
     const overlay = pdfSelectionOverlayRef.current;
     if (overlay) {
@@ -494,6 +564,7 @@ function App() {
     pdfSelectionRef.current = null;
     pdfSelectionStartRef.current = null;
     pdfSelectingRef.current = false;
+    pdfSelectedTextRef.current = "";
     if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
   }, []);
 
@@ -887,10 +958,12 @@ function App() {
         });
         textLayerInstanceRef.current = textLayer;
         await textLayer.render();
+        mergeTextLayerSpans(container);
         if (!cancelled) {
           pdfTextItemsRef.current = textContent.items;
           pdfViewportScaleRef.current = scale;
           pdfPageHRef.current = baseViewport.height;
+          pdfViewportRef.current = viewport;
         }
       } catch (e) {
         if (!cancelled) console.warn("[TextLayer] render failed:", e);
@@ -1012,6 +1085,28 @@ function App() {
       document.removeEventListener("keydown", handleKey);
     };
   }, [aiChat.pdfFloatingMenu.visible]);
+
+  useEffect(() => {
+    if (selectMode !== "text" || !isPdfSelected || annotations.annotationMode) return;
+
+    const handleCopy = (e: ClipboardEvent) => {
+      const selectedText = pdfSelectedTextRef.current.trim();
+      if (!selectedText) return;
+
+      const target = e.target as HTMLElement | null;
+      if (target && !target.closest(".pdf-text-layer")) return;
+
+      e.preventDefault();
+      if (e.clipboardData) {
+        e.clipboardData.setData("text/plain", selectedText);
+      } else if (navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(selectedText);
+      }
+    };
+
+    document.addEventListener("copy", handleCopy);
+    return () => document.removeEventListener("copy", handleCopy);
+  }, [selectMode, isPdfSelected, annotations.annotationMode]);
 
   // ── selectFigure — extracts a figure image from the preview ────────────────
   const selectFigure = async (box: LayoutBox) => {
