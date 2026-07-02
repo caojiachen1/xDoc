@@ -7,7 +7,7 @@
  *
  * UI: Fluent UI dark theme, consistent with SettingsDialog / ReadingReport.
  */
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Button,
   Input,
@@ -379,10 +379,10 @@ export default function GlobalSearchDialog({
   }, [selectedIdx]);
 
   // Paper display name
-  const paperTitle = useMemo(() => {
-    if (!currentPaper) return null;
-    return currentPaper.metadata?.title || currentPaper.name;
-  }, [currentPaper]);
+  // const paperTitle = useMemo(() => {
+  //   if (!currentPaper) return null;
+  //   return currentPaper.metadata?.title || currentPaper.name;
+  // }, [currentPaper]);
 
   if (!open) return null;
 
