@@ -1123,7 +1123,7 @@ function App() {
     if (!aiChat.pdfFloatingMenu.visible) return;
     const handleClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
-      if (!target.closest(".pdf-floating-ai-menu")) {
+      if (!target.closest(".pdf-floating-ai-menu") && !target.closest(".right-pane")) {
         aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
         clearPdfSelection();
       }
