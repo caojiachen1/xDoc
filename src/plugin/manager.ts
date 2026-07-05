@@ -207,22 +207,7 @@ class PluginManagerClass {
         }
       }
 
-      // Auto-enable all builtin plugins
-      const allPlugins = Array.from(this.plugins.entries());
-      for (const [pluginId, plugin] of allPlugins) {
-        if (plugin.isBuiltin && plugin.status === "disabled") {
-          try {
-            await this.enablePlugin(pluginId);
-          } catch (err) {
-            console.warn(
-              `[PluginManager] Failed to auto-enable builtin plugin '${pluginId}':`,
-              err,
-            );
-          }
-        }
-      }
-
-      // Restore persisted enabled/disabled states for external plugins
+      // Restore persisted enabled/disabled states (both builtin and external)
       await this.restorePluginStates();
 
       this.notify();
@@ -479,14 +464,12 @@ class PluginManagerClass {
 
   // ── Persistence ──
 
-  /** Save enabled/disabled state of external plugins to storage */
+  /** Save enabled/disabled state of all plugins to storage */
   private async savePluginStates(): Promise<void> {
     try {
       const states: Record<string, "enabled" | "disabled"> = {};
       for (const [id, plugin] of this.plugins) {
-        if (!plugin.isBuiltin) {
-          states[id] = plugin.status === "enabled" ? "enabled" : "disabled";
-        }
+        states[id] = plugin.status === "enabled" ? "enabled" : "disabled";
       }
       await invoke<void>("plugin_storage_set", {
         key: PLUGIN_STATE_STORAGE_KEY,
@@ -505,14 +488,16 @@ class PluginManagerClass {
         key: PLUGIN_STATE_STORAGE_KEY,
         pluginId: "__plugin_manager__",
       });
-      if (!raw) return;
 
-      const states = JSON.parse(raw) as Record<string, "enabled" | "disabled">;
+      const states = raw
+        ? (JSON.parse(raw) as Record<string, "enabled" | "disabled">)
+        : {};
 
+      // Restore saved states
       for (const [pluginId, savedStatus] of Object.entries(states)) {
         const plugin = this.plugins.get(pluginId);
-        if (!plugin || plugin.isBuiltin) continue;
-        if (plugin.status === "error") continue; // Don't re-enable broken plugins
+        if (!plugin) continue;
+        if (plugin.status === "error") continue;
 
         if (savedStatus === "enabled" && plugin.status === "disabled") {
           try {
@@ -520,6 +505,20 @@ class PluginManagerClass {
           } catch (err) {
             console.warn(
               `[PluginManager] Failed to restore plugin '${pluginId}':`,
+              err,
+            );
+          }
+        }
+      }
+
+      // Enable builtin plugins that have no saved state (first-time default: on)
+      for (const [pluginId, plugin] of this.plugins) {
+        if (plugin.isBuiltin && plugin.status === "disabled" && !(pluginId in states)) {
+          try {
+            await this.enablePlugin(pluginId);
+          } catch (err) {
+            console.warn(
+              `[PluginManager] Failed to auto-enable builtin plugin '${pluginId}':`,
               err,
             );
           }

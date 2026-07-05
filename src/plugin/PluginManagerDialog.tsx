@@ -260,7 +260,9 @@ export default function PluginManagerDialog({ onRefresh }: PluginManagerProps) {
                   plugin={plugin}
                   isBuiltinPlugin={true}
                   toggling={toggling.has(plugin.manifest.id)}
-                  onToggle={() => {}}
+                  onToggle={() =>
+                    handleToggle(plugin.manifest.id, plugin.status)
+                  }
                 />
               ))}
             </div>
@@ -612,50 +614,34 @@ function PluginCard({ plugin, isBuiltinPlugin, toggling, onToggle }: PluginCardP
 
       {/* Right actions */}
       <div className="plugin-actions">
-        {isBuiltinPlugin ? (
-          /* Built-in: toggle always on and disabled */
-          <>  
-            <label className="plugin-switch">
-              <input type="checkbox" checked disabled />
-              <span className="plugin-switch-slider" />
-            </label>
-            <span className="plugin-status-label" style={{ color: "#aaa" }}>
-              已启用
-            </span>
-          </>
-        ) : (
-          /* External: toggle can be switched */
-          <>  
-            <label className="plugin-switch">
-              <input
-                type="checkbox"
-                checked={plugin.status === "enabled"}
-                disabled={toggling}
-                onChange={onToggle}
-              />
-              <span className="plugin-switch-slider" />
-            </label>
-            <span
-              className="plugin-status-label"
-              style={{
-                color:
-                  plugin.status === "enabled"
-                    ? "#8bc34a"
-                    : plugin.status === "error"
-                      ? "#ff6b6b"
-                      : "#777",
-              }}
-            >
-              {toggling
-                ? "切换中..."
-                : plugin.status === "enabled"
-                  ? "已启用"
-                  : plugin.status === "error"
-                    ? "错误"
-                    : "已禁用"}
-            </span>
-          </>
-        )}
+        <label className="plugin-switch">
+          <input
+            type="checkbox"
+            checked={plugin.status === "enabled"}
+            disabled={toggling}
+            onChange={onToggle}
+          />
+          <span className="plugin-switch-slider" />
+        </label>
+        <span
+          className="plugin-status-label"
+          style={{
+            color:
+              plugin.status === "enabled"
+                ? "#8bc34a"
+                : plugin.status === "error"
+                  ? "#ff6b6b"
+                  : "#777",
+          }}
+        >
+          {toggling
+            ? "切换中..."
+            : plugin.status === "enabled"
+              ? "已启用"
+              : plugin.status === "error"
+                ? "错误"
+                : "已禁用"}
+        </span>
       </div>
     </div>
   );
