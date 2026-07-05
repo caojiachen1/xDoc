@@ -126,7 +126,7 @@ function App() {
   // ── Hook initialization (order matters: zoom before annotations, aiChat before ocr) ──
   const settings = useSettings(environmentReady);
   const zoom = useZoom(imageSize, settings.zoomMode, settings.setZoomMode, "", "");
-  const tabs = useTabs((path) => setDocumentPath(path || ""));
+  const tabs = useTabs((path) => setDocumentPath(path || ""), () => pdfPageIndex);
   const papers = usePapers((paper) => {
     const tab = tabs.tabs.find(t => t.type === "reader" && t.documentPath === paper.path);
     if (tab) tabs.closeTab(tab.id, clearCurrentDocument, loadPageData, grobid.triggerGrobidParse, settings.modelLoaded, settings.scoreThreshold);

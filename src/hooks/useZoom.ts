@@ -176,6 +176,17 @@ export function useZoom(
     document.addEventListener("mouseup", onMouseUp);
   }, []);
 
+  // ── Recalculate display size when pane width changes (resize divider) ───
+  useEffect(() => {
+    if (imgRef.current) {
+      const w = imgRef.current.clientWidth;
+      const h = imgRef.current.clientHeight;
+      if (w > 0 && h > 0) {
+        setDisplaySize({ width: w, height: h });
+      }
+    }
+  }, [leftPaneWidth]);
+
   return {
     customScale, setCustomScale,
     displaySize, setDisplaySize,

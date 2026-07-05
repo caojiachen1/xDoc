@@ -161,6 +161,8 @@ export interface TabInfo {
   title: string;
   type: "home" | "reader";
   documentPath?: string;
+  /** Remembered page index per tab for reader tabs */
+  savedPageIndex?: number;
 }
 
 // ── Constants ───────────────────────────────────────────────────────────────

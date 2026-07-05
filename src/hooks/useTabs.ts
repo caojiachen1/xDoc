@@ -9,6 +9,8 @@ import type { PaperInfo } from "../components/HomePage";
 
 export function useTabs(
   onDocumentChange: (path: string | null) => void,
+  /** Returns the current pdf page index (0-based) from App state */
+  getCurrentPageIndex: () => number,
 ) {
   const [tabs, setTabs] = useState<TabInfo[]>([{ id: HOME_TAB_ID, title: "主页", type: "home" }]);
   const [activeTabId, setActiveTabId] = useState(HOME_TAB_ID);
@@ -56,6 +58,7 @@ export function useTabs(
   }, [tabs, onDocumentChange]);
 
   const closeTab = useCallback((tabId: string, clearDoc: () => void, loadPageData: (path: string, page: number) => Promise<void>, triggerGrobid: (path: string) => void, _modelLoaded: boolean, _scoreThreshold: number) => {
+    const currentPage = getCurrentPageIndex();
     setTabs(prev => {
       const idx = prev.findIndex(t => t.id === tabId);
       if (idx === -1) return prev;
@@ -67,7 +70,7 @@ export function useTabs(
           setActiveTabId(newActive.id);
           if (newActive.type === "reader" && newActive.documentPath) {
             onDocumentChange(newActive.documentPath);
-            loadPageData(newActive.documentPath, 0);
+            loadPageData(newActive.documentPath, newActive.savedPageIndex ?? 0);
             triggerGrobid(newActive.documentPath);
           } else {
             onDocumentChange(null);
@@ -75,23 +78,32 @@ export function useTabs(
           }
         }
       }
-      return newTabs;
+      // Save current page to the tab being closed (for state consistency)
+      return newTabs.map(t =>
+        t.id === tabId ? { ...t, savedPageIndex: currentPage } : t
+      );
     });
-  }, [activeTabId, onDocumentChange]);
+  }, [activeTabId, onDocumentChange, getCurrentPageIndex]);
 
   const switchToTab = useCallback((tabId: string, clearDoc: () => void, loadPageData: (path: string, page: number) => Promise<void>, triggerGrobid: (path: string) => void) => {
+    // Save current page of the outgoing tab before switching
+    const currentPage = getCurrentPageIndex();
+    setTabs(prev => prev.map(t =>
+      t.id === activeTabId ? { ...t, savedPageIndex: currentPage } : t
+    ));
+
     setActiveTabId(tabId);
     const tab = tabs.find(t => t.id === tabId);
     if (!tab) return;
     if (tab.type === "reader" && tab.documentPath) {
       onDocumentChange(tab.documentPath);
-      loadPageData(tab.documentPath, 0);
+      loadPageData(tab.documentPath, tab.savedPageIndex ?? 0);
       triggerGrobid(tab.documentPath);
     } else {
       onDocumentChange(null);
       clearDoc();
     }
-  }, [tabs, onDocumentChange]);
+  }, [tabs, activeTabId, onDocumentChange, getCurrentPageIndex]);
 
   const addHomeTab = useCallback((clearDoc: () => void) => {
     setTabs(prev => {
