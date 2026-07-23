@@ -49,26 +49,11 @@ interface OcrModelInfo {
   description: string;
   params: string;
   downloaded: boolean;
+  repo_dir: string;
 }
 
 interface Props {
   onAllChecksPassed: () => void;
-}
-
-function getRepoDirName(id: string): string {
-  const repoMap: Record<string, string> = {
-    "glm-ocr": "GLM-OCR-GGUF",
-    "deepseek-ocr": "DeepSeek-OCR-GGUF",
-    "hunyuan-ocr": "HunyuanOCR-GGUF",
-    "dots-ocr": "dots.ocr-GGUF",
-    "qianfan-ocr": "Qianfan-OCR-GGUF",
-    "lighton-ocr-1b": "LightOnOCR-1B-1025-GGUF",
-    "paddleocr-vl-1.6": "PaddleOCR-VL-1.6-GGUF",
-    "ppocrv6-medium": "ppocrv6-medium",
-    "ppocrv6-small": "ppocrv6-small",
-    "ppocrv6-tiny": "ppocrv6-tiny",
-  };
-  return repoMap[id] || "GLM-OCR-GGUF";
 }
 
 export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
@@ -94,7 +79,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     localStorage.getItem("xdoc.settings.ocr.modelId") || "glm-ocr"
   );
   const [ocrModelPath, setOcrModelPath] = useState(
-    localStorage.getItem("xdoc.settings.ocr.modelPath") || `model/${getRepoDirName("glm-ocr")}`
+    localStorage.getItem("xdoc.settings.ocr.modelPath") || ""
   );
   const [ocrModelList, setOcrModelList] = useState<OcrModelInfo[]>([]);
   const [ocrModelExists, setOcrModelExists] = useState<boolean | null>(null);
@@ -132,6 +117,19 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
       .then(setOcrModelList)
       .catch((e) => console.warn("[OCR] list_ocr_models failed:", e));
   }, []);
+
+  // Resolve a model id to its backend-provided repo directory name.
+  const getRepoDirName = useCallback(
+    (id: string): string => ocrModelList.find((m) => m.id === id)?.repo_dir ?? "",
+    [ocrModelList]
+  );
+
+  // Derive the default OCR model path from the catalog when none is persisted.
+  useEffect(() => {
+    if (localStorage.getItem("xdoc.settings.ocr.modelPath")) return;
+    const dir = getRepoDirName(ocrModelId);
+    if (dir) setOcrModelPath(`model/${dir}`);
+  }, [getRepoDirName, ocrModelId]);
 
   // Download progress listener
   const unlistenRef = useRef<(() => void) | null>(null);
@@ -235,7 +233,7 @@ export default function EnvironmentCheck({ onAllChecksPassed }: Props) {
     } catch (e) {
       setOcrDownload({ downloading: false, progress: 0, message: String(e), status: "error" });
     }
-  }, [ocrModelId]);
+  }, [ocrModelId, getRepoDirName]);
 
   const handleOcrToggle = (checked: boolean) => {
     setOcrEnabled(checked);

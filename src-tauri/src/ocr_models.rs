@@ -1,4 +1,14 @@
-//! OCR model definitions - all llama.cpp GGUF OCR models + PPOCRv6 ONNX.
+//! OCR model catalog.
+//!
+//! All model definitions live in `src-tauri/ocr_models.json` (embedded at compile
+//! time via `include_str!`). To add or update an OCR model, edit that JSON file
+//! only — no changes to this file or any consuming code are required.
+//!
+//! The JSON is parsed once on first access and the resulting values are leaked to
+//! obtain `&'static` references, so the rest of the codebase can keep treating the
+//! catalog exactly like the old hard-coded `&'static` tables.
+
+use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -7,6 +17,8 @@ use serde::{Deserialize, Serialize};
 pub enum OcrEngine { Gguf, Ppocrv6 }
 
 impl Default for OcrEngine { fn default() -> Self { Self::Gguf } }
+
+// ── Public catalog types (kept with `&'static str` fields for zero-churn consumers) ──
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GgufOcrModel {
@@ -50,191 +62,135 @@ pub struct Ppocrv6ModelInfo {
     pub description: &'static str,
 }
 
+// ── Raw (owned) JSON representation ──────────────────────────────────────
+
+#[derive(Deserialize)]
+struct RawCatalog {
+    gguf: Vec<RawGgufModel>,
+    ppocrv6: Vec<RawPpocrv6Model>,
+}
+
+#[derive(Deserialize)]
+struct RawGgufModel {
+    label: String,
+    id: String,
+    repo_id: String,
+    text_model_q8: String,
+    text_model_f16: Option<String>,
+    mmproj_q8: String,
+    mmproj_f16: Option<String>,
+    prompt_template: String,
+    eos_token_ids: Vec<i32>,
+    n_vocab: usize,
+    n_ctx: u32,
+    params: String,
+    description: String,
+}
+
+#[derive(Deserialize)]
+struct RawPpocrv6Model {
+    size: Ppocrv6Size,
+    label: String,
+    id: String,
+    det_repo: String,
+    rec_repo: String,
+    det_onnx: String,
+    rec_onnx: String,
+    rec_yml: String,
+    params: String,
+    description: String,
+}
+
+// ── Catalog loading (parse once, leak to `&'static`) ─────────────────────
+
+/// The catalog JSON, embedded into the binary at compile time.
+const CATALOG_JSON: &str = include_str!("../ocr_models.json");
+
+struct Catalog {
+    gguf: &'static [GgufOcrModel],
+    ppocrv6: &'static [Ppocrv6ModelInfo],
+}
+
+static CATALOG: OnceLock<Catalog> = OnceLock::new();
+
+fn leak_str(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn leak_opt(s: Option<String>) -> Option<&'static str> {
+    s.map(leak_str)
+}
+
+fn load_catalog() -> Catalog {
+    let raw: RawCatalog = serde_json::from_str(CATALOG_JSON)
+        .expect("Failed to parse embedded ocr_models.json — check its syntax");
+
+    let gguf: Vec<GgufOcrModel> = raw.gguf.into_iter().map(|m| GgufOcrModel {
+        label: leak_str(m.label),
+        id: leak_str(m.id),
+        repo_id: leak_str(m.repo_id),
+        text_model_q8: leak_str(m.text_model_q8),
+        text_model_f16: leak_opt(m.text_model_f16),
+        mmproj_q8: leak_str(m.mmproj_q8),
+        mmproj_f16: leak_opt(m.mmproj_f16),
+        prompt_template: leak_str(m.prompt_template),
+        eos_token_ids: Box::leak(m.eos_token_ids.into_boxed_slice()),
+        n_vocab: m.n_vocab,
+        n_ctx: m.n_ctx,
+        params: leak_str(m.params),
+        description: leak_str(m.description),
+    }).collect();
+
+    let ppocrv6: Vec<Ppocrv6ModelInfo> = raw.ppocrv6.into_iter().map(|m| Ppocrv6ModelInfo {
+        size: m.size,
+        label: leak_str(m.label),
+        id: leak_str(m.id),
+        det_repo: leak_str(m.det_repo),
+        rec_repo: leak_str(m.rec_repo),
+        det_onnx: leak_str(m.det_onnx),
+        rec_onnx: leak_str(m.rec_onnx),
+        rec_yml: leak_str(m.rec_yml),
+        params: leak_str(m.params),
+        description: leak_str(m.description),
+    }).collect();
+
+    Catalog {
+        gguf: Box::leak(gguf.into_boxed_slice()),
+        ppocrv6: Box::leak(ppocrv6.into_boxed_slice()),
+    }
+}
+
+fn catalog() -> &'static Catalog {
+    CATALOG.get_or_init(load_catalog)
+}
+
+/// All GGUF (llama.cpp) OCR models defined in the catalog.
+pub fn gguf_ocr_models() -> &'static [GgufOcrModel] {
+    catalog().gguf
+}
+
+/// All PP-OCRv6 (ONNX) OCR models defined in the catalog.
+pub fn ppocrv6_models() -> &'static [Ppocrv6ModelInfo] {
+    catalog().ppocrv6
+}
+
+// ── Lookups ──────────────────────────────────────────────────────────────
+
 pub fn find_gguf_model(id: &str) -> Option<&'static GgufOcrModel> {
-    GGUF_OCR_MODELS.iter().find(|m| m.id == id)
+    gguf_ocr_models().iter().find(|m| m.id == id)
 }
 
 pub fn find_ppocrv6_model(size: Ppocrv6Size) -> &'static Ppocrv6ModelInfo {
-    PPOCRV6_MODELS.iter().find(|m| m.size == size).unwrap_or(&PPOCRV6_MODELS[0])
+    let models = ppocrv6_models();
+    models.iter().find(|m| m.size == size).unwrap_or(&models[0])
 }
 
 pub fn find_ppocrv6_model_by_id(id: &str) -> Option<&'static Ppocrv6ModelInfo> {
-    PPOCRV6_MODELS.iter().find(|m| m.id == id)
+    ppocrv6_models().iter().find(|m| m.id == id)
 }
 
 pub fn all_ocr_model_ids() -> Vec<&'static str> {
-    let mut ids: Vec<&'static str> = GGUF_OCR_MODELS.iter().map(|m| m.id).collect();
-    ids.extend(PPOCRV6_MODELS.iter().map(|m| m.id));
+    let mut ids: Vec<&'static str> = gguf_ocr_models().iter().map(|m| m.id).collect();
+    ids.extend(ppocrv6_models().iter().map(|m| m.id));
     ids
 }
-
-// ── GGUF OCR model catalog ──────────────────────────────────────────────
-
-pub static GGUF_OCR_MODELS: &[GgufOcrModel] = &[
-    // ── 1. GLM-OCR ──────────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "GLM-OCR (智谱, 0.9B)",
-        id: "glm-ocr",
-        repo_id: "ggml-org/GLM-OCR-GGUF",
-        text_model_q8: "GLM-OCR-Q8_0.gguf",
-        text_model_f16: Some("GLM-OCR-f16.gguf"),
-        mmproj_q8: "mmproj-GLM-OCR-Q8_0.gguf",
-        mmproj_f16: None,
-        prompt_template: "[gMASK]<sop><|user|>\n<|begin_of_image|>{marker}<|end_of_image|>\nText Recognition:\n<|assistant|>\n",
-        eos_token_ids: &[59246, 59253, 59252, 59251],
-        n_vocab: 59392,
-        n_ctx: 8192,
-        params: "0.9B",
-        description: "智谱AI开源OCR模型，支持文字/公式/表格识别，中文效果优秀",
-    },
-
-    // ── 2. DeepSeek-OCR ─────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "DeepSeek-OCR (深度求索, 3B)",
-        id: "deepseek-ocr",
-        repo_id: "ggml-org/DeepSeek-OCR-GGUF",
-        text_model_q8: "DeepSeek-OCR-Q8_0.gguf",
-        text_model_f16: None,
-        mmproj_q8: "mmproj-DeepSeek-OCR-Q8_0.gguf",
-        mmproj_f16: None,
-        prompt_template: "<image>\nFree OCR. ",
-        eos_token_ids: &[1, 0],
-        n_vocab: 129280,
-        n_ctx: 8192,
-        params: "3B",
-        description: "DeepSeek开源OCR模型，支持文档转Markdown，长文本识别能力强",
-    },
-
-    // ── 3. HunyuanOCR ───────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "HunyuanOCR (腾讯混元, 0.5B)",
-        id: "hunyuan-ocr",
-        repo_id: "ggml-org/HunyuanOCR-GGUF",
-        text_model_q8: "HunyuanOCR-Q8_0.gguf",
-        text_model_f16: Some("HunyuanOCR-bf16.gguf"),
-        mmproj_q8: "mmproj-HunyuanOCR-Q8_0.gguf",
-        mmproj_f16: Some("mmproj-HunyuanOCR-bf16.gguf"),
-        prompt_template: "<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁100｜>{marker}<｜hy_place▁holder▁no▁101｜>OCR<｜hy_User｜>",
-        eos_token_ids: &[120007],
-        n_vocab: 120818,
-        n_ctx: 8192,
-        params: "0.5B",
-        description: "腾讯混元OCR模型，支持文字/公式/表格/版面分析，超轻量高效",
-    },
-
-    // ── 4. dots.ocr ─────────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "dots.ocr (小红书, 2B)",
-        id: "dots-ocr",
-        repo_id: "ggml-org/dots.ocr-GGUF",
-        text_model_q8: "dots.ocr-Q8_0.gguf",
-        text_model_f16: Some("dots.ocr-f16.gguf"),
-        mmproj_q8: "mmproj-dots.ocr-Q8_0.gguf",
-        mmproj_f16: Some("mmproj-dots.ocr-f16.gguf"),
-        prompt_template: "<|user|>{marker}\nOCR<|endofuser|><|assistant|>",
-        eos_token_ids: &[151645, 151643],
-        n_vocab: 151936,
-        n_ctx: 8192,
-        params: "2B",
-        description: "小红书开源多语言文档解析模型，支持结构化输出与多语言识别",
-    },
-
-    // ── 5. Qianfan-OCR ──────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "Qianfan-OCR (百度千帆, 4B)",
-        id: "qianfan-ocr",
-        repo_id: "ggml-org/Qianfan-OCR-GGUF",
-        text_model_q8: "Qianfan-OCR-Q8_0.gguf",
-        text_model_f16: Some("Qianfan-OCR-f16.gguf"),
-        mmproj_q8: "mmproj-Qianfan-OCR-Q8_0.gguf",
-        mmproj_f16: Some("mmproj-Qianfan-OCR-f16.gguf"),
-        prompt_template: "<|im_start|>user\n{marker}\nParse this document to Markdown.\n<|im_end|>\n<|im_start|>assistant\n",
-        eos_token_ids: &[151645],
-        n_vocab: 153678,
-        n_ctx: 8192,
-        params: "4B",
-        description: "百度千帆OCR模型，支持卡证识别/文档解析/关键信息提取",
-    },
-
-    // ── 6. LightOnOCR v1 ─────────────────────────────────────────────────
-    GgufOcrModel {
-        label: "LightOnOCR v1 (LightOn, 1B)",
-        id: "lighton-ocr-1b",
-        repo_id: "ggml-org/LightOnOCR-1B-1025-GGUF",
-        text_model_q8: "LightOnOCR-1B-1025-Q8_0.gguf",
-        text_model_f16: None,
-        mmproj_q8: "mmproj-LightOnOCR-1B-1025-Q8_0.gguf",
-        mmproj_f16: None,
-        prompt_template: "<|im_start|>user\n{marker}\nOCR\n<|im_end|>\n<|im_start|>assistant\n",
-        eos_token_ids: &[151645, 151643],
-        n_vocab: 151936,
-        n_ctx: 8192,
-        params: "1B",
-        description: "LightOn开源轻量级OCR模型，高效文档文字识别",
-    },
-
-    // ── 7. PaddleOCR-VL 1.6 ─────────────────────────────────────────────
-    GgufOcrModel {
-        label: "PaddleOCR-VL 1.6 (百度飞桨, 0.9B)",
-        id: "paddleocr-vl-1.6",
-        repo_id: "PaddlePaddle/PaddleOCR-VL-1.6-GGUF",
-        text_model_q8: "PaddleOCR-VL-1.6-GGUF.gguf",
-        text_model_f16: None,
-        mmproj_q8: "PaddleOCR-VL-1.6-GGUF-mmproj.gguf",
-        mmproj_f16: None,
-        // ERNIE-4.5 chat template; {marker} is replaced by the mtmd media marker.
-        prompt_template: "<|begin_of_sentence|>User: {marker}OCR:\nAssistant:\n",
-        // </s> = 2, <|end_of_sentence|> = 100272
-        eos_token_ids: &[2, 100272],
-        n_vocab: 103424,
-        n_ctx: 8192,
-        params: "0.9B",
-        description: "百度飞桨PaddleOCR-VL 1.6，SOTA文档解析，支持文字/公式/表格/图表/印章，多语言识别",
-    },
-];
-
-// ── PPOCRv6 ONNX model catalog ────────────────────────────────────────
-
-pub static PPOCRV6_MODELS: &[Ppocrv6ModelInfo] = &[
-    // ── PP-OCRv6 Medium (34.5M params, Server) ──────────────────────────
-    Ppocrv6ModelInfo {
-        size: Ppocrv6Size::Medium,
-        label: "PP-OCRv6 Medium (服务端, 34.5M)",
-        id: "ppocrv6-medium",
-        det_repo: "PaddlePaddle/PP-OCRv6_medium_det_onnx",
-        rec_repo: "PaddlePaddle/PP-OCRv6_medium_rec_onnx",
-        det_onnx: "det.onnx",
-        rec_onnx: "rec.onnx",
-        rec_yml: "rec.yml",
-        params: "34.5M",
-        description: "PP-OCRv6 服务端模型，精度最高，适合文档识别 (det 59MB + rec 73MB)",
-    },
-
-    // ── PP-OCRv6 Small (7.7M params, Mobile) ────────────────────────────
-    Ppocrv6ModelInfo {
-        size: Ppocrv6Size::Small,
-        label: "PP-OCRv6 Small (移动端, 7.7M)",
-        id: "ppocrv6-small",
-        det_repo: "PaddlePaddle/PP-OCRv6_small_det_onnx",
-        rec_repo: "PaddlePaddle/PP-OCRv6_small_rec_onnx",
-        det_onnx: "det.onnx",
-        rec_onnx: "rec.onnx",
-        rec_yml: "rec.yml",
-        params: "7.7M",
-        description: "PP-OCRv6 移动端模型，速度与精度均衡 (det 9.4MB + rec 20MB)",
-    },
-
-    // ── PP-OCRv6 Tiny (1.5M params, Edge) ──────────────────────────────
-    Ppocrv6ModelInfo {
-        size: Ppocrv6Size::Tiny,
-        label: "PP-OCRv6 Tiny (边缘端, 1.5M)",
-        id: "ppocrv6-tiny",
-        det_repo: "PaddlePaddle/PP-OCRv6_tiny_det_onnx",
-        rec_repo: "PaddlePaddle/PP-OCRv6_tiny_rec_onnx",
-        det_onnx: "det.onnx",
-        rec_onnx: "rec.onnx",
-        rec_yml: "rec.yml",
-        params: "1.5M",
-        description: "PP-OCRv6 边缘端模型，超轻量快速，适合实时场景 (det 1.7MB + rec 4.3MB)",
-    },
-];

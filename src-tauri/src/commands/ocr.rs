@@ -74,6 +74,9 @@ pub struct OcrModelInfo {
     pub description: String,
     pub params: String,
     pub downloaded: bool,
+    /// Directory name (under `model/`) where this model is stored/downloaded.
+    /// Lets the frontend derive the model path without a hard-coded map.
+    pub repo_dir: String,
 }
 
 // ── Commands ───────────────────────────────────────────────────────────────
@@ -442,23 +445,26 @@ pub(crate) async fn download_ppocrv6_models(
 pub(crate) async fn list_ocr_models() -> Result<Vec<OcrModelInfo>, String> {
     let mut models = Vec::new();
 
-    for m in ocr_models::GGUF_OCR_MODELS {
-        let model_dir = resolve_model_path(&format!("model/{}", repo_dir_name(m.repo_id)));
+    for m in ocr_models::gguf_ocr_models() {
+        let repo_dir = repo_dir_name(m.repo_id).to_string();
+        let model_dir = resolve_model_path(&format!("model/{}", repo_dir));
         let downloaded = model_dir.join(m.text_model_q8).exists();
         models.push(OcrModelInfo {
             id: m.id.to_string(), label: m.label.to_string(),
             engine: "gguf".to_string(), description: m.description.to_string(),
             params: m.params.to_string(), downloaded,
+            repo_dir,
         });
     }
 
-    for m in ocr_models::PPOCRV6_MODELS {
+    for m in ocr_models::ppocrv6_models() {
         let model_dir = resolve_model_path(&format!("model/{}", m.id));
         let downloaded = model_dir.join(m.det_onnx).exists() && model_dir.join(m.rec_onnx).exists();
         models.push(OcrModelInfo {
             id: m.id.to_string(), label: m.label.to_string(),
             engine: "ppocrv6".to_string(), description: m.description.to_string(),
             params: m.params.to_string(), downloaded,
+            repo_dir: m.id.to_string(),
         });
     }
 

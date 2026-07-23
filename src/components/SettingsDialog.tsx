@@ -153,7 +153,7 @@ function SettingsDialog(props: Props) {
 
   // OCR model catalog
   const [ocrModelList, setOcrModelList] = useState<Array<{
-    id: string; label: string; engine: string; description: string; params: string; downloaded: boolean;
+    id: string; label: string; engine: string; description: string; params: string; downloaded: boolean; repo_dir: string;
   }>>([]);
 
   // Check if OCR model files actually exist on disk
@@ -170,10 +170,21 @@ function SettingsDialog(props: Props) {
 
   // Fetch OCR model list
   useEffect(() => {
-    invoke<Array<{ id: string; label: string; engine: string; description: string; params: string; downloaded: boolean }>>("list_ocr_models")
+    invoke<Array<{ id: string; label: string; engine: string; description: string; params: string; downloaded: boolean; repo_dir: string }>>("list_ocr_models")
       .then(setOcrModelList)
       .catch((e) => console.warn("[OCR] list_ocr_models failed:", e));
   }, []);
+
+  // Keep the latest catalog in a ref so stable callbacks (e.g. the download
+  // listener) can resolve repo directories without stale closures.
+  const ocrModelListRef = useRef(ocrModelList);
+  useEffect(() => { ocrModelListRef.current = ocrModelList; }, [ocrModelList]);
+
+  // Resolve a model id to its backend-provided repo directory name.
+  const getRepoDirName = useCallback(
+    (id: string): string => ocrModelListRef.current.find((m) => m.id === id)?.repo_dir ?? "",
+    []
+  );
 
   const unlistenRef = useRef<(() => void) | null>(null);
 
@@ -192,8 +203,8 @@ function SettingsDialog(props: Props) {
             status: p.status,
           });
           if (p.status === "completed") {
-            // Determine the model path based on current model ID (use static map, not async list)
-            const repoName = getRepoDirName({ id: ocrModelId, engine: "" });
+            // Determine the model path based on current model ID
+            const repoName = getRepoDirName(ocrModelId);
             const path = `model/${repoName}`;
             onOcrModelPathChange(path);
             checkOcrModelExists();
@@ -218,7 +229,7 @@ function SettingsDialog(props: Props) {
   /* ── download handler ─────────────────────────────────── */
   const handleDownload = useCallback(async (modelId?: string) => {
     const targetId = modelId || ocrModelId || "glm-ocr";
-    const repoName = getRepoDirName({ id: targetId, engine: "" });
+    const repoName = getRepoDirName(targetId);
     const targetDir = `model/${repoName}`;
     const isPpocrv6 = targetId.startsWith("ppocrv6");
 
@@ -588,8 +599,8 @@ function SettingsDialog(props: Props) {
                           const id = d.optionValue as string;
                           if (id) {
                             onOcrModelIdChange(id);
-                            // Always update path using the static repo map (don't depend on async ocrModelList)
-                            const repoName = getRepoDirName({ id, engine: "" });
+                            // Derive the path from the backend-provided repo directory.
+                            const repoName = getRepoDirName(id);
                             onOcrModelPathChange(`model/${repoName}`);
                           }
                         }}
@@ -849,21 +860,3 @@ function PluginManagerSection() {
 
 export default SettingsDialog;
 export { STORAGE_KEYS };
-
-/** Extract repo dir name from model info */
-function getRepoDirName(model: { engine: string; id: string }): string {
-  const repoMap: Record<string, string> = {
-    "glm-ocr": "GLM-OCR-GGUF",
-    "deepseek-ocr": "DeepSeek-OCR-GGUF",
-    "hunyuan-ocr": "HunyuanOCR-GGUF",
-    "dots-ocr": "dots.ocr-GGUF",
-    "qianfan-ocr": "Qianfan-OCR-GGUF",
-    "lighton-ocr-1b": "LightOnOCR-1B-1025-GGUF",
-    "paddleocr-vl-1.6": "PaddleOCR-VL-1.6-GGUF",
-    // PP-OCRv6 uses model ID as directory name (downloads from multiple repos)
-    "ppocrv6-medium": "ppocrv6-medium",
-    "ppocrv6-small": "ppocrv6-small",
-    "ppocrv6-tiny": "ppocrv6-tiny",
-  };
-  return repoMap[model.id] || "GLM-OCR-GGUF";
-}
