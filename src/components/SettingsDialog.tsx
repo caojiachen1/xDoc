@@ -859,6 +859,7 @@ function getRepoDirName(model: { engine: string; id: string }): string {
     "dots-ocr": "dots.ocr-GGUF",
     "qianfan-ocr": "Qianfan-OCR-GGUF",
     "lighton-ocr-1b": "LightOnOCR-1B-1025-GGUF",
+    "paddleocr-vl-1.6": "PaddleOCR-VL-1.6-GGUF",
     // PP-OCRv6 uses model ID as directory name (downloads from multiple repos)
     "ppocrv6-medium": "ppocrv6-medium",
     "ppocrv6-small": "ppocrv6-small",

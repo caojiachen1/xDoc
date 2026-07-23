@@ -63,6 +63,7 @@ function getRepoDirName(id: string): string {
     "dots-ocr": "dots.ocr-GGUF",
     "qianfan-ocr": "Qianfan-OCR-GGUF",
     "lighton-ocr-1b": "LightOnOCR-1B-1025-GGUF",
+    "paddleocr-vl-1.6": "PaddleOCR-VL-1.6-GGUF",
     "ppocrv6-medium": "ppocrv6-medium",
     "ppocrv6-small": "ppocrv6-small",
     "ppocrv6-tiny": "ppocrv6-tiny",

@@ -172,6 +172,25 @@ pub static GGUF_OCR_MODELS: &[GgufOcrModel] = &[
         params: "1B",
         description: "LightOn开源轻量级OCR模型，高效文档文字识别",
     },
+
+    // ── 7. PaddleOCR-VL 1.6 ─────────────────────────────────────────────
+    GgufOcrModel {
+        label: "PaddleOCR-VL 1.6 (百度飞桨, 0.9B)",
+        id: "paddleocr-vl-1.6",
+        repo_id: "PaddlePaddle/PaddleOCR-VL-1.6-GGUF",
+        text_model_q8: "PaddleOCR-VL-1.6-GGUF.gguf",
+        text_model_f16: None,
+        mmproj_q8: "PaddleOCR-VL-1.6-GGUF-mmproj.gguf",
+        mmproj_f16: None,
+        // ERNIE-4.5 chat template; {marker} is replaced by the mtmd media marker.
+        prompt_template: "<|begin_of_sentence|>User: {marker}OCR:\nAssistant:\n",
+        // </s> = 2, <|end_of_sentence|> = 100272
+        eos_token_ids: &[2, 100272],
+        n_vocab: 103424,
+        n_ctx: 8192,
+        params: "0.9B",
+        description: "百度飞桨PaddleOCR-VL 1.6，SOTA文档解析，支持文字/公式/表格/图表/印章，多语言识别",
+    },
 ];
 
 // ── PPOCRv6 ONNX model catalog ────────────────────────────────────────
