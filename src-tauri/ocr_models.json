@@ -48,6 +48,21 @@
       "description": "腾讯混元OCR模型，支持文字/公式/表格/版面分析，超轻量高效"
     },
     {
+      "label": "HunyuanOCR 1.5 (腾讯混元, 0.5B)",
+      "id": "hunyuan-ocr-1.5",
+      "repo_id": "prithivMLmods/HunyuanOCR-1.5-GGUF-Updated",
+      "text_model_q8": "HunyuanOCR.Q8_0.gguf",
+      "text_model_f16": "HunyuanOCR.F16.gguf",
+      "mmproj_q8": "HunyuanOCR.mmproj-q8_0.gguf",
+      "mmproj_f16": "HunyuanOCR.mmproj-f16.gguf",
+      "prompt_template": "<｜hy_begin▁of▁sentence｜><｜hy_place▁holder▁no▁100｜>{marker}<｜hy_place▁holder▁no▁101｜>OCR<｜hy_User｜>",
+      "eos_token_ids": [120007],
+      "n_vocab": 120818,
+      "n_ctx": 8192,
+      "params": "0.5B",
+      "description": "腾讯混元HunyuanOCR 1.5，端到端OCR，支持文字/公式/表格/版面分析，多语言识别"
+    },
+    {
       "label": "dots.ocr (小红书, 2B)",
       "id": "dots-ocr",
       "repo_id": "ggml-org/dots.ocr-GGUF",
