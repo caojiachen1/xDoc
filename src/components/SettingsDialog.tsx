@@ -637,7 +637,7 @@ function SettingsDialog(props: Props) {
                 {ocrModelId && (
                   <div className="sf-group">
                     <div className="sf-row">
-                      <div className="sf-label">
+                      <div className="sf-label ocr-desc">
                         <Text size={100} className="settings-hint">
                           {ocrModelList.find(m => m.id === ocrModelId)?.description || ""}
                         </Text>

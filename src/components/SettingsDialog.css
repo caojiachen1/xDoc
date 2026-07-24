@@ -167,6 +167,19 @@
   white-space: nowrap;
 }
 
+/* OCR model description: allow wrapping instead of horizontal overflow */
+.sf-label.ocr-desc {
+  flex: 1;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.sf-label.ocr-desc .fui-Text {
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .sf-control {
   display: flex;
   align-items: center;

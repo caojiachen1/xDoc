@@ -90,7 +90,8 @@
       "n_vocab": 153678,
       "n_ctx": 8192,
       "params": "4B",
-      "description": "百度千帆OCR模型，支持卡证识别/文档解析/关键信息提取"
+      "description": "百度千帆OCR模型，支持卡证识别/文档解析/关键信息提取",
+      "end_to_end": true
     },
     {
       "label": "LightOnOCR v1 (LightOn, 1B)",
@@ -121,6 +122,22 @@
       "n_ctx": 8192,
       "params": "0.9B",
       "description": "百度飞桨PaddleOCR-VL 1.6，SOTA文档解析，支持文字/公式/表格/图表/印章，多语言识别"
+    },
+    {
+      "label": "OvisOCR2 (ATH-MaaS, 0.8B)",
+      "id": "ovis-ocr2",
+      "repo_id": "Abiray/OvisOCR2-GGUF",
+      "text_model_q8": "OvisOCR2-F16.gguf",
+      "text_model_f16": "OvisOCR2-F16.gguf",
+      "mmproj_q8": "mmproj-F16.gguf",
+      "mmproj_f16": "mmproj-F16.gguf",
+      "prompt_template": "<|im_start|>user\n{marker}\nExtract all readable content from the image in natural human reading order and output the result as a single Markdown document. Format formulas as LaTeX. Format tables as HTML: <table>...</table>. Preserve the original text without translation.<|im_end|>\n<|im_start|>assistant\n",
+      "eos_token_ids": [248046],
+      "n_vocab": 248320,
+      "n_ctx": 8192,
+      "params": "0.8B",
+      "end_to_end": true,
+      "description": "OvisOCR2 端到端整页文档解析模型，直接输出Markdown（含LaTeX公式/HTML表格/版面），OmniDocBench v1.6达96.58"
     }
   ],
 

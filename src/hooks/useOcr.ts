@@ -15,6 +15,28 @@ function cleanSpecialTokens(text: string): string {
     .replace(/\[INST\]|\[\/INST\]/g, "");
 }
 
+/**
+ * Removes chain-of-thought <think>...</think> content from OCR output.
+ * Safe for streaming: operates on the full accumulated buffer each call so
+ * tags split across chunks resolve correctly.
+ */
+function stripThinkBlocks(text: string): string {
+  // Drop fully-closed think blocks (OvisOCR2 emits reasoning before the answer).
+  let out = text.replace(/<think>[\s\S]*?<\/think>/gi, "");
+  // Drop an unclosed <think> that is still being streamed.
+  const open = out.toLowerCase().lastIndexOf("<think>");
+  if (open !== -1) out = out.slice(0, open);
+  // Hold back a trailing partial "<think>" opening tag so it doesn't flash.
+  const lt = out.lastIndexOf("<");
+  if (lt !== -1) {
+    const tail = out.slice(lt).toLowerCase();
+    if ("<think>".startsWith(tail) && tail.length < "<think>".length) {
+      out = out.slice(0, lt);
+    }
+  }
+  return out;
+}
+
 export function useOcr(
   ocrEnabled: boolean,
   ocrModelPath: string,
@@ -75,15 +97,16 @@ export function useOcr(
         if (cancelled) return null;
         if (cached != null && cached !== "") {
           // Cache hit — use cached text directly
-          setOcrText(cached);
+          setOcrText(stripThinkBlocks(cached));
           setOcrLoading(false);
           return null; // signal: no OCR needed
         }
         // Cache miss — run OCR with streaming
+        let rawBuffer = "";
         const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
           if (!cancelled) {
-            const cleaned = cleanSpecialTokens(event.payload.piece);
-            if (cleaned) setOcrText(prev => prev + cleaned);
+            rawBuffer += event.payload.piece;
+            setOcrText(cleanSpecialTokens(stripThinkBlocks(rawBuffer)));
           }
         });
 
@@ -96,7 +119,7 @@ export function useOcr(
           ymax: selectedParagraph.ymax,
           paperId: paperId ?? null,
         })
-          .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
+          .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(stripThinkBlocks(result.text))); })
           .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
           .finally(() => {
             if (!cancelled) setOcrLoading(false);
@@ -172,10 +195,11 @@ export function useOcr(
     setOcrError("");
     setOcrText("");
 
+    let rawBuffer = "";
     const unlistenPromise = listen<{ piece: string }>("ocr-stream-token", (event) => {
       if (!cancelled) {
-        const cleaned = cleanSpecialTokens(event.payload.piece);
-        if (cleaned) setOcrText(prev => prev + cleaned);
+        rawBuffer += event.payload.piece;
+        setOcrText(cleanSpecialTokens(stripThinkBlocks(rawBuffer)));
       }
     });
 
@@ -189,7 +213,7 @@ export function useOcr(
       paperId: paperId ?? null,
       forceRefresh: true,
     })
-      .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(result.text)); })
+      .then((result) => { if (!cancelled) setOcrText(cleanSpecialTokens(stripThinkBlocks(result.text))); })
       .catch((e) => { if (!cancelled) setOcrError(`OCR 识别失败: ${String(e)}`); })
       .finally(() => {
         if (!cancelled) setOcrLoading(false);

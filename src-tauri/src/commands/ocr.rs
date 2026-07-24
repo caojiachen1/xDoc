@@ -27,15 +27,22 @@ use super::{
 
 /// Strips LLM special tokens (e.g. `<|endofassistant|>`, `<s>`, `[INST]`) from OCR output.
 fn clean_special_tokens(text: &str) -> String {
+    static THINK_BLOCK: OnceLock<Regex> = OnceLock::new();
+    static THINK_DANGLING: OnceLock<Regex> = OnceLock::new();
     static SPECIAL_TOKEN: OnceLock<Regex> = OnceLock::new();
     static SOLO_TOKENS: OnceLock<Regex> = OnceLock::new();
 
+    // Strip chain-of-thought blocks (e.g. OvisOCR2 emits <think>...</think> before the answer).
+    let think_block = THINK_BLOCK.get_or_init(|| Regex::new(r"(?is)<think>.*?</think>").unwrap());
+    let think_dangling = THINK_DANGLING.get_or_init(|| Regex::new(r"(?is)<think>.*").unwrap());
     let special = SPECIAL_TOKEN.get_or_init(|| Regex::new(r"<\|[^|]+\|>").unwrap());
     let solo = SOLO_TOKENS.get_or_init(|| Regex::new(r"</?s>|\[INST\]|\[/INST\]").unwrap());
 
-    let text = special.replace_all(text, "");
+    let text = think_block.replace_all(text, "");
+    let text = think_dangling.replace_all(&text, "");
+    let text = special.replace_all(&text, "");
     let text = solo.replace_all(&text, "");
-    text.to_string()
+    text.trim_start().to_string()
 }
 
 /// Public wrapper for clean_special_tokens, used by other modules (e.g., search indexing).

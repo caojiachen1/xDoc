@@ -35,6 +35,8 @@ pub struct GgufOcrModel {
     pub n_ctx: u32,
     pub params: &'static str,
     pub description: &'static str,
+    /// Whether the model performs end-to-end (page-level) document parsing.
+    pub end_to_end: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +87,8 @@ struct RawGgufModel {
     n_ctx: u32,
     params: String,
     description: String,
+    #[serde(default)]
+    end_to_end: bool,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +143,7 @@ fn load_catalog() -> Catalog {
         n_ctx: m.n_ctx,
         params: leak_str(m.params),
         description: leak_str(m.description),
+        end_to_end: m.end_to_end,
     }).collect();
 
     let ppocrv6: Vec<Ppocrv6ModelInfo> = raw.ppocrv6.into_iter().map(|m| Ppocrv6ModelInfo {
