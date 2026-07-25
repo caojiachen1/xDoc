@@ -579,7 +579,7 @@ impl GgufBackend {
         let max_new_tokens: usize = std::env::var("OCR_MAX_NEW_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2048);
+            .unwrap_or(usize::MAX);
 
         let mut generated: Vec<LlamaToken> = vec![first_token];
         let mut n_past = new_n_past;
@@ -594,7 +594,7 @@ impl GgufBackend {
             let dec_res = unsafe { (lib.llama_decode)(ctx, batch) };
             unsafe { (lib.llama_batch_free)(batch); }
             if dec_res != 0 {
-                bail!("llama_decode failed with code {dec_res}");
+                break;
             }
 
             let logits_ptr = unsafe { (lib.llama_get_logits)(ctx) };
@@ -717,7 +717,7 @@ impl GgufBackend {
         let max_new_tokens: usize = std::env::var("OCR_MAX_NEW_TOKENS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2048);
+            .unwrap_or(usize::MAX);
 
         // Stream with byte buffering to handle partial multi-byte UTF-8 sequences
         let mut raw_buffer: Vec<u8> = Vec::new();
@@ -757,7 +757,7 @@ impl GgufBackend {
             let dec_res = unsafe { (lib.llama_decode)(ctx, batch) };
             unsafe { (lib.llama_batch_free)(batch); }
             if dec_res != 0 {
-                bail!("llama_decode failed with code {dec_res}");
+                break;
             }
 
             let logits_ptr = unsafe { (lib.llama_get_logits)(ctx) };

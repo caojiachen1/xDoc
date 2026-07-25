@@ -50,6 +50,92 @@ pub(crate) fn clean_special_tokens_public(text: &str) -> String {
     clean_special_tokens(text)
 }
 
+/// Convert HTML `<table>...</table>` blocks to Markdown pipe tables.
+/// Also handles truncated tables (missing `</table>`) from OCR output.
+fn html_tables_to_pipe(text: &str) -> String {
+    static TABLE_COMPLETE_RE: OnceLock<Regex> = OnceLock::new();
+    static TABLE_OPEN_RE: OnceLock<Regex> = OnceLock::new();
+    static ROW_RE: OnceLock<Regex> = OnceLock::new();
+    static CELL_RE: OnceLock<Regex> = OnceLock::new();
+    static TAG_RE: OnceLock<Regex> = OnceLock::new();
+
+    let table_complete_re = TABLE_COMPLETE_RE.get_or_init(|| {
+        Regex::new(r"(?is)<table[^>]*>.*?</table>").unwrap()
+    });
+    let table_open_re = TABLE_OPEN_RE.get_or_init(|| {
+        Regex::new(r"(?is)<table[^>]*>.*").unwrap()
+    });
+    let row_re = ROW_RE.get_or_init(|| Regex::new(r"(?is)<tr[^>]*>(.*?)</tr>").unwrap());
+    let cell_re = CELL_RE.get_or_init(|| Regex::new(r"(?is)<t[dh][^>]*>(.*?)</t[dh]>").unwrap());
+    let tag_re = TAG_RE.get_or_init(|| Regex::new(r"<[^>]+>").unwrap());
+
+    let strip_tags = |s: &str| -> String {
+        tag_re.replace_all(s, "").trim().to_string()
+    };
+
+    let html_to_pipe = |html: &str| -> String {
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for rc in row_re.captures_iter(html) {
+            let mut cells: Vec<String> = Vec::new();
+            for cc in cell_re.captures_iter(&rc[1]) {
+                cells.push(strip_tags(&cc[1]));
+            }
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+        }
+        if rows.is_empty() {
+            return String::new();
+        }
+        let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1);
+        let mut out = String::new();
+        for (i, row) in rows.iter().enumerate() {
+            out.push('|');
+            for c in 0..cols {
+                let cell = row.get(c).map(|s| s.as_str()).unwrap_or("");
+                out.push_str(&format!(" {} |", cell));
+            }
+            out.push('\n');
+            if i == 0 {
+                out.push('|');
+                for _ in 0..cols {
+                    out.push_str(" --- |");
+                }
+                out.push('\n');
+            }
+        }
+        out
+    };
+
+    // First pass: replace complete tables.
+    let mut result = String::new();
+    let mut last = 0;
+    for mat in table_complete_re.find_iter(text) {
+        result.push_str(&text[last..mat.start()]);
+        let pipe = html_to_pipe(mat.as_str());
+        if pipe.is_empty() {
+            result.push_str(mat.as_str());
+        } else {
+            result.push_str(&pipe);
+        }
+        last = mat.end();
+    }
+    result.push_str(&text[last..]);
+
+    // Second pass: handle truncated/unclosed tables (no </table>).
+    if let Some(mat) = table_open_re.find(&result) {
+        let before = &result[..mat.start()];
+        let pipe = html_to_pipe(mat.as_str());
+        if !pipe.is_empty() {
+            let mut final_result = before.to_string();
+            final_result.push_str(&pipe);
+            return final_result;
+        }
+    }
+
+    result
+}
+
 // ── OCR state ──────────────────────────────────────────────────────────────
 
 pub struct OcrState {
@@ -443,9 +529,9 @@ pub(crate) async fn convert_pdf_document(
     };
 
     let temp_dir = env::temp_dir();
-    let mut full_markdown = String::new();
     let want_images = matches!(format.as_str(), "docx" | "word" | "markdown" | "md");
     let mut images: Vec<Vec<u8>> = Vec::new();
+    let mut page_texts: Vec<String> = Vec::new();
 
     for page_index in 0..total_pages {
         let _ = app.emit("ocr-convert-progress", ConvertProgress {
@@ -487,18 +573,19 @@ pub(crate) async fn convert_pdf_document(
 
         let _ = std::fs::remove_file(&temp_path);
         let page_text = clean_special_tokens(&page_text);
+        let page_text = html_tables_to_pipe(&page_text);
 
-        if page_index > 0 { full_markdown.push_str("\n\n---\n\n"); }
-
-        if want_images {
+        let page_text = if want_images {
             let page_imgs = extracted_by_page.get(&page_index).map(|v| v.as_slice()).unwrap_or(&[]);
-            let page_text =
-                replace_img_tags_with_placeholders(&page_text, page_imgs, &mut images);
-            full_markdown.push_str(page_text.trim());
+            replace_img_tags_with_placeholders(&page_text, page_imgs, &mut images)
         } else {
-            full_markdown.push_str(page_text.trim());
-        }
+            page_text
+        };
+
+        page_texts.push(page_text.trim().to_string());
     }
+
+    let full_markdown = page_texts.join("\n\n---\n\n");
 
     let _ = app.emit("ocr-convert-progress", ConvertProgress {
         page: total_pages,
