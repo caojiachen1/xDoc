@@ -2032,6 +2032,67 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
+.convert-toast {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 10000;
+  width: 320px;
+  max-width: calc(100vw - 40px);
+  background: rgb(45, 45, 45);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+}
+
+.convert-toast-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.convert-toast-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.convert-toast-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.convert-toast-close:hover {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.convert-toast-message {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+  word-break: break-all;
+}
+
+.convert-toast-spin {
+  animation: convert-toast-spin 1s linear infinite;
+}
+
+@keyframes convert-toast-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* ── Citation Export Dialog ─────────────────────────── */
 .citation-overlay {
   position: fixed;

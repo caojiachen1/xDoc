@@ -9,6 +9,8 @@ mod settings_db;
 mod plugin_host;
 mod plugin_storage;
 mod pptx_gen;
+mod docx_export;
+mod latex_omml;
 
 mod commands;
 
@@ -162,6 +164,7 @@ pub fn run() {
             commands::ocr::download_ocr_models,
             commands::ocr::download_ppocrv6_models,
             commands::ocr::list_ocr_models,
+            commands::ocr::convert_pdf_document,
             // Settings & DB
             commands::settings::db_get_all_settings,
             commands::settings::db_get_setting,

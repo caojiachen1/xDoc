@@ -1,8 +1,10 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from "react";
 import { createPortal } from "react-dom";
-import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages, Presentation } from "lucide-react";
+import { Trash2, Search, FileText, BookOpen, Star, FolderOpen, Info, Upload, Copy, Check, Folder, RefreshCw, CheckCircle, Loader2, XCircle, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Quote, Languages, Presentation, FileDown } from "lucide-react";
 import ConfirmDialog from "./ConfirmDialog";
 import { invoke } from "@tauri-apps/api/core";
+import { save } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import { fetch } from "@tauri-apps/plugin-http";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PaperMetadata } from "../utils/pdfMetadata";
@@ -94,6 +96,7 @@ export default function HomePage({
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [infoPanelVisible, setInfoPanelVisible] = useState(true);
   const [citationDialogPaper, setCitationDialogPaper] = useState<PaperInfo | null>(null);
+  const [convertState, setConvertState] = useState<{ name: string; message: string; done: boolean; error: boolean } | null>(null);
 
   // Custom confirm dialog state
   const [confirmDialog, setConfirmDialog] = useState<{
@@ -394,6 +397,41 @@ export default function HomePage({
 
   const handleDoubleClick = (paper: PaperInfo) => {
     onOpenPaper(paper);
+  };
+
+  const handleConvertDocument = async (paper: PaperInfo, format: "docx" | "markdown") => {
+    const ext = format === "docx" ? "docx" : "md";
+    const baseName = paper.name.replace(/\.[^.]+$/, "") || "document";
+    let outputPath: string | null = null;
+    try {
+      outputPath = await save({
+        defaultPath: `${baseName}.${ext}`,
+        filters: [{ name: format === "docx" ? "Word 文档" : "Markdown", extensions: [ext] }],
+      });
+    } catch (e) {
+      console.error("[convert] save dialog failed:", e);
+      return;
+    }
+    if (!outputPath) return;
+
+    setConvertState({ name: paper.name, message: "准备转换...", done: false, error: false });
+    const unlisten = await listen<{ message: string }>("ocr-convert-progress", (event) => {
+      setConvertState((prev) => prev && !prev.done ? { ...prev, message: event.payload.message } : prev);
+    });
+
+    try {
+      await invoke<string>("convert_pdf_document", {
+        filePath: paper.path,
+        format,
+        outputPath,
+      });
+      setConvertState({ name: paper.name, message: `已保存到 ${outputPath}`, done: true, error: false });
+      setTimeout(() => setConvertState(null), 4000);
+    } catch (e) {
+      setConvertState({ name: paper.name, message: `转换失败: ${String(e)}`, done: true, error: true });
+    } finally {
+      unlisten();
+    }
   };
 
   const handleDeleteSelected = () => {
@@ -982,6 +1020,33 @@ export default function HomePage({
               <Quote size={14} />
               <span>导出参考文献引用</span>
             </div>
+            {/\.pdf$/i.test(contextMenu.paper.path) && (
+              <>
+                <div className="context-menu-separator" />
+                <div
+                  className="context-menu-item"
+                  onClick={() => {
+                    const paper = contextMenu.paper;
+                    setContextMenu(null);
+                    handleConvertDocument(paper, "docx");
+                  }}
+                >
+                  <FileDown size={14} />
+                  <span>转换为 Word (.docx)</span>
+                </div>
+                <div
+                  className="context-menu-item"
+                  onClick={() => {
+                    const paper = contextMenu.paper;
+                    setContextMenu(null);
+                    handleConvertDocument(paper, "markdown");
+                  }}
+                >
+                  <FileText size={14} />
+                  <span>转换为 Markdown (.md)</span>
+                </div>
+              </>
+            )}
             {pluginContextMenuItems.length > 0 && (
               <>
                 <div className="context-menu-separator" />
@@ -1036,6 +1101,26 @@ export default function HomePage({
           metadata={citationDialogPaper.metadata}
           onClose={() => setCitationDialogPaper(null)}
         />
+      )}
+
+      {/* ── Document Conversion Toast ── */}
+      {convertState && (
+        <div className="convert-toast">
+          <div className="convert-toast-header">
+            {!convertState.done ? (
+              <Loader2 size={16} className="convert-toast-spin" />
+            ) : convertState.error ? (
+              <XCircle size={16} color="#e5484d" />
+            ) : (
+              <CheckCircle size={16} color="#30a46c" />
+            )}
+            <span className="convert-toast-title">{convertState.name}</span>
+            {convertState.done && (
+              <button className="convert-toast-close" onClick={() => setConvertState(null)}>×</button>
+            )}
+          </div>
+          <div className="convert-toast-message">{convertState.message}</div>
+        </div>
       )}
 
       {/* ── Confirm Dialog ── */}

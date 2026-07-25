@@ -81,6 +81,8 @@ pub struct OcrModelInfo {
     pub description: String,
     pub params: String,
     pub downloaded: bool,
+    /// Whether the model performs end-to-end (page-level) layout-preserving parsing.
+    pub end_to_end: bool,
     /// Directory name (under `model/`) where this model is stored/downloaded.
     /// Lets the frontend derive the model path without a hard-coded map.
     pub repo_dir: String,
@@ -322,6 +324,243 @@ fn run_ppocrv6_ocr(
     Ok(text)
 }
 
+#[derive(Serialize, Clone)]
+struct ConvertProgress {
+    page: u32,
+    total_pages: u32,
+    status: String,
+    message: String,
+}
+
+fn replace_img_tags_with_placeholders(
+    page_text: &str,
+    page_extracted_images: &[Vec<u8>],
+    images: &mut Vec<Vec<u8>>,
+) -> String {
+    static IMG_TAG_RE: OnceLock<Regex> = OnceLock::new();
+    let re = IMG_TAG_RE.get_or_init(|| {
+        Regex::new(r#"<img\s+[^>]*/?>"#).unwrap()
+    });
+
+    let matches: Vec<(usize, usize)> = re
+        .find_iter(page_text)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+
+    if matches.is_empty() {
+        return page_text.to_string();
+    }
+
+    // Group adjacent img tags: merge consecutive tags where the text between
+    // them is short (sub-figure labels, whitespace, etc.)
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut grp_start = matches[0].0;
+    let mut grp_end = matches[0].1;
+
+    for i in 1..matches.len() {
+        let between = &page_text[grp_end..matches[i].0];
+        let between_trimmed = between.trim();
+        if between_trimmed.len() <= 20 {
+            grp_end = matches[i].1;
+        } else {
+            groups.push((grp_start, grp_end));
+            grp_start = matches[i].0;
+            grp_end = matches[i].1;
+        }
+    }
+    groups.push((grp_start, grp_end));
+
+    // Replace each group with one pre-extracted image (matched in order).
+    let mut result = String::new();
+    let mut last = 0usize;
+    let mut img_cursor = 0usize;
+
+    for (grp_start, grp_end) in groups {
+        result.push_str(&page_text[last..grp_start]);
+
+        if img_cursor < page_extracted_images.len() {
+            let idx = images.len();
+            images.push(page_extracted_images[img_cursor].clone());
+            result.push_str(&format!("![](xdoc-img://{})", idx));
+            img_cursor += 1;
+        }
+
+        last = grp_end;
+    }
+    result.push_str(&page_text[last..]);
+    result
+}
+
+/// Converts an entire PDF to a Word (.docx) or Markdown (.md) file using the
+/// active end-to-end OCR model, preserving layout (headings, tables, formulas).
+#[tauri::command]
+pub(crate) async fn convert_pdf_document(
+    app: AppHandle,
+    file_path: String,
+    format: String,
+    output_path: String,
+    state: State<'_, OcrState>,
+) -> Result<String, String> {
+    let (engine, model_id, model_root) = {
+        let engine = *state.active_engine.lock().unwrap();
+        let model_id = state.active_model_id.lock().unwrap().clone()
+            .ok_or("OCR 未初始化，请先在设置中启用 OCR 并选择端到端模型")?;
+        let model_root = state.model_root.lock().unwrap().clone()
+            .ok_or("OCR 未初始化，请先在设置中启用 OCR 并选择端到端模型")?;
+        (engine, model_id, model_root)
+    };
+
+    if engine != OcrEngine::Gguf {
+        return Err("当前 OCR 引擎不支持整页文档转换，请选择端到端 GGUF 模型".to_string());
+    }
+    let model_cfg = ocr_models::find_gguf_model(&model_id)
+        .ok_or_else(|| format!("未知的 GGUF 模型: {}", model_id))?;
+    if !model_cfg.end_to_end {
+        return Err(format!(
+            "当前模型 “{}” 不是端到端模型，无法保留布局转换。请在设置中选择端到端 OCR 模型（如 OvisOCR2 / Qianfan-OCR）。",
+            model_cfg.label
+        ));
+    }
+
+    let path = Path::new(&file_path);
+    if !path.exists() { return Err("文件不存在".to_string()); }
+
+    // Render the first page to obtain the total page count.
+    let (_first_img, _idx, total_pages) = render_pdf_page(path, 0)?;
+
+    // Pre-extract embedded images from PDF using pdfium API (complete, unsplit).
+    let extracted_by_page: HashMap<u32, Vec<Vec<u8>>> = {
+        use base64::Engine;
+        let mut map: HashMap<u32, Vec<Vec<u8>>> = HashMap::new();
+        if let Ok(pdf_images) = super::pdf::extract_pdf_images(&file_path, None) {
+            for info in pdf_images {
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&info.image_base64) {
+                    map.entry(info.page_index).or_default().push(bytes);
+                }
+            }
+        }
+        map
+    };
+
+    let temp_dir = env::temp_dir();
+    let mut full_markdown = String::new();
+    let want_images = matches!(format.as_str(), "docx" | "word" | "markdown" | "md");
+    let mut images: Vec<Vec<u8>> = Vec::new();
+
+    for page_index in 0..total_pages {
+        let _ = app.emit("ocr-convert-progress", ConvertProgress {
+            page: page_index,
+            total_pages,
+            status: "recognizing".to_string(),
+            message: format!("正在识别第 {}/{} 页...", page_index + 1, total_pages),
+        });
+
+        let (image, _actual, _count) = render_pdf_page(path, page_index)?;
+        let temp_path = temp_dir.join(format!("xdoc_convert_p{}.png", page_index));
+        image.save(&temp_path).map_err(|e| format!("保存临时图片失败: {e}"))?;
+
+        let page_text = {
+            let start = Instant::now();
+            let guard = loop {
+                match state.gguf_backend.try_lock() {
+                    Ok(g) => break g,
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        if start.elapsed() > Duration::from_secs(30) {
+                            let _ = std::fs::remove_file(&temp_path);
+                            return Err("OCR 后端正忙（可能正在索引），请稍后再试".to_string());
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    Err(std::sync::TryLockError::Poisoned(e)) => return Err(format!("Mutex poisoned: {e}")),
+                }
+            };
+            let mut guard = guard;
+            let backend = guard.as_mut().ok_or("GGUF backend not initialized")?;
+            let app_ref = &app;
+            backend
+                .infer_streaming(&model_root, model_cfg, &temp_path, &mut |piece: &str| {
+                    let _ = app_ref.emit("ocr-convert-token", OcrStreamToken { piece: piece.to_string() });
+                })
+                .map_err(|e| format!("OCR 识别失败: {e}"))?
+                .text
+        };
+
+        let _ = std::fs::remove_file(&temp_path);
+        let page_text = clean_special_tokens(&page_text);
+
+        if page_index > 0 { full_markdown.push_str("\n\n---\n\n"); }
+
+        if want_images {
+            let page_imgs = extracted_by_page.get(&page_index).map(|v| v.as_slice()).unwrap_or(&[]);
+            let page_text =
+                replace_img_tags_with_placeholders(&page_text, page_imgs, &mut images);
+            full_markdown.push_str(page_text.trim());
+        } else {
+            full_markdown.push_str(page_text.trim());
+        }
+    }
+
+    let _ = app.emit("ocr-convert-progress", ConvertProgress {
+        page: total_pages,
+        total_pages,
+        status: "writing".to_string(),
+        message: "正在生成文档...".to_string(),
+    });
+
+    let out = Path::new(&output_path);
+    match format.as_str() {
+        "markdown" | "md" | "txt" => {
+            let md = write_markdown_images(&full_markdown, &images, out)?;
+            std::fs::write(out, &md).map_err(|e| format!("写入文件失败: {e}"))?;
+        }
+        "docx" | "word" => {
+            crate::docx_export::markdown_to_docx(&full_markdown, &images, out)?;
+        }
+        other => return Err(format!("不支持的输出格式: {}", other)),
+    }
+
+    let _ = app.emit("ocr-convert-progress", ConvertProgress {
+        page: total_pages,
+        total_pages,
+        status: "completed".to_string(),
+        message: "转换完成".to_string(),
+    });
+
+    Ok(output_path)
+}
+
+/// Write extracted images as sidecar PNG files next to the Markdown output and
+/// rewrite `xdoc-img://N` placeholders into relative image links.
+fn write_markdown_images(
+    markdown: &str,
+    images: &[Vec<u8>],
+    out: &Path,
+) -> Result<String, String> {
+    if images.is_empty() {
+        return Ok(markdown.to_string());
+    }
+    let stem = out
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("document");
+    let dir_name = format!("{stem}_images");
+    let img_dir = out
+        .parent()
+        .map(|p| p.join(&dir_name))
+        .unwrap_or_else(|| PathBuf::from(&dir_name));
+    std::fs::create_dir_all(&img_dir).map_err(|e| format!("创建图片目录失败: {e}"))?;
+
+    let mut result = markdown.to_string();
+    for (idx, bytes) in images.iter().enumerate() {
+        let filename = format!("image{idx}.png");
+        let file_path = img_dir.join(&filename);
+        std::fs::write(&file_path, bytes).map_err(|e| format!("写入图片失败: {e}"))?;
+        let rel = format!("{dir_name}/{filename}");
+        result = result.replace(&format!("xdoc-img://{idx}"), &rel);
+    }
+    Ok(result)
+}
+
 #[tauri::command]
 pub(crate) async fn download_ocr_models(
     app: tauri::AppHandle,
@@ -460,6 +699,7 @@ pub(crate) async fn list_ocr_models() -> Result<Vec<OcrModelInfo>, String> {
             id: m.id.to_string(), label: m.label.to_string(),
             engine: "gguf".to_string(), description: m.description.to_string(),
             params: m.params.to_string(), downloaded,
+            end_to_end: m.end_to_end,
             repo_dir,
         });
     }
@@ -471,6 +711,7 @@ pub(crate) async fn list_ocr_models() -> Result<Vec<OcrModelInfo>, String> {
             id: m.id.to_string(), label: m.label.to_string(),
             engine: "ppocrv6".to_string(), description: m.description.to_string(),
             params: m.params.to_string(), downloaded,
+            end_to_end: false,
             repo_dir: m.id.to_string(),
         });
     }
