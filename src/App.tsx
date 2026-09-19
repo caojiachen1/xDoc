@@ -78,6 +78,271 @@ import "./App.css";
 // Register pdfjs worker on global scope (fake-worker mode for Tauri webview)
 (globalThis as Record<string, unknown>).pdfjsWorker = pdfjsWorker;
 
+// ════════════════════════════════════════════════════════════════════════════
+// PDF character-level selection model (PDFium-style, geometry-based)
+//
+// The native DOM selection cannot be used here: pdf.js emits text spans in
+// content-stream order, which frequently differs from visual order (columns,
+// captions, headers). A native selection is the contiguous DOM range between
+// anchor and focus, so one slightly-far drag can swallow whole visually
+// unrelated regions. Instead we build our own index: one entry per character,
+// with its exact rect measured by the browser (Range.getClientRects), grouped
+// into visual line fragments and ordered by reading order. A selection is
+// simply the character run between two boundaries in that order — bounded by
+// construction, per-character precise, and direction-agnostic (up-drags and
+// down-drags are the same symmetric run).
+// ════════════════════════════════════════════════════════════════════════════
+
+type PdfCharEntry = {
+  node: Text;
+  offset: number; // character index within its text node
+  str: string;
+  left: number; top: number; right: number; bottom: number; // layer-relative
+  height: number;
+  centerY: number;
+  domIndex: number; // text-node order in the layer (≈ content-stream order)
+  fragment: number; // assigned during line clustering
+};
+
+type PdfFragment = {
+  chars: PdfCharEntry[]; // DOM order (logical text order)
+  boundaries: number[]; // x of every char boundary, ascending (length = chars + 1)
+  top: number; bottom: number; centerY: number; height: number;
+  left: number; right: number;
+  flatStart: number; // index of first char in the model's flat array
+  minDomIndex: number;
+  // Highlight band: font bounding boxes (ascent+descent) are often taller than
+  // the PDF's actual line pitch, so raw top/bottom would make highlights of
+  // adjacent lines overlap. These are clipped against vertically overlapping
+  // neighbors (midpoint split) so highlight rects never overlap.
+  dispTop: number;
+  dispBottom: number;
+};
+
+type PdfCharModel = {
+  fragments: PdfFragment[]; // reading order
+  flat: PdfCharEntry[]; // all chars in reading order
+};
+
+function buildPdfCharModel(layer: HTMLElement): PdfCharModel | null {
+  const layerRect = layer.getBoundingClientRect();
+  const chars: PdfCharEntry[] = [];
+
+  const walker = document.createTreeWalker(layer, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  let domIndex = 0;
+  let node: Node | null;
+  while ((node = walker.nextNode())) {
+    const textNode = node as Text;
+    const data = textNode.data;
+    let prevRight = 0;
+    let lastTop = 0;
+    let lastBottom = 1;
+    for (let i = 0; i < data.length; i++) {
+      range.setStart(textNode, i);
+      range.setEnd(textNode, i + 1);
+      const rects = range.getClientRects();
+      let left: number, right: number, top: number, bottom: number;
+      if (rects.length > 0) {
+        left = Infinity; right = -Infinity; top = Infinity; bottom = -Infinity;
+        for (let k = 0; k < rects.length; k++) {
+          const q = rects[k];
+          if (q.left < left) left = q.left;
+          if (q.right > right) right = q.right;
+          if (q.top < top) top = q.top;
+          if (q.bottom > bottom) bottom = q.bottom;
+        }
+      } else {
+        const g = range.getBoundingClientRect();
+        if (g.width > 0 || g.height > 0) {
+          left = g.left; right = g.right; top = g.top; bottom = g.bottom;
+        } else {
+          // Zero-advance char: keep the previous position so ordering holds
+          left = prevRight; right = prevRight; top = lastTop; bottom = lastBottom;
+        }
+      }
+      const l = left - layerRect.left;
+      const r = Math.max(right - layerRect.left, l);
+      const t = top - layerRect.top;
+      const b = Math.max(bottom - layerRect.top, t + 1);
+      chars.push({
+        node: textNode, offset: i, str: data[i],
+        left: l, right: r, top: t, bottom: b,
+        height: b - t, centerY: (t + b) / 2, domIndex, fragment: -1,
+      });
+      prevRight = r; lastTop = t; lastBottom = b;
+    }
+    domIndex++;
+  }
+  try { range.detach(); } catch { /* noop */ }
+
+  if (chars.length === 0) return { fragments: [], flat: [] };
+
+  const byY = [...chars].sort((a, b) => a.centerY - b.centerY || a.left - b.left);
+
+  // Cluster into visual line bands (superscripts/subscripts stay on their line)
+  const bands: PdfCharEntry[][] = [];
+  let bandMean = byY[0].centerY;
+  let bandH = byY[0].height;
+  let cur: PdfCharEntry[] = [byY[0]];
+  for (let i = 1; i < byY.length; i++) {
+    const c = byY[i];
+    const tol = Math.max(3, Math.max(c.height, bandH) * 0.6);
+    if (c.centerY - bandMean > tol) {
+      bands.push(cur);
+      cur = [c];
+      bandMean = c.centerY;
+      bandH = c.height;
+    } else {
+      cur.push(c);
+      bandMean = (bandMean * (cur.length - 1) + c.centerY) / cur.length;
+      bandH = Math.max(bandH, c.height);
+    }
+  }
+  bands.push(cur);
+
+  // Split each band into fragments at large horizontal gaps (column gutters)
+  const widths = chars.map(c => c.right - c.left).sort((a, b) => a - b);
+  const medianW = widths[Math.floor(widths.length / 2)] || 4;
+  const gapThr = Math.max(6, medianW * 2.5);
+
+  const makeFragment = (group: PdfCharEntry[]): PdfFragment => {
+    const sxg = [...group].sort((a, b) => a.left - b.left || a.domIndex - b.domIndex);
+    const boundaries: number[] = [sxg[0].left];
+    for (let i = 1; i < sxg.length; i++) boundaries.push((sxg[i - 1].right + sxg[i].left) / 2);
+    boundaries.push(sxg[sxg.length - 1].right);
+    let top = Infinity, bottom = -Infinity, left = Infinity, right = -Infinity, minDom = Infinity;
+    for (const c of group) {
+      if (c.top < top) top = c.top;
+      if (c.bottom > bottom) bottom = c.bottom;
+      if (c.left < left) left = c.left;
+      if (c.right > right) right = c.right;
+      if (c.domIndex < minDom) minDom = c.domIndex;
+    }
+    const charsDom = [...group].sort((a, b) => a.domIndex - b.domIndex || a.offset - b.offset);
+    return {
+      chars: charsDom, boundaries,
+      top, bottom, centerY: (top + bottom) / 2, height: Math.max(bottom - top, 1),
+      left, right, flatStart: 0, minDomIndex: minDom,
+      dispTop: top, dispBottom: bottom,
+    };
+  };
+
+  const fragments: PdfFragment[] = [];
+  for (const band of bands) {
+    const sx = [...band].sort((a, b) => a.left - b.left || a.domIndex - b.domIndex);
+    let group: PdfCharEntry[] = [sx[0]];
+    for (let i = 1; i < sx.length; i++) {
+      if (sx[i].left - group[group.length - 1].right > gapThr) {
+        fragments.push(makeFragment(group));
+        group = [sx[i]];
+      } else {
+        group.push(sx[i]);
+      }
+    }
+    fragments.push(makeFragment(group));
+  }
+
+  // Reading order: content-stream order of each fragment's first char.
+  // Column-major PDFs (two-column papers) keep each column contiguous.
+  fragments.sort((a, b) => a.minDomIndex - b.minDomIndex);
+
+  // Clip highlight bands: for every pair of fragments that overlaps both
+  // vertically and horizontally (adjacent lines in the same column), split the
+  // vertical overlap at its midpoint so their highlight rects stay flush.
+  for (let i = 0; i < fragments.length; i++) {
+    const a = fragments[i];
+    for (let j = i + 1; j < fragments.length; j++) {
+      const b = fragments[j];
+      if (a.right <= b.left || b.right <= a.left) continue; // different columns
+      const ovTop = Math.max(a.top, b.top);
+      const ovBottom = Math.min(a.bottom, b.bottom);
+      if (ovBottom <= ovTop) continue; // no vertical overlap
+      const upper = a.centerY <= b.centerY ? a : b;
+      const lower = upper === a ? b : a;
+      const mid = (ovTop + ovBottom) / 2;
+      if (mid < upper.dispBottom) upper.dispBottom = mid;
+      if (mid > lower.dispTop) lower.dispTop = mid;
+    }
+  }
+
+  const flat: PdfCharEntry[] = [];
+  fragments.forEach((f, fi) => {
+    f.flatStart = flat.length;
+    for (const c of f.chars) {
+      c.fragment = fi;
+      flat.push(c);
+    }
+  });
+
+  return { fragments, flat };
+}
+
+// Map a layer-relative point to a boundary index in the flat array.
+// Nearest line fragment by vertical distance (horizontal out-of-range adds a
+// small penalty so the pointer's column wins on ties), then nearest char
+// boundary by x within that fragment.
+function resolvePdfPosition(model: PdfCharModel, x: number, y: number): number {
+  let best: PdfFragment | null = null;
+  let bestD = Infinity;
+  for (const f of model.fragments) {
+    const dy = Math.abs(f.centerY - y);
+    const dx = x < f.left ? f.left - x : x > f.right ? x - f.right : 0;
+    const d = dy + dx * 0.25;
+    if (d < bestD) { bestD = d; best = f; }
+  }
+  if (!best) return 0;
+  let k = 0;
+  let bd = Infinity;
+  for (let i = 0; i < best.boundaries.length; i++) {
+    const d = Math.abs(best.boundaries[i] - x);
+    if (d < bd) { bd = d; k = i; }
+  }
+  return best.flatStart + k;
+}
+
+// Serialize the run [lo, hi) with PDF-friendly line breaks and inter-span spaces
+function pdfRunText(model: PdfCharModel, lo: number, hi: number): string {
+  let text = "";
+  let prev: PdfCharEntry | null = null;
+  for (let i = lo; i < hi; i++) {
+    const c = model.flat[i];
+    if (prev) {
+      const sameLine = Math.abs(c.centerY - prev.centerY) < Math.max(prev.height, c.height) * 0.6;
+      if (!sameLine) text += "\n";
+      else if (c.node !== prev.node && c.left - prev.right > 3) text += " ";
+    }
+    text += c.str;
+    prev = c;
+  }
+  return text;
+}
+
+// One highlight rect per line fragment covered by the run [lo, hi).
+// Height comes from the selected chars only, so taller neighbors on the same
+// line (sub/superscripts, brackets) don't inflate the highlight.
+function pdfRunRects(model: PdfCharModel, lo: number, hi: number): Array<{ left: number; top: number; width: number; height: number }> {
+  const out: Array<{ left: number; top: number; width: number; height: number }> = [];
+  for (const f of model.fragments) {
+    const s = Math.max(lo, f.flatStart);
+    const e = Math.min(hi, f.flatStart + f.chars.length);
+    if (e <= s) continue;
+    let L = Infinity, R = -Infinity, T = Infinity, B = -Infinity;
+    for (let i = s; i < e; i++) {
+      const c = model.flat[i];
+      if (c.left < L) L = c.left;
+      if (c.right > R) R = c.right;
+      if (c.top < T) T = c.top;
+      if (c.bottom > B) B = c.bottom;
+    }
+    // Clamp to the fragment's overlap-free band
+    T = Math.max(T, f.dispTop);
+    B = Math.min(B, f.dispBottom);
+    if (R > L) out.push({ left: L, top: T, width: R - L, height: Math.max(B - T, 1) });
+  }
+  return out;
+}
+
 function App() {
   // ── Local state (not managed by hooks) ─────────────────────────────────────
   const [environmentReady, setEnvironmentReady] = useState(false);
@@ -108,18 +373,20 @@ function App() {
   const textLayerInstanceRef = useRef<any>(null);
   const mainLayoutRef = useRef<HTMLDivElement>(null);
 
-  // ── PDF custom text selection state ────────────────────────────────────────
-  const pdfTextItemsRef = useRef<any[]>([]);
-  const pdfSelectionRef = useRef<{ startX: number; startY: number; endX: number; endY: number } | null>(null);
-  const pdfSelectingRef = useRef(false);
-  const pdfSelectionStartRef = useRef<{ x: number; y: number } | null>(null);
-  const pdfDragStartXRef = useRef(0); // Original drag start X (for first line left boundary)
-  const pdfDragStartYRef = useRef(0); // Original drag start Y (for first line identification)
+  // ── PDF text selection state (geometry-based, PDFium-style) ───────────────
   const pdfSelectedTextRef = useRef("");
+  const pdfCharModelRef = useRef<PdfCharModel | null>(null);
+  const pdfSelectionDragRef = useRef<{
+    pointerId: number;
+    active: boolean;
+    startX: number;
+    startY: number;
+    anchor: number;
+    focus: number;
+  } | null>(null);
+  const pdfLastAnchorRef = useRef<number | null>(null);
+  const pdfLastClickRef = useRef<{ t: number; x: number; y: number } | null>(null);
   const pdfSelectionOverlayRef = useRef<HTMLDivElement>(null);
-  const pdfViewportScaleRef = useRef(1);
-  const pdfPageHRef = useRef(0);
-  const pdfViewportRef = useRef<any>(null);
   const layoutBoxesRef = useRef<LayoutBox[]>([]);
   const DRAG_THRESHOLD = 3;
 
@@ -184,444 +451,194 @@ function App() {
     }, 4000);
   });
 
-  // ── PDF selection coordinate helpers ──────────────────────────────────────
-  const pdfToSelectionCoords = useCallback((e: React.PointerEvent) => {
-    const container = textLayerRef.current;
-    if (!container) return { x: 0, y: 0 };
-    const rect = container.getBoundingClientRect();
-    return {
-      x: e.clientX - rect.left,
-      y: e.clientY - rect.top,
-    };
+  // ── PDF text selection: pointer-driven, geometry-based (PDFium-style) ─────
+  const ensurePdfCharModel = useCallback((): PdfCharModel | null => {
+    if (pdfCharModelRef.current) return pdfCharModelRef.current;
+    const layer = textLayerRef.current;
+    if (!layer) return null;
+    const model = buildPdfCharModel(layer);
+    pdfCharModelRef.current = model;
+    return model;
   }, []);
 
-  // ── PDF selection hit-testing ─────────────────────────────────────────────
-  const hitTestTextItems = useCallback((_selRect: { x: number; y: number; w: number; h: number }) => {
-    const items = pdfTextItemsRef.current;
-    if (!items || items.length === 0) return [];
-
-    const scale = pdfViewportScaleRef.current;
-    const pageH = pdfPageHRef.current;
-    if (scale <= 0 || pageH <= 0) return [];
-
-    // Use RAW start/end from pdfSelectionRef — preserves drag direction
-    const sel = pdfSelectionRef.current;
-    if (!sel) return [];
-
-    const rawStartX = sel.startX / scale;
-    const rawStartY = sel.startY / scale;
-    const rawEndX = sel.endX / scale;
-    const rawEndY = sel.endY / scale;
-
-    // Bounding box for vertical range detection
-    const selTop = Math.min(rawStartY, rawEndY);
-    const selBottom = Math.max(rawStartY, rawEndY);
-
-    // Compute average line height from items for threshold
-    let avgH = 12;
-    let hCount = 0;
-    for (const item of items) {
-      if (item.transform) {
-        avgH += item.height || Math.abs(item.transform[3]) || 10;
-        hCount++;
+  const renderPdfRun = useCallback((model: PdfCharModel, lo: number, hi: number) => {
+    const rects = pdfRunRects(model, lo, hi);
+    const overlay = pdfSelectionOverlayRef.current;
+    if (overlay) {
+      overlay.innerHTML = "";
+      for (const r of rects) {
+        const div = document.createElement("div");
+        div.className = "pdf-selection-highlight";
+        div.style.left = `${r.left}px`;
+        div.style.top = `${r.top}px`;
+        div.style.width = `${r.width}px`;
+        div.style.height = `${r.height}px`;
+        overlay.appendChild(div);
       }
     }
-    if (hCount > 0) avgH /= hCount;
-    const isMultiLine = selBottom - selTop > avgH;
-
-    // ── Find the text block (layout box) ──
-    let blockLeft = 0;
-    let blockRight = Math.max(rawStartX, rawEndX);
-
-    const lxBoxes = layoutBoxesRef.current;
-    if (lxBoxes.length > 0) {
-      const cx = (rawStartX + rawEndX) / 2;
-      const cy = (rawStartY + rawEndY) / 2;
-      const sxScale = zoom.scale.x || 1;
-      const syScale = zoom.scale.y || 1;
-
-      let found = false;
-      for (const box of lxBoxes) {
-        const bL = box.xmin * sxScale / scale;
-        const bT = box.ymin * syScale / scale;
-        const bR = box.xmax * sxScale / scale;
-        const bB = box.ymax * syScale / scale;
-        if (cx >= bL && cx <= bR && cy >= bT && cy <= bB) {
-          blockLeft = bL; blockRight = bR; found = true; break;
-        }
-      }
-      if (!found) {
-        let bestDist = Infinity;
-        for (const box of lxBoxes) {
-          const bL = box.xmin * sxScale / scale;
-          const bR = box.xmax * sxScale / scale;
-          const bT = box.ymin * syScale / scale;
-          const bB = box.ymax * syScale / scale;
-          const dist = Math.hypot(cx - (bL + bR) / 2, cy - (bT + bB) / 2);
-          if (dist < bestDist) { bestDist = dist; blockLeft = bL; blockRight = bR; }
-        }
-      }
+    if (rects.length === 0) return null;
+    let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
+    for (const r of rects) {
+      if (r.left < L) L = r.left;
+      if (r.top < T) T = r.top;
+      if (r.left + r.width > R) R = r.left + r.width;
+      if (r.top + r.height > B) B = r.top + r.height;
     }
+    return { x: L, y: T, w: R - L, h: B - T };
+  }, []);
 
-    // ── Build item data: match DOM spans (visual position) to textContent items (text) ──
-    type ItemD = { str: string; xPdf: number; yPdf: number; wPdf: number; hPdf: number; yTopPdf: number; spanEl: HTMLSpanElement | null };
-    const allItems: ItemD[] = [];
+  const applyPdfRun = useCallback((model: PdfCharModel, lo: number, hi: number) => {
+    const text = hi > lo ? pdfRunText(model, lo, hi) : "";
+    pdfSelectedTextRef.current = text;
+    setTextModeSelectedText(text);
+    renderPdfRun(model, lo, hi);
+  }, [renderPdfRun]);
 
-    // Read rendered span positions from DOM
-    const container = textLayerRef.current;
-    const containerRect = container?.getBoundingClientRect();
-    const domSpans: Array<{ el: HTMLSpanElement; xPdf: number; yPdf: number; wPdf: number; hPdf: number }> = [];
+  const showPdfMenuForRun = useCallback((runRect: { x: number; y: number; w: number; h: number }, text: string) => {
+    const layer = textLayerRef.current;
+    const wrapEl = layer?.parentElement;
+    if (!layer || !wrapEl) return;
+    const wrapRect = wrapEl.getBoundingClientRect();
+    const menuW = 260;
+    const menuH = 40;
+    let menuX = runRect.x + runRect.w / 2 - menuW / 2;
+    let menuY = runRect.y - menuH - 12;
+    menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
+    if (menuY < 4) menuY = runRect.y + runRect.h + 4;
+    menuY = Math.max(4, menuY);
+    aiChat.setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
+  }, [aiChat.setPdfFloatingMenu]);
 
-    if (container && containerRect) {
-      const spans = container.querySelectorAll(
-        ":scope > span:not(.markedContent), :scope > .markedContent > span:not(.markedContent)"
-      );
-      spans.forEach((span) => {
-        const spanEl = span as HTMLSpanElement;
-        const rect = spanEl.getBoundingClientRect();
-        const xPdf = (rect.left - containerRect.left) / scale;
-        const yPdf = (rect.top - containerRect.top) / scale;
-        const wPdf = rect.width / scale;
-        const hPdf = rect.height / scale;
-        if (wPdf > 0 && hPdf > 0) domSpans.push({ el: spanEl, xPdf, yPdf, wPdf, hPdf });
-      });
-    }
+  const layerRelativePos = useCallback((clientX: number, clientY: number) => {
+    const rect = textLayerRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }, []);
 
-    // Match each textContent item to the closest DOM span by position
-    for (const item of items) {
-      if (!item.str || !item.transform) continue;
-      const tx = item.transform;
-      const itemX = tx[4];
-      const itemY = tx[5];
-      const wPdf = item.width || 0;
-      const fontSize = Math.abs(tx[3]) || item.height || 10;
-      const itemYtop = pageH - itemY - fontSize;
-
-      // Find closest DOM span by center distance
-      let bestSpan: typeof domSpans[0] | null = null;
-      let bestDist = Infinity;
-      const itemCX = itemX + wPdf / 2;
-      const itemCY = itemYtop + fontSize / 2;
-
-      for (const sp of domSpans) {
-        const spCX = sp.xPdf + sp.wPdf / 2;
-        const spCY = sp.yPdf + sp.hPdf / 2;
-        const dist = Math.hypot(itemCX - spCX, itemCY - spCY);
-        if (dist < bestDist) { bestDist = dist; bestSpan = sp; }
-      }
-
-      if (bestSpan && bestDist < fontSize * 2) {
-        // Use DOM span's visual position (accurate) with item's text (correct)
-        allItems.push({
-          str: item.str,
-          xPdf: bestSpan.xPdf,
-          yPdf: bestSpan.yPdf,
-          wPdf: bestSpan.wPdf,
-          hPdf: bestSpan.hPdf,
-          yTopPdf: bestSpan.yPdf + bestSpan.hPdf,
-          spanEl: bestSpan.el,
-        });
-      } else {
-        // Fallback: compute from transform
-        const yPdf = pageH - itemY - fontSize;
-        allItems.push({ str: item.str, xPdf: itemX, yPdf, wPdf, hPdf: fontSize, yTopPdf: yPdf + fontSize, spanEl: null });
-      }
-    }
-
-    // ── Character-level selection ──
-    // Each text item → one highlight. Merge adjacent on same line.
-
-    // Find anchor items (closest to drag start/end) for first/last line detection
-    let anchorStartY = rawStartY;
-    let anchorStartH = avgH;
-    let bestStartDist = Infinity;
-    let anchorEndY = rawEndY;
-    let anchorEndH = avgH;
-    let bestEndDist = Infinity;
-    for (const it of allItems) {
-      const d1 = Math.abs(it.yPdf + it.hPdf / 2 - rawStartY);
-      const d2 = Math.abs(it.yPdf + it.hPdf / 2 - rawEndY);
-      if (d1 < bestStartDist) { bestStartDist = d1; anchorStartY = it.yPdf; anchorStartH = it.hPdf; }
-      if (d2 < bestEndDist) { bestEndDist = d2; anchorEndY = it.yPdf; anchorEndH = it.hPdf; }
-    }
-
-    const matched: Array<{ str: string; x: number; y: number; w: number; h: number; yPdf: number; hPdf: number }> = [];
-
-    for (const it of allItems) {
-      if (it.yTopPdf < selTop || it.yPdf > selBottom) continue;
-
-      let lineLeft: number;
-      let lineRight: number;
-
-      if (!isMultiLine) {
-        lineLeft = Math.min(rawStartX, rawEndX);
-        lineRight = Math.max(rawStartX, rawEndX);
-      } else {
-        // Compare item Y to fixed anchor Y (not rawStartY which can fall between lines)
-        const onFirstLine = Math.abs(it.yPdf - anchorStartY) < anchorStartH * 0.3;
-        const onLastLine = Math.abs(it.yPdf - anchorEndY) < anchorEndH * 0.3;
-
-        if (onFirstLine && !onLastLine) {
-          lineLeft = rawStartX;
-          lineRight = blockRight;
-        } else if (onLastLine) {
-          lineLeft = blockLeft;
-          lineRight = rawEndX;
-        } else {
-          lineLeft = blockLeft;
-          lineRight = blockRight;
-        }
-      }
-
-      const lMin = Math.min(lineLeft, lineRight);
-      const lMax = Math.max(lineLeft, lineRight);
-      if (it.xPdf + it.wPdf < lMin || it.xPdf > lMax) continue;
-
-      const chars = it.str.split("");
-      const n = chars.length;
-      if (n === 0) continue;
-
-      const charRects: Array<{ left: number; right: number }> = [];
-      if (it.spanEl && it.spanEl.firstChild && it.spanEl.firstChild.nodeType === Node.TEXT_NODE) {
-        const textNode = it.spanEl.firstChild as Text;
-        const range = document.createRange();
-        for (let i = 0; i < chars.length; i++) {
-          try {
-            range.setStart(textNode, i);
-            range.setEnd(textNode, i + 1);
-            const rect = range.getBoundingClientRect();
-            if (rect.width > 0) {
-              charRects.push({
-                left: (rect.left - containerRect!.left) / scale,
-                right: (rect.right - containerRect!.left) / scale,
-              });
-            } else {
-              const fallbackLeft = it.xPdf + (it.wPdf / n) * i;
-              const fallbackRight = fallbackLeft + (it.wPdf / n);
-              charRects.push({ left: fallbackLeft, right: fallbackRight });
-            }
-          } catch {
-            const fallbackLeft = it.xPdf + (it.wPdf / n) * i;
-            const fallbackRight = fallbackLeft + (it.wPdf / n);
-            charRects.push({ left: fallbackLeft, right: fallbackRight });
-          }
-        }
-        try { range.detach(); } catch { /* noop */ }
-      }
-
-      const charLeft = (idx: number) => charRects[idx]?.left ?? (it.xPdf + (it.wPdf / n) * idx);
-      const charRight = (idx: number) => charRects[idx]?.right ?? (it.xPdf + (it.wPdf / n) * (idx + 1));
-      const avgCharW = it.wPdf / n;
-
-      let firstIdx = -1;
-      let lastIdx = -1;
-      for (let i = 0; i < n; i++) {
-        const cLeft = charLeft(i);
-        const cRight = charRight(i);
-        const startTol = i === 0 ? Math.min(2, avgCharW * 0.35) : 0;
-        if (cRight > lMin - startTol && cLeft < lMax) {
-          if (firstIdx === -1) firstIdx = i;
-          lastIdx = i;
-        }
-      }
-      if (firstIdx === -1) continue;
-
-      const hl = charLeft(firstIdx);
-      const hr = charRight(lastIdx);
-      const hStr = chars.slice(firstIdx, lastIdx + 1).join("");
-      if (hStr.length === 0) continue;
-
-      // Merge with previous highlight if on the same visual line (no gap limit)
-      const prev = matched[matched.length - 1];
-      const sameLine = prev && Math.abs(prev.yPdf - it.yPdf) < Math.max(prev.hPdf, it.hPdf) * 0.6;
-      if (prev && sameLine) {
-        const gap = hl * scale - (prev.x + prev.w);
-        if (gap > 3) prev.str += " ";
-        
-        prev.w = hr * scale - prev.x;
-        prev.str += hStr;
-        prev.yPdf = Math.min(prev.yPdf, it.yPdf);
-        prev.hPdf = Math.max(prev.hPdf, it.hPdf);
-        prev.y = prev.yPdf * scale;
-        prev.h = prev.hPdf * scale + 3;
-      } else {
-        matched.push({
-          str: hStr,
-          x: hl * scale,
-          y: it.yPdf * scale,
-          w: (hr - hl) * scale,
-          h: it.hPdf * scale + 3,
-          yPdf: it.yPdf,
-          hPdf: it.hPdf,
-        });
-      }
-    }
-
-    // Strip internal fields from output
-    return matched.map(m => ({ str: m.str, x: m.x, y: m.y, w: m.w, h: m.h }));
-  }, [zoom.displaySize, zoom.scale]);
-
-  // ── PDF custom pointer event handlers ────────────────────────────────────
   const handlePdfPointerDown = useCallback((e: React.PointerEvent) => {
     if (e.button !== 0) return;
     if (annotations.annotationMode) return;
 
-    const pos = pdfToSelectionCoords(e);
-    pdfSelectedTextRef.current = "";
-    setTextModeSelectedText("");
-    pdfSelectionStartRef.current = pos;
-    pdfDragStartXRef.current = pos.x; // Remember exact drag start X for first line
-    pdfDragStartYRef.current = pos.y; // Remember exact drag start Y for first line
-    pdfSelectionRef.current = { startX: pos.x, startY: pos.y, endX: pos.x, endY: pos.y };
-    pdfSelectingRef.current = false;
+    const model = ensurePdfCharModel();
+    if (!model || model.flat.length === 0) return;
+    const pos0 = layerRelativePos(e.clientX, e.clientY);
+    if (!pos0) return;
 
-    if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
-    aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+    e.preventDefault(); // suppress the native DOM selection entirely
     window.getSelection()?.removeAllRanges();
-  }, [annotations.annotationMode, pdfToSelectionCoords, aiChat]);
+    try { textLayerRef.current?.setPointerCapture(e.pointerId); } catch { /* noop */ }
+
+    const now = performance.now();
+    const last = pdfLastClickRef.current;
+    const isDouble = !!last &&
+      now - last.t < 400 &&
+      Math.hypot(e.clientX - last.x, e.clientY - last.y) < 6;
+    pdfLastClickRef.current = { t: now, x: e.clientX, y: e.clientY };
+
+    const pos = resolvePdfPosition(model, pos0.x, pos0.y);
+
+    if (isDouble && !e.shiftKey) {
+      // Double-click → select the word under the cursor (within its fragment)
+      const frag = model.fragments.find(
+        f => pos >= f.flatStart && pos <= f.flatStart + f.chars.length
+      );
+      const fs = frag ? frag.flatStart : pos;
+      const fe = frag ? frag.flatStart + frag.chars.length : pos;
+      const ci = pos < fe ? pos : fe - 1;
+      if (ci >= fs && ci < fe && /\S/.test(model.flat[ci].str)) {
+        let lo = ci, hi = ci + 1;
+        while (lo > fs && /\S/.test(model.flat[lo - 1].str)) lo--;
+        while (hi < fe && /\S/.test(model.flat[hi].str)) hi++;
+        pdfLastAnchorRef.current = lo;
+        pdfSelectionDragRef.current = {
+          pointerId: e.pointerId, active: true,
+          startX: e.clientX, startY: e.clientY, anchor: lo, focus: hi,
+        };
+        applyPdfRun(model, lo, hi);
+        return;
+      }
+    }
+
+    const extend = e.shiftKey && pdfLastAnchorRef.current !== null;
+    const anchor = extend ? pdfLastAnchorRef.current! : pos;
+    if (!extend) {
+      pdfLastAnchorRef.current = pos;
+      pdfSelectedTextRef.current = "";
+      setTextModeSelectedText("");
+      if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
+    }
+
+    pdfSelectionDragRef.current = {
+      pointerId: e.pointerId,
+      active: extend, // shift+click applies immediately; a plain drag waits for movement
+      startX: e.clientX,
+      startY: e.clientY,
+      anchor,
+      focus: extend ? pos : anchor,
+    };
+    if (extend) applyPdfRun(model, Math.min(anchor, pos), Math.max(anchor, pos));
+  }, [annotations.annotationMode, ensurePdfCharModel, layerRelativePos, applyPdfRun]);
 
   const handlePdfPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!pdfSelectionStartRef.current) return;
+    const drag = pdfSelectionDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
 
-    const pos = pdfToSelectionCoords(e);
-    const start = pdfSelectionStartRef.current;
-    const dx = pos.x - start.x;
-    const dy = pos.y - start.y;
-
-    if (!pdfSelectingRef.current && Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
-
-    if (!pdfSelectingRef.current) {
-      pdfSelectingRef.current = true;
-      textLayerRef.current?.setPointerCapture(e.pointerId);
+    if (!drag.active) {
+      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD) return;
+      drag.active = true;
     }
 
-    e.preventDefault();
-
-    pdfSelectionRef.current = {
-      startX: start.x, startY: start.y,
-      endX: pos.x, endY: pos.y,
-    };
-
-    const rectX = Math.min(start.x, pos.x);
-    const rectY = Math.min(start.y, pos.y);
-    const rectW = Math.abs(dx);
-    const rectH = Math.abs(dy);
-
-    const matched = hitTestTextItems({ x: rectX, y: rectY, w: rectW, h: rectH });
-    const overlay = pdfSelectionOverlayRef.current;
-    if (overlay) {
-      overlay.innerHTML = "";
-      for (const item of matched) {
-        const div = document.createElement("div");
-        div.className = "pdf-selection-highlight";
-        div.style.left = `${item.x}px`;
-        div.style.top = `${item.y}px`;
-        div.style.width = `${item.w}px`;
-        div.style.height = `${item.h}px`;
-        overlay.appendChild(div);
-      }
-    }
-
-    // Build text in real-time for text mode paragraph pane
-    let text = "";
-    for (let i = 0; i < matched.length; i++) {
-      if (i > 0) {
-        const prevEnd = matched[i - 1].y + matched[i - 1].h;
-        const currStart = matched[i].y;
-        if (currStart > prevEnd + 2) {
-          text += "\n";
-        } else {
-          const gap = matched[i].x - (matched[i - 1].x + matched[i - 1].w);
-          if (gap > 3) text += " ";
-        }
-      }
-      text += matched[i].str;
-    }
-    setTextModeSelectedText(text);
-  }, [pdfToSelectionCoords, hitTestTextItems]);
+    const model = ensurePdfCharModel();
+    const pos0 = layerRelativePos(e.clientX, e.clientY);
+    if (!model || !pos0) return;
+    const pos = resolvePdfPosition(model, pos0.x, pos0.y);
+    drag.focus = pos;
+    applyPdfRun(model, Math.min(drag.anchor, pos), Math.max(drag.anchor, pos));
+  }, [ensurePdfCharModel, layerRelativePos, applyPdfRun]);
 
   const handlePdfPointerUp = useCallback((e: React.PointerEvent) => {
-    if (!pdfSelectingRef.current) {
-      pdfSelectionStartRef.current = null;
-      pdfSelectionRef.current = null;
+    const drag = pdfSelectionDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    pdfSelectionDragRef.current = null;
+    try { textLayerRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+
+    if (!drag.active) {
+      // Plain click without a drag (e.g. on blank space): the press already
+      // cleared the selection, so drop the floating menu with it. Runs only
+      // when nothing was highlighted, so it cannot disturb a real selection.
+      aiChat.setPdfFloatingMenu(prev => (prev.visible ? { ...prev, visible: false } : prev));
       return;
     }
 
-    pdfSelectingRef.current = false;
-    textLayerRef.current?.releasePointerCapture(e.pointerId);
-    pdfSelectionStartRef.current = null;
+    const model = ensurePdfCharModel();
+    if (!model) return;
 
-    const sel = pdfSelectionRef.current;
-    if (!sel) return;
-
-    const rectX = Math.min(sel.startX, sel.endX);
-    const rectY = Math.min(sel.startY, sel.endY);
-    const rectW = Math.abs(sel.endX - sel.startX);
-    const rectH = Math.abs(sel.endY - sel.startY);
-    const finalRect = { x: rectX, y: rectY, w: rectW, h: rectH };
-
-    const matched = hitTestTextItems(finalRect);
-    // Build text with proper line breaks and spacing
-    let text = "";
-    for (let i = 0; i < matched.length; i++) {
-      if (i > 0) {
-        const prevEnd = matched[i - 1].y + matched[i - 1].h;
-        const currStart = matched[i].y;
-        // Different line → newline; same line → space
-        if (currStart > prevEnd + 2) {
-          text += "\n";
-        } else {
-          // Same line: add space if there's a gap between highlights
-          const gap = matched[i].x - (matched[i - 1].x + matched[i - 1].w);
-          if (gap > 3) text += " ";
-        }
-      }
-      text += matched[i].str;
-    }
+    const lo = Math.min(drag.anchor, drag.focus);
+    const hi = Math.max(drag.anchor, drag.focus);
+    const text = hi > lo ? pdfRunText(model, lo, hi) : "";
     pdfSelectedTextRef.current = text;
     setTextModeSelectedText(text);
+    const runRect = renderPdfRun(model, lo, hi);
 
-    const overlay = pdfSelectionOverlayRef.current;
-    if (overlay) {
-      overlay.innerHTML = "";
-      for (const item of matched) {
-        const div = document.createElement("div");
-        div.className = "pdf-selection-highlight";
-        div.style.left = `${item.x}px`;
-        div.style.top = `${item.y}px`;
-        div.style.width = `${item.w}px`;
-        div.style.height = `${item.h}px`;
-        overlay.appendChild(div);
-      }
-    }
-
-    if (text.trim()) {
-      const wrapEl = textLayerRef.current?.parentElement;
-      if (!wrapEl) return;
-      const wrapRect = wrapEl.getBoundingClientRect();
-
-      const menuW = 260;
-      const menuH = 40;
-      let menuX = rectX + rectW / 2 - menuW / 2;
-      let menuY = rectY - menuH - 12;
-
-      menuX = Math.max(4, Math.min(menuX, wrapRect.width - menuW - 4));
-      if (menuY < 4) menuY = rectY + rectH + 4;
-      menuY = Math.max(4, menuY);
-
-      aiChat.setPdfFloatingMenu({ visible: true, x: menuX, y: menuY, selectedText: text });
+    if (text.trim() && runRect) {
+      showPdfMenuForRun(runRect, text);
     } else {
-      if (overlay) overlay.innerHTML = "";
-      aiChat.setPdfFloatingMenu(prev => prev.visible ? { ...prev, visible: false } : prev);
+      if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
+      aiChat.setPdfFloatingMenu(prev => (prev.visible ? { ...prev, visible: false } : prev));
     }
-  }, [hitTestTextItems, aiChat]);
+  }, [ensurePdfCharModel, renderPdfRun, showPdfMenuForRun, aiChat.setPdfFloatingMenu]);
+
+  const handlePdfPointerCancel = useCallback((e: React.PointerEvent) => {
+    const drag = pdfSelectionDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    pdfSelectionDragRef.current = null;
+    try { textLayerRef.current?.releasePointerCapture(e.pointerId); } catch { /* noop */ }
+  }, []);
 
   const clearPdfSelection = useCallback(() => {
-    pdfSelectionRef.current = null;
-    pdfSelectionStartRef.current = null;
-    pdfSelectingRef.current = false;
     pdfSelectedTextRef.current = "";
     setTextModeSelectedText("");
+    pdfLastAnchorRef.current = null;
     if (pdfSelectionOverlayRef.current) pdfSelectionOverlayRef.current.innerHTML = "";
   }, []);
 
@@ -985,6 +1002,7 @@ function App() {
     }
 
     let cancelled = false;
+    let modelTimer = 0;
     (async () => {
       try {
         const container = textLayerRef.current;
@@ -1016,10 +1034,16 @@ function App() {
         textLayerInstanceRef.current = textLayer;
         await textLayer.render();
         if (!cancelled) {
-          pdfTextItemsRef.current = textContent.items;
-          pdfViewportScaleRef.current = scale;
-          pdfPageHRef.current = baseViewport.height;
-          pdfViewportRef.current = viewport;
+          // Fresh layer content: drop selection-derived state and the char
+          // model of the previous render, then pre-build the new model in the
+          // background so the first drag doesn't pay the build cost.
+          pdfSelectedTextRef.current = "";
+          setTextModeSelectedText("");
+          pdfCharModelRef.current = null;
+          aiChat.setPdfFloatingMenu(prev => (prev.visible ? { ...prev, visible: false } : prev));
+          modelTimer = window.setTimeout(() => {
+            if (!cancelled) ensurePdfCharModel();
+          }, 150);
         }
       } catch (e) {
         if (!cancelled) console.warn("[TextLayer] render failed:", e);
@@ -1028,6 +1052,7 @@ function App() {
 
     return () => {
       cancelled = true;
+      if (modelTimer) window.clearTimeout(modelTimer);
       textLayerInstanceRef.current = null;
     };
   }, [selectMode, pdfPageIndex, zoom.displaySize.width, zoom.displaySize.height, isPdfSelected]);
@@ -1131,6 +1156,7 @@ function App() {
     const handleKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         aiChat.setPdfFloatingMenu({ visible: false, x: 0, y: 0, selectedText: "" });
+        window.getSelection()?.removeAllRanges();
         clearPdfSelection();
       }
     };
@@ -1140,7 +1166,7 @@ function App() {
       document.removeEventListener("mousedown", handleClick);
       document.removeEventListener("keydown", handleKey);
     };
-  }, [aiChat.pdfFloatingMenu.visible]);
+  }, [aiChat.pdfFloatingMenu.visible, clearPdfSelection]);
 
   useEffect(() => {
     if (selectMode !== "text" || !isPdfSelected || annotations.annotationMode) return;
@@ -1148,9 +1174,6 @@ function App() {
     const handleCopy = (e: ClipboardEvent) => {
       const selectedText = pdfSelectedTextRef.current;
       if (!selectedText.trim()) return;
-
-      const target = e.target as HTMLElement | null;
-      if (target && !target.closest(".pdf-text-layer")) return;
 
       e.preventDefault();
       if (e.clipboardData) {
@@ -2248,7 +2271,11 @@ function App() {
                           );
                         })}
                       </div>
-                      {/* PDF Text Layer — visible in text selection mode */}
+                      {/* PDF Text Layer — visible in text selection mode.
+                          Selection is computed from per-character rects
+                          (PDFium-style): bounded by the drag anchor/focus in
+                          reading order, so it can never swallow unrelated
+                          regions the way a native DOM range would. */}
                       {selectMode === "text" && (
                         <>
                           <div
@@ -2257,11 +2284,12 @@ function App() {
                             style={{
                               width: zoom.displaySize.width,
                               height: zoom.displaySize.height,
-                              pointerEvents: annotations.annotationMode ? "none" : "auto",
+                              pointerEvents: annotations.annotationMode || dragMode === "move" ? "none" : "auto",
                             }}
                             onPointerDown={handlePdfPointerDown}
                             onPointerMove={handlePdfPointerMove}
                             onPointerUp={handlePdfPointerUp}
+                            onPointerCancel={handlePdfPointerCancel}
                           />
                           <div
                             ref={pdfSelectionOverlayRef}

@@ -2375,7 +2375,7 @@
   text-size-adjust: none;
   transform-origin: 0 0;
   z-index: 2;
-  user-select: text;
+  user-select: none;
   cursor: text;
 }
 
@@ -2385,7 +2385,7 @@
   white-space: pre;
   cursor: text;
   transform-origin: 0% 0%;
-  user-select: text;
+  user-select: none;
 }
 
 /* Span font-size & transform — driven by pdfjs inline CSS vars */
@@ -2399,15 +2399,17 @@
   transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
 }
 
-/* Disable native selection — custom drag-to-select is used instead */
-.pdf-text-layer span::selection,
-.pdf-text-layer br::selection {
-  background: transparent !important;
+/* Native selection fully disabled — selection is computed geometrically from
+   per-character rects (PDFium-style) and painted by the overlay below. This
+   avoids the native DOM-range pathology where a drag swallows whole visually
+   unrelated regions (pdf.js span order ≠ visual order). */
+.pdf-text-layer ::selection {
+  background: transparent;
 }
 
-/* Custom selection overlay — rendered between text layer and annotation canvas.
-   z-index must be very high: pdfjs spans have CSS transform which creates
-   independent stacking contexts that paint above normal siblings. */
+/* Selection overlay — rendered above the text layer (pdfjs spans have CSS
+   transforms that create independent stacking contexts painting above normal
+   siblings, hence the very high z-index). */
 .pdf-selection-overlay {
   position: absolute;
   left: 0;
@@ -2420,7 +2422,7 @@
 
 .pdf-selection-highlight {
   position: absolute;
-  background: rgba(0, 100, 255, 0.25);
+  background: rgba(0, 100, 255, 0.3);
   border-radius: 1px;
   pointer-events: none;
 }
